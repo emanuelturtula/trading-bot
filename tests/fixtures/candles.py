@@ -1,4 +1,4 @@
-"""Seeded synthetic OHLCV candles for tests (spec 003, Design 4).
+"""Seeded synthetic OHLCV candles for tests (spec 003, Design 4; spec 004, Design 7).
 
 Frames are indexed by tz-aware UTC candle **open** times on the timeframe grid and have
 ``float64`` columns ``open, high, low, close, volume``. Randomness comes only from a local
@@ -18,6 +18,8 @@ from typing import Literal
 import numpy as np
 import numpy.typing as npt
 import pandas as pd
+
+from trading_bot.domain.timeframe import Timeframe
 
 type TimeframeCode = Literal["1h", "4h", "1d"]
 
@@ -41,7 +43,6 @@ ALL_SCENARIOS: tuple[Scenario, ...] = tuple(Scenario)
 
 type _BoolArray = npt.NDArray[np.bool_]
 
-_HOURS_PER_SLOT: dict[str, int] = {"1h": 1, "4h": 4, "1d": 24}
 _GAP_DROP_PROBABILITY = 0.03  # extra weekday slots dropped at random (holidays, halts)
 _FORCED_GAP_ROWS = 12  # trailing rows where a weekday gap is guaranteed and no event is placed
 _MAX_LOG_FACTOR = 50.0  # exp(50) exceeds MAX_PRICE / MIN_PRICE, so clipping it changes nothing
@@ -57,7 +58,7 @@ def synthetic_candles(
     *,
     seed: int = 0,
     scenario: Scenario | str = Scenario.RANDOM_WALK,
-    timeframe: TimeframeCode = "1d",
+    timeframe: Timeframe | TimeframeCode = "1d",
     start: str | pd.Timestamp = DEFAULT_START,
     start_price: float = 100.0,
     volatility: float = 0.02,
@@ -70,33 +71,47 @@ def synthetic_candles(
     - ``EXTREME``: a -90% candle, a +900% candle, a 1e12 volume spike and zero-volume candles.
     - ``MIXED``: all of the above.
 
-    Scenario features are guaranteed from ``FEATURE_MIN_CANDLES`` candles on. Injected events do
-    not depend on ``volatility``; ``volatility=0.0`` gives a constant path apart from them.
+    From ``FEATURE_MIN_CANDLES`` (60) candles on, the gap timestamps, flat runs, volume spike and
+    zero-volume candles are guaranteed for any parameters. The price features (the -90% and +900%
+    candles and the price jump after a gap) also need prices away from the ``[MIN_PRICE,
+    MAX_PRICE]`` clipping bounds and, for the jump, ``volatility > 0``. Fixed-seed tests check them
+    at the default ``start_price`` and ``volatility``, and property tests over drawn parameters
+    assert only the parameter-independent features.
+
+    Injected events do not depend on ``volatility``; ``volatility=0.0`` gives a constant path apart
+    from them. ``timeframe`` accepts ``Timeframe`` members as well as their codes.
     """
     if isinstance(n, bool) or not isinstance(n, int | np.integer):
         raise TypeError(f"n must be an int, got {n!r}")
     n = int(n)
     if n < 1:
         raise ValueError(f"n must be >= 1, got {n}")
-    if timeframe not in TIMEFRAMES:
-        raise ValueError(f"unknown timeframe {timeframe!r}; expected one of {TIMEFRAMES}")
+    frame_timeframe = _parse_timeframe(timeframe)
     kind = _parse_scenario(scenario)
     if not (math.isfinite(volatility) and volatility >= 0.0):
         raise ValueError(f"volatility must be a finite number >= 0, got {volatility!r}")
     if not MIN_PRICE <= start_price <= MAX_PRICE:
         raise ValueError(f"start_price must be in [{MIN_PRICE}, {MAX_PRICE}], got {start_price!r}")
-    first_open = _parse_start(start, timeframe)
+    first_open = _parse_start(start, frame_timeframe)
+    hours_per_slot = frame_timeframe.duration // timedelta(hours=1)
 
     rng = np.random.default_rng(seed)
     with_gaps = kind in (Scenario.GAPS, Scenario.MIXED)
-    slots = _gap_slots(rng, n, first_open, timeframe) if with_gaps else np.arange(n)
+    slots = _gap_slots(rng, n, first_open, hours_per_slot) if with_gaps else np.arange(n)
     gap_rows = np.zeros(n, dtype=np.bool_)
     gap_rows[1:] = np.diff(slots) > 1
     events = _Events(rng, n, kind, event_stop=n - _FORCED_GAP_ROWS if with_gaps else n)
     frame = _ohlcv(rng, n, start_price, volatility, gap_rows, events)
-    offsets = pd.to_timedelta(slots * _HOURS_PER_SLOT[timeframe], unit="h")
+    offsets = pd.to_timedelta(slots * hours_per_slot, unit="h")
     frame.index = pd.DatetimeIndex(first_open + offsets)
     return frame
+
+
+def _parse_timeframe(timeframe: Timeframe | str) -> Timeframe:
+    try:
+        return Timeframe(timeframe)
+    except ValueError:
+        raise ValueError(f"unknown timeframe {timeframe!r}; expected one of {TIMEFRAMES}") from None
 
 
 def _parse_scenario(scenario: Scenario | str) -> Scenario:
@@ -107,7 +122,7 @@ def _parse_scenario(scenario: Scenario | str) -> Scenario:
         raise ValueError(f"unknown scenario {scenario!r}; expected one of {expected}") from None
 
 
-def _parse_start(start: str | pd.Timestamp, timeframe: TimeframeCode) -> pd.Timestamp:
+def _parse_start(start: str | pd.Timestamp, timeframe: Timeframe) -> pd.Timestamp:
     try:
         timestamp = pd.Timestamp(start)
     except (TypeError, ValueError) as error:
@@ -119,17 +134,16 @@ def _parse_start(start: str | pd.Timestamp, timeframe: TimeframeCode) -> pd.Time
         or timestamp.tzname() != "UTC"
     ):
         raise ValueError(f"start must be a tz-aware UTC timestamp, got {start!r}")
-    duration = pd.Timedelta(hours=_HOURS_PER_SLOT[timeframe])
+    duration = pd.Timedelta(timeframe.duration)
     if timestamp != timestamp.floor(duration):
         raise ValueError(f"start must be an open time on the {timeframe} grid, got {start!r}")
     return timestamp.tz_convert("UTC")
 
 
 def _gap_slots(
-    rng: np.random.Generator, n: int, first_open: pd.Timestamp, timeframe: TimeframeCode
+    rng: np.random.Generator, n: int, first_open: pd.Timestamp, hours_per_slot: int
 ) -> npt.NDArray[np.int64]:
     """Grid slot of each row: weekends skipped, weekday slots dropped, one drop guaranteed."""
-    hours_per_slot = _HOURS_PER_SLOT[timeframe]
     week_hour = int(first_open.dayofweek) * 24 + int(first_open.hour)
 
     def is_weekday(slot: int) -> bool:

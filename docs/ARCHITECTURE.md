@@ -42,7 +42,7 @@ The user decides whether to trade. **There is no order execution layer** and one
 
 | Layer | Responsibility | Rules |
 |-------|----------------|-------|
-| `domain/` | Models (`Candle`, `Timeframe`, `Signal`, `Rule`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
+| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`; `Rule` in #6), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
 | `data/` | `MarketDataProvider` (Protocol) and `YFinanceProvider`: normalizes to UTC OHLCV, discards the open candle, retries with backoff | Never decides signals. Respects Yahoo's limits (intraday max. 60 days; 1h up to 730 days). |
 | `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → dedupe/cooldown → persistence → notification | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`. |
 | `scheduler/` | APScheduler (AsyncIOScheduler). One job per timeframe, fired at candle close + margin, only during market hours | A single instance per process. |
@@ -54,6 +54,73 @@ The user decides whether to trade. **There is no order execution layer** and one
 ## Process
 
 A single asyncio process (`uvicorn ... --workers 1`). The FastAPI lifespan starts and stops the scheduler and the Telegram poller. It is never scaled horizontally: a Telegram token allows a single poller (409 Conflict).
+
+## Domain models
+
+`domain/` is pure (`CLAUDE.md` rule 3). Import from its submodules: the package re-exports nothing, so consumers that only need `Signal` or `Timeframe` (Telegram, persistence, API) do not load pandas. Design and decisions: spec [004](specs/004-domain-models.md).
+
+### Timeframes
+
+`Timeframe` (`domain/timeframe.py`) is a `StrEnum` with the codes `1h`, `4h` and `1d`, the single spelling used in rule JSON, the API, Telegram, the CLI and the database. `Timeframe.parse(text)` only ignores surrounding whitespace: other letter cases (`1H`), aliases (`60m`, `daily`) and unsupported codes raise `UnknownTimeframeError` (a `ValueError`) whose message lists the valid codes. `duration` is the fixed candle length (`timedelta`).
+
+### Candle frames
+
+The candle model is a validated `pd.DataFrame`; there is no per-row class. `validate_candles(frame)` (`domain/candles.py`) returns the same frame, unmodified, or raises a `CandleValidationError` (`CandleIndexError`, `CandleColumnsError` or `CandleValuesError`, all `ValueError`) whose `kind`, `column`, `timestamp`, `position` and `count` locate the first failing check:
+
+- the index is a `DatetimeIndex` of candle **open** times in UTC (`"UTC"`, `datetime.UTC` or `ZoneInfo("UTC")`; not `Etc/UTC` or other zero-offset zones), with no `NaT`, unique and strictly increasing, in any unit and with any name;
+- the columns are exactly `open, high, low, close, volume`, all numpy `float64`;
+- every value is finite, prices are `> 0`, `volume >= 0`, `high >= low`, and `open` and `close` are within `[low, high]`;
+- empty frames are valid. Grid alignment, gaps and whether the last candle is closed are not checked.
+
+Every check is row-local or compares adjacent labels, so every prefix of a valid frame is valid. The validator never coerces: the data provider (#8) converts zones, renames columns, casts volume to `float64` and decides how to repair or drop bad rows, then validates.
+
+### Nominal candle close
+
+`timeframe.nominal_close(open_time)` is `open_time + duration` in UTC, without a calendar. It is the `candle_close_ts` of a signal: an **identifier** derived deterministically from the provider label, not a market fact. A real close from a calendar would change whenever calendar data is corrected, and so would the keys of signals already stored.
+
+For US equities (regular session 09:30–16:00 ET):
+
+| Timeframe | Bar label (yfinance) | Real close | Nominal close |
+|-----------|----------------------|------------|---------------|
+| `1h` | 09:30, 10:30, …, 15:30 ET | open + 1h, except the last bar: 16:00 ET (13:00 ET on half days) | always open + 1h: 16:30 ET for the last bar |
+| `4h` (#10 resample, session-aligned) | 09:30 and 13:30 ET | 13:30 and 16:00 ET | 13:30 and 17:30 ET |
+| `1d` | 00:00 ET of the session date (05:00 or 04:00 UTC) | 16:00 ET the same day | 00:00 ET the **next** day |
+
+Obligations for later work:
+
+- **Closedness and scheduling (#8, #9, #15):** never use `nominal_close` to decide whether a candle is closed or when to run. Use the real session closes of #9; with nominal closes the daily candle would count as open until about 05:00 UTC the next day and the last hourly bar would be missed.
+- **Label convention (#8, #10):** keys depend on provider labels. Fix the convention (open times; the `1d` label policy) before #13 persists signals. Changing it later requires migrating the stored keys, otherwise signals already notified can be sent again.
+- **Counting candles (#7, #14):** count by row position (`cooldown_bars`, crossovers), never with `(t2 - t1) / duration`, which is wrong across nights, weekends and holidays.
+- **Presentation (#17, #25):** do not show the nominal close as the market close; for `1d` it is midnight of the next day. Show the session date or the calendar close.
+
+### Signal identity
+
+`Signal` (`domain/signals.py`) is a frozen, keyword-only dataclass with `ticker`, `timeframe`, `rule_id`, `side` (`Side.BUY` or `Side.SELL`), `candle_close_ts`, `close_price` (a positive finite float) and `indicator_values` (a read-only mapping of finite floats). Its `idempotency_key` is a `SignalKey(ticker, timeframe, rule_id, candle_close_ts)` (rule 5), and `SignalKey` built directly validates the same way:
+
+- `ticker` goes through `normalize_ticker`: stripped, upper-cased, 1–32 printable ASCII characters without whitespace or `|`;
+- `rule_id` is an opaque, case-sensitive string of 1–64 such characters, never stripped;
+- `candle_close_ts` accepts any aware `datetime` (including `pd.Timestamp`) and is stored as a stdlib `datetime` in UTC through `to_utc`; naive values are rejected (rule 6);
+- `str(key)` is the canonical form `TICKER|timeframe|rule_id|close in ISO 8601`, stable across processes and used for logs;
+- `hash(key)` changes between processes (`PYTHONHASHSEED`): persist the key fields or `str(key)`, never `hash()`.
+
+```python
+from datetime import UTC, datetime
+
+from trading_bot.domain.signals import Side, Signal
+from trading_bot.domain.timeframe import Timeframe
+
+timeframe = Timeframe.parse(" 1d ")
+signal = Signal(
+    ticker=" aapl ",
+    timeframe=timeframe,
+    rule_id="42",
+    side=Side.BUY,
+    candle_close_ts=timeframe.nominal_close(datetime(2024, 1, 2, 5, 0, tzinfo=UTC)),
+    close_price=187.5,
+    indicator_values={"rsi_14": 28.4},
+)
+assert str(signal.idempotency_key) == "AAPL|1d|42|2024-01-03T05:00:00+00:00"
+```
 
 ## Rule model
 
@@ -194,7 +261,7 @@ Misuse of the harness (for example fewer than 2 candles or `ks` containing 0) ra
 
 ### Fixtures
 
-`synthetic_candles(n, seed=..., scenario=..., timeframe=...)` in `tests/fixtures/candles.py` generates seeded candles: tz-aware UTC candle open times on the `1h`/`4h`/`1d` grid and `float64` columns `open, high, low, close, volume`. Scenario features are guaranteed from `FEATURE_MIN_CANDLES` (60) candles on.
+`synthetic_candles(n, seed=..., scenario=..., timeframe=...)` in `tests/fixtures/candles.py` generates seeded candles: tz-aware UTC candle open times on the `1h`/`4h`/`1d` grid and `float64` columns `open, high, low, close, volume`. From `FEATURE_MIN_CANDLES` (60) candles on, the gap timestamps, flat runs, volume spike and zero-volume candles are guaranteed for any parameters. The price features (the −90% and +900% candles and the price jump after a gap) also need prices away from the `[1e-6, 1e9]` clipping bounds and, for the jump, `volatility > 0`. Fixed-seed tests check them at the default `start_price` and `volatility`, and property tests over drawn parameters assert only the parameter-independent features.
 
 | Scenario | What it stresses |
 |----------|------------------|
@@ -204,6 +271,7 @@ Misuse of the harness (for example fewer than 2 candles or `ks` containing 0) ra
 | `EXTREME` | A −90% candle, a +900% candle, a `1e12` volume spike and zero-volume candles (overflow and clipping) |
 | `MIXED` | All of the above at once |
 
+- `timeframe` (and `timeframes` in `candle_frames`) accepts `Timeframe` members as well as their codes. Shared assertions live in `tests/fixtures/candle_assertions.py`: `assert_valid_candles(candles, timeframe)` runs `validate_candles` plus the generator invariants (grid alignment and price bounds), and the scenario feature helpers raise `AssertionError` with a message.
 - `candle_frames(...)` in `tests/fixtures/strategies.py` is a Hypothesis strategy that draws generator parameters (size, scenario, timeframe, seed, start, start price, volatility). The `trading-bot` profile in `tests/conftest.py` runs 50 examples without a deadline and keeps Hypothesis' CI profile (derandomized, no example database) on CI.
 - Use frames longer than the warmup (and `min_size` above it for `candle_frames`); otherwise the check fails as `vacuous`. Property tests must only assert detection of cheats that do not depend on the data: `shift(-1)` is always detectable, but `close / close.max()` is not on a flat series.
 - Never assert golden values from the generator: numpy does not guarantee random streams across versions. Assert invariants and scenario features instead.

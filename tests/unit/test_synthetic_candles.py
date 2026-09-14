@@ -12,92 +12,31 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from tests.fixtures.candle_assertions import (
+    assert_has_extreme_features,
+    assert_has_extreme_volume_features,
+    assert_has_flat_run,
+    assert_has_gap_features,
+    assert_valid_candles,
+)
 from tests.fixtures.candles import (
     ALL_SCENARIOS,
     DEFAULT_START,
     FEATURE_MIN_CANDLES,
     MAX_PRICE,
     MIN_PRICE,
-    OHLCV_COLUMNS,
     TIMEFRAMES,
     Scenario,
     TimeframeCode,
     synthetic_candles,
 )
+from trading_bot.domain.timeframe import Timeframe
 
-DURATIONS = {"1h": pd.Timedelta(hours=1), "4h": pd.Timedelta(hours=4), "1d": pd.Timedelta(days=1)}
 FEATURE_SEEDS = (0, 1, 7, 2024)
 
 
-def assert_valid_candles(candles: pd.DataFrame, timeframe: str) -> None:
-    """Invariants every generated frame satisfies (AC10)."""
-    index = candles.index
-    assert isinstance(index, pd.DatetimeIndex)
-    assert str(index.tz) == "UTC"
-    assert index.is_unique
-    assert index.is_monotonic_increasing
-    assert (index == index.floor(DURATIONS[timeframe])).all()
-    assert list(candles.columns) == list(OHLCV_COLUMNS)
-    assert all(dtype == np.float64 for dtype in candles.dtypes)
-    values = candles.to_numpy()
-    assert np.isfinite(values).all()
-    prices = candles[["open", "high", "low", "close"]]
-    assert ((prices >= MIN_PRICE) & (prices <= MAX_PRICE)).all().all()
-    assert (candles["volume"] >= 0).all()
-    assert (candles["low"] <= candles[["open", "close"]].min(axis=1)).all()
-    assert (candles["high"] >= candles[["open", "close"]].max(axis=1)).all()
-
-
-# --- Scenario feature helpers (AC11) ---------------------------------------------------
-
-
-def gap_positions(candles: pd.DataFrame, timeframe: str) -> np.ndarray:
-    steps = candles.index.to_series().diff().iloc[1:]
-    return np.flatnonzero((steps > DURATIONS[timeframe]).to_numpy()) + 1
-
-
-def assert_has_gap_features(candles: pd.DataFrame, timeframe: str) -> None:
-    index = candles.index
-    duration = DURATIONS[timeframe]
-    assert (index.dayofweek < 5).all(), "no candle may fall on a weekend"
-    gaps = gap_positions(candles, timeframe)
-    weekday_drops = [
-        position
-        for position in gaps
-        if (
-            pd.date_range(index[position - 1] + duration, index[position] - duration, freq=duration)
-            .dayofweek.isin([5, 6])
-            .sum()
-            == 0
-        )
-    ]
-    assert weekday_drops, "at least one gap must come from a dropped weekday slot"
-    previous_close = candles["close"].shift(1)
-    jumps = candles["open"].iloc[gaps] != previous_close.iloc[gaps]
-    assert jumps.any(), "at least one candle after a gap must open away from the previous close"
-
-
-def assert_has_flat_run(candles: pd.DataFrame) -> None:
-    previous_close = candles["close"].shift(1)
-    flat = (
-        (candles["open"] == candles["high"])
-        & (candles["high"] == candles["low"])
-        & (candles["low"] == candles["close"])
-        & (candles["close"] == previous_close)
-        & (candles["volume"] == 0)
-    ).to_numpy()
-    longest = current = 0
-    for is_flat in flat:
-        current = current + 1 if is_flat else 0
-        longest = max(longest, current)
-    assert longest >= 5, f"longest flat run is {longest}"
-
-
-def assert_has_extreme_features(candles: pd.DataFrame) -> None:
-    assert (candles["close"] <= 0.1 * candles["open"]).any(), "missing a -90% candle"
-    assert (candles["close"] >= 10 * candles["open"]).any(), "missing a +900% candle"
-    assert (candles["volume"] >= 1e12).any(), "missing a volume spike"
-    assert (candles["volume"] == 0).any(), "missing a zero-volume candle"
+def duration(timeframe: Timeframe | TimeframeCode) -> pd.Timedelta:
+    return pd.Timedelta(Timeframe(timeframe).duration)
 
 
 # --- T10: validity (AC10) --------------------------------------------------------------
@@ -116,6 +55,21 @@ def test_generated_frames_are_valid(
 
     assert len(candles) == n
     assert_valid_candles(candles, timeframe)
+
+
+@pytest.mark.parametrize("scenario", ALL_SCENARIOS)
+@pytest.mark.parametrize("timeframe", list(Timeframe))
+def test_timeframe_members_are_accepted_like_their_codes(
+    timeframe: Timeframe, scenario: Scenario
+) -> None:
+    candles = synthetic_candles(FEATURE_MIN_CANDLES, seed=3, scenario=scenario, timeframe=timeframe)
+
+    assert_valid_candles(candles, timeframe)
+    assert_valid_candles(candles, timeframe.value)
+    same = synthetic_candles(
+        FEATURE_MIN_CANDLES, seed=3, scenario=scenario, timeframe=timeframe.value
+    )
+    pd.testing.assert_frame_equal(candles, same, check_exact=True)
 
 
 def test_numpy_integer_sizes_are_accepted() -> None:
@@ -147,7 +101,7 @@ def test_contiguous_scenarios_start_at_the_requested_open_time() -> None:
     candles = synthetic_candles(10, timeframe="4h", start=start)
 
     assert candles.index[0] == start
-    assert candles.index[-1] == start + 9 * DURATIONS["4h"]
+    assert candles.index[-1] == start + 9 * duration("4h")
 
 
 def test_gaps_starting_on_a_weekend_begin_on_monday() -> None:
@@ -170,7 +124,7 @@ def test_random_walk_is_contiguous_and_opens_at_the_previous_close(
     candles = synthetic_candles(n, seed=seed, timeframe=timeframe)
 
     steps = candles.index.to_series().diff().iloc[1:]
-    assert (steps == DURATIONS[timeframe]).all()
+    assert (steps == duration(timeframe)).all()
     assert np.array_equal(candles["open"].to_numpy()[1:], candles["close"].to_numpy()[:-1])
 
 
@@ -310,4 +264,75 @@ def test_default_start_is_a_monday_on_every_grid() -> None:
     start = pd.Timestamp(DEFAULT_START)
 
     assert start.dayofweek == 0
-    assert all(start == start.floor(duration) for duration in DURATIONS.values())
+    assert all(start == start.floor(duration(timeframe)) for timeframe in Timeframe)
+
+
+# --- Shared assertion helpers fail loudly (AC17b) ----------------------------------------------
+
+
+def test_assert_valid_candles_reports_contract_violations_as_assertion_errors() -> None:
+    candles = synthetic_candles(10, seed=1)
+    candles.iloc[3, candles.columns.get_loc("close")] = np.nan
+
+    with pytest.raises(AssertionError, match="missing_value"):
+        assert_valid_candles(candles, "1d")
+
+
+def test_assert_valid_candles_rejects_labels_off_the_grid() -> None:
+    candles = synthetic_candles(10, seed=1, timeframe="1h")
+    candles = candles.set_axis(candles.index + pd.Timedelta(minutes=30))
+
+    with pytest.raises(AssertionError, match="grid"):
+        assert_valid_candles(candles, Timeframe.H1)
+
+
+@pytest.mark.parametrize("price", [MIN_PRICE / 2, MAX_PRICE * 2])
+def test_assert_valid_candles_rejects_prices_outside_the_bounds(price: float) -> None:
+    candles = synthetic_candles(10, seed=1, volatility=0.0)
+    candles.loc[:, ["open", "high", "low", "close"]] = price
+
+    with pytest.raises(AssertionError, match="bounds"):
+        assert_valid_candles(candles, "1d")
+
+
+def test_assert_valid_candles_rejects_non_datetime_indexes_without_crashing() -> None:
+    candles = synthetic_candles(10, seed=1).reset_index(drop=True)
+
+    with pytest.raises(AssertionError, match="index_type"):
+        assert_valid_candles(candles, "1d")
+
+
+def test_feature_assertions_fail_on_a_plain_random_walk() -> None:
+    candles = synthetic_candles(FEATURE_MIN_CANDLES, seed=1)
+
+    with pytest.raises(AssertionError, match="weekend"):
+        assert_has_gap_features(candles, "1d")
+    with pytest.raises(AssertionError, match="flat run"):
+        assert_has_flat_run(candles)
+    with pytest.raises(AssertionError, match="volume"):
+        assert_has_extreme_volume_features(candles)
+    with pytest.raises(AssertionError, match="-90%"):
+        assert_has_extreme_features(candles)
+
+
+def test_gap_assertion_requires_a_weekday_drop_and_a_price_jump() -> None:
+    gaps = synthetic_candles(FEATURE_MIN_CANDLES, seed=1, scenario=Scenario.GAPS)
+    no_jump = synthetic_candles(FEATURE_MIN_CANDLES, seed=1, scenario=Scenario.GAPS, volatility=0.0)
+    only_weekend_gaps = gaps.set_axis(
+        pd.bdate_range("2024-01-01", periods=FEATURE_MIN_CANDLES, tz="UTC")
+    )
+
+    assert_has_gap_features(gaps, "1d")
+    with pytest.raises(AssertionError, match="price"):
+        assert_has_gap_features(no_jump, "1d")
+    with pytest.raises(AssertionError, match="weekday"):
+        assert_has_gap_features(only_weekend_gaps, "1d")
+
+
+def test_extreme_assertion_requires_the_spike_candle() -> None:
+    candles = synthetic_candles(FEATURE_MIN_CANDLES, seed=1, scenario=Scenario.EXTREME)
+    spikes = candles["close"] >= 10 * candles["open"]
+    candles.loc[spikes, "close"] = candles.loc[spikes, "open"]
+
+    with pytest.raises(AssertionError, match="900%"):
+        assert_has_extreme_features(candles)

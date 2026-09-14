@@ -162,7 +162,7 @@ def test_length_dependent_cheat_is_caught_by_the_full_frame_comparison_alone() -
 # --- Probing for false negatives beyond T16 -----------------------------------------------
 
 
-def test_narrow_window_cheat_escapes_default_sampling_but_full_sweep_catches_it() -> None:
+def test_narrow_window_cheat_is_caught_by_full_sweep_and_explicit_cut() -> None:
     """Documents a known, spec-acknowledged limit of the default cut sampling (spec 003, "Risks
     and security": "Sampling misses length-specific behavior").
 
@@ -173,7 +173,8 @@ def test_narrow_window_cheat_escapes_default_sampling_but_full_sweep_catches_it(
     either: it is only informative at cuts that are themselves checked, and none of the checked
     cuts falls inside the narrow window where the two sides disagree. This is not a defect: the
     spec explicitly documents the sampling trade-off and its mitigations (a full sweep via
-    ``max_cuts=len(candles)``, or targeted ``cuts=``), both verified below.
+    ``max_cuts=len(candles)``, or targeted ``cuts=``), both verified below (spec 004, AC17d: this
+    test no longer asserts that the default-argument call passes despite the cheat).
     """
 
     def leaks_one_fixed_position(candles: pd.DataFrame) -> pd.Series:
@@ -183,10 +184,6 @@ def test_narrow_window_cheat_escapes_default_sampling_but_full_sweep_catches_it(
         return close
 
     candles = synthetic_candles(250, seed=7)
-
-    # Default arguments: the cheat is not sampled, so the check passes despite the cheat.
-    report = assert_no_lookahead(leaks_one_fixed_position, candles)
-    assert report.non_missing_values > 0
 
     # Mitigation 1: a full sweep (every possible cut) does catch it.
     with pytest.raises(LookaheadError) as full_sweep:

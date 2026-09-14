@@ -5,7 +5,7 @@ Each item is a feature that goes through the agent team (`/feature`) and ends in
 | Phase | Feature | Status | Scope | Key criteria |
 |-------|---------|--------|-------|--------------|
 | F0 | Foundations | Completed (v0.1.0) | CLAUDE.md, agents, hooks, secret protection, beta/prod CI/CD, `/health` skeleton | Green pipeline; beta on 8082 and prod on 8081 |
-| F1 | Domain and indicators | Pending | `domain/models.py`, indicator registry (TA-Lib), rule schema and pure evaluator | Tests against reference values; anti look-ahead; invalid rules rejected |
+| F1 | Domain and indicators | Pending | domain models, indicator registry (TA-Lib), rule schema and pure evaluator | Tests against reference values; anti look-ahead; invalid rules rejected |
 | F2 | Data provider | Pending | `MarketDataProvider` + `YFinanceProvider`: UTC normalization, open candle discarded, retries | Tests with recorded fixtures and no network; intraday limits respected |
 | F3 | Persistence | Pending | SQLAlchemy + Alembic: tickers, rules, signals, state | Reversible migrations; idempotency unique constraint |
 | F4 | Engine and scheduler | Pending | `SignalEngine` + APScheduler per timeframe and market hours | No duplicate signals after restart; cooldown |

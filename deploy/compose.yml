@@ -1,0 +1,29 @@
+services:
+  app:
+    image: ${TB_IMAGE:?An immutable image digest is required}
+    restart: unless-stopped
+    ports:
+      - "${TB_PORT:?A host port is required}:8000"
+    environment:
+      TB_ENVIRONMENT: ${TB_ENVIRONMENT:?An environment name is required}
+      TB_DATA_DIR: /app/data
+    # Application secrets live in a host-local file (<deploy root>/<env>/secrets.env,
+    # chmod 600) created by the operator. Never committed, never passed through GitHub.
+    env_file:
+      - ${TB_SECRETS_ENV_FILE:-/dev/null}
+    volumes:
+      - data:/app/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=5)); assert d['status']=='ok'"
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
+    stop_grace_period: 20s
+
+volumes:
+  data:

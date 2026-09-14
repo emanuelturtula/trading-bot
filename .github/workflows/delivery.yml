@@ -1,0 +1,176 @@
+name: Delivery
+
+# feature/** -> tests -> beta image -> beta container (port 8082)
+# main       -> tests -> release image -> prod container (port 8081) -> tag + GitHub Release
+on:
+  push:
+    branches: ["feature/**", main]
+
+permissions: {}
+
+concurrency:
+  group: delivery-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+
+jobs:
+  validate:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    name: Compute version
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      environment: ${{ steps.channel.outputs.environment }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: channel
+        run: |
+          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            echo "channel=stable" >> "$GITHUB_OUTPUT"
+            echo "environment=prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=beta" >> "$GITHUB_OUTPUT"
+            echo "environment=beta" >> "$GITHUB_OUTPUT"
+          fi
+      - id: version
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+        run: python3 scripts/next_version.py --channel "$CHANNEL" --sha "$GITHUB_SHA" --github-output
+
+  build:
+    name: Build arm64 image
+    needs: version
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: tags
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          ENVIRONMENT: ${{ needs.version.outputs.environment }}
+        run: |
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE_NAME}:sha-${GITHUB_SHA}"
+            # Stable tags (vX.Y.Z, latest) are only added after production is verified.
+            if [ "$ENVIRONMENT" = "beta" ]; then echo "${IMAGE_NAME}:${VERSION}"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            APP_VERSION=${{ needs.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+          cache-from: type=gha,scope=arm64
+          cache-to: type=gha,mode=max,scope=arm64
+      - id: image
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          echo "image=${IMAGE_NAME}@${DIGEST}" >> "$GITHUB_OUTPUT"
+          printf 'Version: `%s`\n\nImage: `%s@%s`\n' "$VERSION" "$IMAGE_NAME" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-beta:
+    name: Deploy beta (8082)
+    needs: [version, build]
+    if: github.ref != 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    uses: ./.github/workflows/remote-deploy.yml
+    with:
+      environment: beta
+      image: ${{ needs.build.outputs.image }}
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
+  deploy-prod:
+    name: Deploy production (8081)
+    needs: [version, build]
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    uses: ./.github/workflows/remote-deploy.yml
+    with:
+      environment: prod
+      image: ${{ needs.build.outputs.image }}
+      version: ${{ needs.version.outputs.version }}
+    secrets: inherit
+
+  release:
+    name: Publish release
+    needs: [version, build, deploy-prod]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Tag verified image
+        env:
+          IMAGE: ${{ needs.build.outputs.image }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: docker buildx imagetools create --tag "${IMAGE_NAME}:${VERSION}" --tag "${IMAGE_NAME}:latest" "$IMAGE"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $VERSION already exists (rerun); nothing to do."
+          else
+            gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "$VERSION" --generate-notes
+          fi
+
+  deploy-disabled:
+    name: Deploy disabled
+    needs: build
+    if: vars.DEPLOY_ENABLED != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo 'Image built, deployment NOT performed. Complete docs/DEPLOYMENT.md and set the DEPLOY_ENABLED variable to true.' >> "$GITHUB_STEP_SUMMARY"

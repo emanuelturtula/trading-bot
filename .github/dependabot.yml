@@ -18,3 +18,10 @@ updates:
       interval: weekly
     commit-message:
       prefix: build
+    # Python is pinned to 3.12 (.python-version, pyproject.toml). Upgrading it is an
+    # explicit feature, never a Dependabot bump; patch updates are still allowed.
+    ignore:
+      - dependency-name: python
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor

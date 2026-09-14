@@ -71,6 +71,8 @@ docs/                  ARCHITECTURE, ROADMAP, DEPLOYMENT, specs/
 
 Every feature, fix or change in `src/`, `tests/`, `deploy/`, `scripts/`, `.github/` or `.claude/` goes through the team. It is started with `/feature <description>` (see `.claude/skills/feature/SKILL.md`).
 
+**Exception — Dependabot PRs (light path).** If the change is only the Dependabot bump (`Dockerfile`, `pyproject.toml`/`uv.lock` or action SHAs), with no code or config changes, the lead processes it without the agent team: branch `feature/deps-<slug>` from `origin/main` → cherry-pick of the Dependabot commit (or the same bump in a commit of its own, `build(deps)`/`ci(deps)`) → `scripts/check.py` → push, beta 8082 and `/health` verified → PR that references the Dependabot one, which is closed with a comment → merge only with explicit user approval. Security updates go through the same path, with priority. If it breaks tests or requires code/config: full workflow with `/feature`. Details in [Deploy](docs/DEPLOYMENT.md#dependabot-prs).
+
 | Role | Definition | Responsibility |
 |------|------------|----------------|
 | Lead | main session | Orchestrates, talks to the user, integrates, commits, pushes, opens the PR |
@@ -97,6 +99,7 @@ Teammates **never** commit, push, merge, tag or deploy.
 - Automatic SemVer version (`scripts/next_version.py`): feat → minor, anything else → patch, breaking → major (minor while < 1.0). Beta: `vX.Y.Z-beta.<sha7>`; prod: `vX.Y.Z`.
 - Pipeline: `ci.yml` (gitleaks → lint/mypy → tests → docker arm64 on PR) · `delivery.yml` (version → arm64 image on GHCR → beta/prod deploy → release) · `remote-deploy.yml` (Tailscale OIDC + SSH → `deploy/deploy.py`).
 - The deploy on the Pi validates the digest and OCI labels, waits for the healthcheck and rolls back automatically. Details and setup in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+- Dependabot: its PRs are not merged directly (they do not deploy to beta, which is a required check); they are brought into `feature/deps-<slug>` following the exception in "Mandatory feature workflow (Agent Team)". Python is pinned to 3.12: Dependabot ignores its minor/major jumps and upgrading the version is an explicit feature (never the light path).
 
 ## Active protections (do not disable)
 

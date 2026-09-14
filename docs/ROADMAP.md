@@ -1,15 +1,15 @@
 # Roadmap
 
-Cada ítem es una feature que pasa por el agent team (`/feature`) y termina en su propia release. El orden importa: cada fase se apoya en la anterior.
+Each item is a feature that goes through the agent team (`/feature`) and ends in its own release. Order matters: each phase builds on the previous one.
 
-| Fase | Feature | Alcance | Criterios clave |
-|------|---------|---------|-----------------|
-| F0 | Fundaciones | CLAUDE.md, agentes, hooks, protección de secretos, CI/CD beta/prod, skeleton `/health` | Pipeline verde; beta en 8082 y prod en 8081 |
-| F1 | Dominio e indicadores | `domain/models.py`, registry de indicadores (TA-Lib), schema de reglas y evaluador puro | Tests contra valores de referencia; anti look-ahead; reglas inválidas rechazadas |
-| F2 | Proveedor de datos | `MarketDataProvider` + `YFinanceProvider`: normalización UTC, descarte de vela abierta, retries | Tests con fixtures grabadas sin red; límites de intradía respetados |
-| F3 | Persistencia | SQLAlchemy + Alembic: tickers, reglas, señales, estado | Migraciones reversibles; unique de idempotencia |
-| F4 | Motor y scheduler | `SignalEngine` + APScheduler por timeframe y horario de mercado | Sin señales duplicadas tras reinicio; cooldown |
-| F5 | Telegram | Notifier (texto + chart en BytesIO) y comandos con allowlist de chats | `[BETA]` fuera de prod; disclaimer; chats no autorizados ignorados |
-| F6 | API y dashboard | REST `/api/v1/*`, login, dashboard HTMX: tickers, constructor de reglas, historial, charts | Auth obligatoria; validación de reglas en UI y backend |
-| F7 | Operación | Heartbeat diario, alertas de error por Telegram, `/pause` global, métricas en `/status` | Silencio del heartbeat detectable |
-| F8 | Backtesting | Backtest de reglas (vectorbt) con walk-forward y Deflated Sharpe Ratio en el dashboard | Separación in-sample/out-of-sample; costos incluidos |
+| Phase | Feature | Scope | Key criteria |
+|-------|---------|-------|--------------|
+| F0 | Foundations | CLAUDE.md, agents, hooks, secret protection, beta/prod CI/CD, `/health` skeleton | Green pipeline; beta on 8082 and prod on 8081 |
+| F1 | Domain and indicators | `domain/models.py`, indicator registry (TA-Lib), rule schema and pure evaluator | Tests against reference values; anti look-ahead; invalid rules rejected |
+| F2 | Data provider | `MarketDataProvider` + `YFinanceProvider`: UTC normalization, open candle discarded, retries | Tests with recorded fixtures and no network; intraday limits respected |
+| F3 | Persistence | SQLAlchemy + Alembic: tickers, rules, signals, state | Reversible migrations; idempotency unique constraint |
+| F4 | Engine and scheduler | `SignalEngine` + APScheduler per timeframe and market hours | No duplicate signals after restart; cooldown |
+| F5 | Telegram | Notifier (text + chart in BytesIO) and commands with a chat allowlist | `[BETA]` outside prod; disclaimer; unauthorized chats ignored |
+| F6 | API and dashboard | REST `/api/v1/*`, login, HTMX dashboard: tickers, rule builder, history, charts | Mandatory auth; rule validation in UI and backend |
+| F7 | Operations | Daily heartbeat, error alerts via Telegram, global `/pause`, metrics in `/status` | Heartbeat silence detectable |
+| F8 | Backtesting | Rule backtesting (vectorbt) with walk-forward and Deflated Sharpe Ratio in the dashboard | In-sample/out-of-sample separation; costs included |

@@ -1,35 +1,35 @@
 # Deploy
 
-> Este documento es público: usa placeholders. **Nunca** escribir acá IPs (LAN o tailnet), hostnames, usuarios, claves ni tokens reales.
+> This document is public: it uses placeholders. **Never** write real IPs (LAN or tailnet), hostnames, users, keys or tokens here.
 
-## Resumen
+## Summary
 
-| Evento | Pipeline | Imagen | Destino |
-|--------|----------|--------|---------|
-| Pull request | `ci.yml` | build arm64 sin push | — |
-| Push a `feature/**` | `delivery.yml` | `ghcr.io/emanuelturtula/trading-bot:vX.Y.Z-beta.<sha7>` | contenedor `trading-bot-beta`, puerto **8082** |
-| Push a `main` (merge) | `delivery.yml` | `...:sha-<sha>`; tras deploy sano: `:vX.Y.Z` y `:latest` | contenedor `trading-bot-prod`, puerto **8081**, tag git + GitHub Release |
+| Event | Pipeline | Image | Target |
+|-------|----------|-------|--------|
+| Pull request | `ci.yml` | arm64 build without push | — |
+| Push to `feature/**` | `delivery.yml` | `ghcr.io/emanuelturtula/trading-bot:vX.Y.Z-beta.<sha7>` | container `trading-bot-beta`, port **8082** |
+| Push to `main` (merge) | `delivery.yml` | `...:sha-<sha>`; after a healthy deploy: `:vX.Y.Z` and `:latest` | container `trading-bot-prod`, port **8081**, git tag + GitHub Release |
 
-Flujo de `delivery.yml`: `ci.yml` (gitleaks → lint/mypy → tests) → `next_version.py` → build arm64 nativo (`ubuntu-24.04-arm`) → push a GHCR → `remote-deploy.yml` → release (solo main).
+`delivery.yml` flow: `ci.yml` (gitleaks → lint/mypy → tests) → `next_version.py` → native arm64 build (`ubuntu-24.04-arm`) → push to GHCR → `remote-deploy.yml` → release (main only).
 
-`remote-deploy.yml` une el runner al tailnet con Tailscale OIDC (nodo efímero con `tag:trading-bot-ci`), y `scripts/remote_deploy.py`:
+`remote-deploy.yml` joins the runner to the tailnet with Tailscale OIDC (ephemeral node with `tag:trading-bot-ci`), and `scripts/remote_deploy.py`:
 
-1. valida todos los inputs y que el run sea un push de este repo (`main` → prod, `feature/**` → beta);
-2. copia `deploy/deploy.py` y `deploy/compose.yml` a un directorio temporal de la Pi;
-3. hace `docker login ghcr.io` con el token efímero del job **por stdin**;
-4. ejecuta `deploy.py` y borra el directorio temporal.
+1. validates all inputs and that the run is a push from this repo (`main` → prod, `feature/**` → beta);
+2. copies `deploy/deploy.py` and `deploy/compose.yml` to a temporary directory on the Pi;
+3. runs `docker login ghcr.io` with the job's ephemeral token **via stdin**;
+4. runs `deploy.py` and deletes the temporary directory.
 
-`deploy/deploy.py` (en la Pi):
+`deploy/deploy.py` (on the Pi):
 
-- toma un lock de host (beta y prod nunca deployan en paralelo);
-- rechaza runs más viejos que el deployado (un rerun viejo no pisa uno nuevo);
-- hace `docker pull` por digest y verifica los labels OCI `revision` y `version`;
-- hace backup de la base SQLite del contenedor actual;
-- `docker compose up --wait` y verifica que corra el digest exacto con healthcheck `healthy`;
-- si falla, restaura el deploy anterior; si no había, baja el contenedor y conserva el volumen;
-- escribe `current.json` solo si el deploy quedó sano y conserva los últimos 10 intentos.
+- takes a host lock (beta and prod never deploy in parallel);
+- rejects runs older than the deployed one (an old rerun does not overwrite a new one);
+- runs `docker pull` by digest and verifies the OCI labels `revision` and `version`;
+- backs up the SQLite database of the current container;
+- `docker compose up --wait` and verifies that the exact digest is running with a `healthy` healthcheck;
+- if it fails, restores the previous deploy; if there was none, stops the container and keeps the volume;
+- writes `current.json` only if the deploy ended up healthy and keeps the last 10 attempts.
 
-## Layout en la Raspberry
+## Layout on the Raspberry
 
 ```
 ~/trading-bot-deploy/                 (chmod 700)
@@ -38,79 +38,79 @@ Flujo de `delivery.yml`: `ci.yml` (gitleaks → lint/mypy → tests) → `next_v
   prod/  secrets.env (600)  current.json  attempts/...
 ```
 
-Proyectos compose: `trading-bot-beta` (8082 → 8000) y `trading-bot-prod` (8081 → 8000), cada uno con su volumen `data`.
+Compose projects: `trading-bot-beta` (8082 → 8000) and `trading-bot-prod` (8081 → 8000), each with its own `data` volume.
 
-## Setup inicial (una sola vez)
+## Initial setup (only once)
 
-Requisitos en la Pi: Docker con Compose v2, `python3` y la Pi unida al tailnet.
+Requirements on the Pi: Docker with Compose v2, `python3` and the Pi joined to the tailnet.
 
 ### 1. Tailscale
 
-1. En la policy del tailnet, **agregar** (sin reemplazar la policy existente) el tag `tag:trading-bot-ci` con un tag owner adecuado y acceso **solo** al puerto TCP 22 de la Raspberry.
-2. Crear una credencial **OpenID Connect trust** con issuer GitHub y subject:
+1. In the tailnet policy, **add** (without replacing the existing policy) the tag `tag:trading-bot-ci` with a suitable tag owner and access **only** to TCP port 22 of the Raspberry.
+2. Create an **OpenID Connect trust** credential with the GitHub issuer and subject:
    `repo:emanuelturtula@<OWNER_ID>/trading-bot@<REPO_ID>:ref:refs/heads/*`
-   Los IDs se obtienen con `gh api repos/emanuelturtula/trading-bot --jq '.owner.id, .id'`. Scope: solo *Auth Keys write* con `tag:trading-bot-ci`. No ampliar el subject a otros repos ni a pull requests.
-3. Guardar el client ID y el audience como secrets del repo: `TS_OAUTH_CLIENT_ID` y `TS_AUDIENCE`.
+   The IDs are obtained with `gh api repos/emanuelturtula/trading-bot --jq '.owner.id, .id'`. Scope: only *Auth Keys write* with `tag:trading-bot-ci`. Do not widen the subject to other repos or to pull requests.
+3. Store the client ID and the audience as repo secrets: `TS_OAUTH_CLIENT_ID` and `TS_AUDIENCE`.
 
-### 2. Clave SSH de deploy
+### 2. Deploy SSH key
 
-1. Generar una clave Ed25519 **dedicada** (no reutilizar tu clave personal ni la de GitHub).
-2. Agregar la mitad pública al `authorized_keys` del usuario de deploy en la Pi.
-3. Guardar la privada como secret `DEPLOY_SSH_KEY`.
-4. Armar la entrada `known_hosts` de la Pi **para su hostname o IP del tailnet** desde una sesión SSH de confianza (no con un `ssh-keyscan` sin verificar) y guardarla como `DEPLOY_KNOWN_HOSTS`.
+1. Generate a **dedicated** Ed25519 key (do not reuse your personal key or your GitHub key).
+2. Add the public half to the `authorized_keys` of the deploy user on the Pi.
+3. Store the private half as the `DEPLOY_SSH_KEY` secret.
+4. Build the Pi's `known_hosts` entry **for its tailnet hostname or IP** from a trusted SSH session (not with an unverified `ssh-keyscan`) and store it as `DEPLOY_KNOWN_HOSTS`.
 
-### 3. Secrets y variables de GitHub
+### 3. GitHub secrets and variables
 
-| Nombre | Tipo | Contenido |
-|--------|------|-----------|
-| `TS_OAUTH_CLIENT_ID` | secret | Client ID de la credencial OIDC de Tailscale |
-| `TS_AUDIENCE` | secret | Audience de la credencial OIDC |
-| `DEPLOY_HOST` | secret | Hostname o IP del tailnet de la Pi (es secret para que se enmascare en los logs públicos) |
-| `DEPLOY_USER` | secret | Usuario de deploy en la Pi |
-| `DEPLOY_SSH_KEY` | secret | Clave privada de deploy |
-| `DEPLOY_KNOWN_HOSTS` | secret | Entrada known_hosts de la Pi |
-| `DEPLOY_ENABLED` | **variable** | `true` cuando todo lo anterior está listo |
+| Name | Type | Content |
+|------|------|---------|
+| `TS_OAUTH_CLIENT_ID` | secret | Client ID of the Tailscale OIDC credential |
+| `TS_AUDIENCE` | secret | Audience of the OIDC credential |
+| `DEPLOY_HOST` | secret | Tailnet hostname or IP of the Pi (a secret so that it is masked in the public logs) |
+| `DEPLOY_USER` | secret | Deploy user on the Pi |
+| `DEPLOY_SSH_KEY` | secret | Deploy private key |
+| `DEPLOY_KNOWN_HOSTS` | secret | known_hosts entry of the Pi |
+| `DEPLOY_ENABLED` | **variable** | `true` when everything above is ready |
 
-Cargar los valores con `gh secret set <NOMBRE>` (pide el valor por stdin, así no queda en el historial del shell). Mientras `DEPLOY_ENABLED` no sea `true`, el pipeline buildea la imagen y reporta "deployment NOT performed".
+Load the values with `gh secret set <NAME>` (it asks for the value via stdin, so it does not stay in the shell history). While `DEPLOY_ENABLED` is not `true`, the pipeline builds the image and reports "deployment NOT performed".
 
-### 4. Secretos de la aplicación (en la Pi)
+### 4. Application secrets (on the Pi)
 
-Crear un bot distinto por entorno con @BotFather. En la Pi:
+Create a different bot per environment with @BotFather. On the Pi:
 
 ```sh
 mkdir -p ~/trading-bot-deploy/beta ~/trading-bot-deploy/prod
 chmod 700 ~/trading-bot-deploy
 umask 077
 cat > ~/trading-bot-deploy/beta/secrets.env <<'EOF'
-TB_TELEGRAM_BOT_TOKEN=<token del bot beta>
+TB_TELEGRAM_BOT_TOKEN=<beta bot token>
 TB_TELEGRAM_ALLOWED_CHAT_IDS=<chat id>
 TB_DASHBOARD_PASSWORD_HASH=<hash>
-TB_SESSION_SECRET=<valor aleatorio largo>
+TB_SESSION_SECRET=<long random value>
 EOF
 chmod 600 ~/trading-bot-deploy/beta/secrets.env
 ```
 
-Repetir para `prod/secrets.env` con el token del bot de producción. `deploy.py` nunca lee este archivo; solo lo crea vacío si falta y se niega a deployar si tiene permisos más abiertos que 600. Los cambios aplican al reiniciar: `docker compose --project-name trading-bot-beta restart app` (o `trading-bot-prod`).
+Repeat for `prod/secrets.env` with the production bot token. `deploy.py` never reads this file; it only creates it empty if it is missing and refuses to deploy if its permissions are more open than 600. Changes apply on restart: `docker compose --project-name trading-bot-beta restart app` (or `trading-bot-prod`).
 
-### 5. Protección del repositorio
+### 5. Repository protection
 
-- Secret scanning y push protection: **activos** (verificado).
-- Ruleset para `main`: PR obligatorio, checks requeridos (`Secrets scan`, `Lint & types`, `Tests`), sin force push ni borrado.
-- Actions: permisos por defecto del `GITHUB_TOKEN` en solo lectura y aprobación requerida para workflows de forks.
+- Secret scanning and push protection: **enabled** (verified).
+- Ruleset for `main`: mandatory PR, required checks (`Secrets scan`, `Lint & types`, `Tests`), no force push or deletion.
+- Actions: default `GITHUB_TOKEN` permissions set to read-only and approval required for workflows from forks.
 
-### 6. Setup local (cada clon)
+### 6. Local setup (every clone)
 
 ```sh
-winget install Gitleaks.Gitleaks      # o: brew install gitleaks
-pip install uv                        # o el instalador oficial de uv
+winget install Gitleaks.Gitleaks      # or: brew install gitleaks
+pip install uv                        # or the official uv installer
 uv sync
 uv run pre-commit install
 ```
 
-## Operación
+## Operations
 
-- Estado: `curl http://<DEPLOY_HOST>:8082/health` (beta) y `:8081/health` (prod) desde la LAN o el tailnet.
+- Status: `curl http://<DEPLOY_HOST>:8082/health` (beta) and `:8081/health` (prod) from the LAN or the tailnet.
 - Logs: `docker compose --project-name trading-bot-prod logs -f app`.
-- Último deploy: `~/trading-bot-deploy/prod/current.json`; historial en `attempts/`.
-- Rollback manual: re-ejecutar el workflow del commit anterior no está permitido (protección de orden de runs). Revertir con un PR (`git revert`) y mergear.
-- Restaurar la base: el backup previo a cada deploy queda en `attempts/<id>/database.sqlite3`.
+- Last deploy: `~/trading-bot-deploy/prod/current.json`; history in `attempts/`.
+- Manual rollback: re-running the workflow of the previous commit is not allowed (run ordering protection). Revert with a PR (`git revert`) and merge.
+- Restoring the database: the backup taken before each deploy is kept in `attempts/<id>/database.sqlite3`.

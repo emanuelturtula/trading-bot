@@ -1,0 +1,30 @@
+# gitleaks configuration for trading-bot.
+# The repository is PUBLIC: any match here must block the commit, the push and CI.
+# Never add broad allowlists. If a finding is a real false positive, allowlist the
+# exact path or a narrow regex and explain why in the PR.
+
+title = "trading-bot secret scanning rules"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram Bot API token"
+regex = '''\b[0-9]{8,10}:[A-Za-z0-9_-]{35}\b'''
+
+[[rules]]
+id = "tailscale-key"
+description = "Tailscale auth/API/OAuth key"
+regex = '''\btskey-[a-z]+-[A-Za-z0-9-]{16,}'''
+keywords = ["tskey-"]
+
+[[rules]]
+id = "private-ipv4-address"
+description = "Private LAN IPv4 address (infrastructure details must not be published)"
+regex = '''\b(?:10(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){3}|192\.168(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){2}|172\.(?:1[6-9]|2[0-9]|3[01])(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){2})\b'''
+
+[[rules]]
+id = "tailscale-cgnat-ipv4-address"
+description = "Tailscale tailnet IPv4 address (CGNAT range)"
+regex = '''\b100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])(?:\.(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})){2}\b'''

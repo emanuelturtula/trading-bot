@@ -70,6 +70,8 @@ docs/                  ARCHITECTURE, ROADMAP, DEPLOYMENT, specs/
 
 Toda feature, fix o cambio en `src/`, `tests/`, `deploy/`, `scripts/`, `.github/` o `.claude/` pasa por el equipo. Se inicia con `/feature <descripción>` (ver `.claude/skills/feature/SKILL.md`).
 
+**Excepción — PRs de Dependabot (camino liviano).** Si el cambio es solo el bump de Dependabot (`Dockerfile`, `pyproject.toml`/`uv.lock` o SHAs de actions), sin cambios de código ni de config, el lead lo procesa sin agent team: branch `feature/deps-<slug>` desde `origin/main` → cherry-pick del commit de Dependabot (o el mismo bump con commit propio `build(deps)`/`ci(deps)`) → `scripts/check.py` → push, beta 8082 y `/health` verificado → PR que referencia al de Dependabot, que se cierra con comentario → merge solo con aprobación explícita del usuario. Las security updates van por el mismo camino, con prioridad. Si rompe tests o requiere código/config: flujo completo con `/feature`. Detalle en [Deploy](docs/DEPLOYMENT.md#prs-de-dependabot).
+
 | Rol | Definición | Responsabilidad |
 |-----|------------|-----------------|
 | Lead | sesión principal | Orquesta, habla con el usuario, integra, commitea, pushea, abre el PR |
@@ -96,6 +98,7 @@ Los teammates **nunca** commitean, pushean, mergean, taggean ni deployan.
 - Versión SemVer automática (`scripts/next_version.py`): feat → minor, resto → patch, breaking → major (minor mientras < 1.0). Beta: `vX.Y.Z-beta.<sha7>`; prod: `vX.Y.Z`.
 - Pipeline: `ci.yml` (gitleaks → lint/mypy → tests → docker arm64 en PR) · `delivery.yml` (versión → imagen arm64 en GHCR → deploy beta/prod → release) · `remote-deploy.yml` (Tailscale OIDC + SSH → `deploy/deploy.py`).
 - El deploy en la Pi valida digest y labels OCI, espera healthcheck y hace rollback automático. Detalles y setup en [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+- Dependabot: sus PRs no se mergean directo (no deployan a beta, que es check obligatorio); se traen a `feature/deps-<slug>` según la excepción de "Flujo obligatorio de features". Python está fijado en 3.12: Dependabot ignora sus saltos minor/major y subir de versión es una feature explícita (nunca camino liviano).
 
 ## Protecciones activas (no desactivar)
 

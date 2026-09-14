@@ -19,7 +19,7 @@ Runtime secrets live only in environment variables loaded from `secrets.env` on 
 | Local push | pre-commit `gitleaks` over the full history |
 | Claude Code | `git_guard.py` hook (gitleaks on commit/push; blocks `--no-verify`, `add -f`, force push, push to `main`) and read-deny rules for secret files |
 | CI | `Secrets scan` job (gitleaks, full history) gates every build and deploy |
-| GitHub | Secret scanning and push protection enabled |
+| GitHub | Secret scanning and push protection enabled; Dependabot alerts and security updates enabled; `main` ruleset without bypass: pull request required, required status checks (`Secrets scan`, `Lint & types`, `Tests`, `Docker build (arm64)`, beta deploy) on an up-to-date branch, required CodeQL code scanning, no force push or deletion |
 | Runtime | `SecretStr` settings, log redaction filter, `/health` exposes no configuration |
 
 Custom gitleaks rules (`.gitleaks.toml`) add Telegram tokens, Tailscale keys, private IPv4 addresses and Tailscale CGNAT (tailnet) addresses. Inline `gitleaks:allow` comments and `.gitleaksignore` files are rejected.

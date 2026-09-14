@@ -1,67 +1,67 @@
-# Arquitectura
+# Architecture
 
-## Objetivo
+## Goal
 
-Para una lista de tickers configurables (acciones y ETFs vía yfinance en v1), el bot:
+For a list of configurable tickers (stocks and ETFs via yfinance in v1), the bot:
 
-1. espera el cierre de cada vela según el timeframe del ticker (1h, 4h, 1d; default 1d);
-2. descarga las velas OHLCV y descarta la vela en curso;
-3. calcula indicadores técnicos;
-4. evalúa las reglas asignadas al ticker;
-5. si una regla dispara, persiste la señal y la notifica por Telegram con un chart.
+1. waits for each candle to close according to the ticker's timeframe (1h, 4h, 1d; default 1d);
+2. downloads the OHLCV candles and discards the in-progress candle;
+3. computes technical indicators;
+4. evaluates the rules assigned to the ticker;
+5. if a rule fires, persists the signal and notifies it via Telegram with a chart.
 
-El usuario decide si opera. **No existe capa de ejecución de órdenes** y no debe agregarse.
+The user decides whether to trade. **There is no order execution layer** and one must not be added.
 
-## Capas
+## Layers
 
 ```
             ┌──────────────┐    ┌──────────────┐
- Telegram ─▶│ telegram_bot │    │ api/dashboard│◀─ navegador (auth)
+ Telegram ─▶│ telegram_bot │    │ api/dashboard│◀─ browser (auth)
             └──────┬───────┘    └──────┬───────┘
-                   │  comandos / CRUD  │
+                   │  commands / CRUD  │
                    ▼                   ▼
             ┌─────────────────────────────────┐
-            │ persistence (SQLite + Alembic)  │  tickers, reglas, señales
+            │ persistence (SQLite + Alembic)  │  tickers, rules, signals
             └───────────────┬─────────────────┘
                             │
  scheduler ──tick──▶ ┌──────┴───────┐   fetch   ┌──────────────┐
- (cierre de vela)    │    engine    │──────────▶│    data      │──▶ yfinance
+ (candle close)      │    engine    │──────────▶│    data      │──▶ yfinance
                      │ SignalEngine │           └──────────────┘
                      └──────┬───────┘
-                            │ DataFrame (velas cerradas)
+                            │ DataFrame (closed candles)
                             ▼
                      ┌──────────────┐
-                     │   domain     │  PURO: indicadores + evaluador de reglas
+                     │   domain     │  PURE: indicators + rule evaluator
                      └──────┬───────┘
                             │ Signal[]
                             ▼
                      ┌──────────────┐
-                     │notifications │──▶ Telegram (texto + chart BytesIO)
+                     │notifications │──▶ Telegram (text + chart BytesIO)
                      └──────────────┘
 ```
 
-| Capa | Responsabilidad | Reglas |
-|------|-----------------|--------|
-| `domain/` | Modelos (`Candle`, `Timeframe`, `Signal`, `Rule`), registry de indicadores (whitelist → TA-Lib), evaluador de reglas | Sin I/O, sin reloj, sin globals. Testeable con DataFrames fijos. |
-| `data/` | `MarketDataProvider` (Protocol) y `YFinanceProvider`: normaliza a OHLCV UTC, descarta la vela abierta, retries con backoff | Nunca decide señales. Respeta los límites de Yahoo (intradía máx. 60 días; 1h hasta 730 días). |
-| `engine/` | `SignalEngine`: orquesta fetch → indicadores → reglas → dedupe/cooldown → persistencia → notificación | Idempotente por `(ticker, timeframe, rule_id, candle_close_ts)`. |
-| `scheduler/` | APScheduler (AsyncIOScheduler). Un job por timeframe, disparado al cierre de vela + margen, solo en horario de mercado | Una sola instancia por proceso. |
-| `notifications/` | `Notifier` (Protocol) + `TelegramNotifier` | Prefijo `[BETA]` fuera de prod; disclaimer; chart en memoria (`io.BytesIO`, `seek(0)`), nunca a disco. |
-| `telegram_bot/` | Comandos `/add /remove /list /rules /status /pause /resume /help` con python-telegram-bot (long polling) | Solo chats en `TB_TELEGRAM_ALLOWED_CHAT_IDS`. |
-| `api/`, `dashboard/` | REST `/api/v1/tickers`, `/rules`, `/signals`; dashboard Jinja2 + HTMX (tickers, constructor de reglas, historial, charts) | Auth obligatoria (password hash + cookie de sesión firmada). `/health` es el único endpoint público. |
-| `persistence/` | SQLAlchemy 2 + Alembic sobre SQLite en `/app/data` | Migraciones versionadas; backups antes de cada deploy. |
+| Layer | Responsibility | Rules |
+|-------|----------------|-------|
+| `domain/` | Models (`Candle`, `Timeframe`, `Signal`, `Rule`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
+| `data/` | `MarketDataProvider` (Protocol) and `YFinanceProvider`: normalizes to UTC OHLCV, discards the open candle, retries with backoff | Never decides signals. Respects Yahoo's limits (intraday max. 60 days; 1h up to 730 days). |
+| `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → dedupe/cooldown → persistence → notification | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`. |
+| `scheduler/` | APScheduler (AsyncIOScheduler). One job per timeframe, fired at candle close + margin, only during market hours | A single instance per process. |
+| `notifications/` | `Notifier` (Protocol) + `TelegramNotifier` | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk. |
+| `telegram_bot/` | Commands `/add /remove /list /rules /status /pause /resume /help` with python-telegram-bot (long polling) | Only chats in `TB_TELEGRAM_ALLOWED_CHAT_IDS`. |
+| `api/`, `dashboard/` | REST `/api/v1/tickers`, `/rules`, `/signals`; Jinja2 + HTMX dashboard (tickers, rule builder, history, charts) | Mandatory auth (password hash + signed session cookie). `/health` is the only public endpoint. |
+| `persistence/` | SQLAlchemy 2 + Alembic on SQLite in `/app/data` | Versioned migrations; backups before each deploy. |
 
-## Proceso
+## Process
 
-Un único proceso asyncio (`uvicorn ... --workers 1`). El lifespan de FastAPI arranca y detiene el scheduler y el poller de Telegram. Nunca se escala horizontalmente: un token de Telegram admite un solo poller (409 Conflict).
+A single asyncio process (`uvicorn ... --workers 1`). The FastAPI lifespan starts and stops the scheduler and the Telegram poller. It is never scaled horizontally: a Telegram token allows a single poller (409 Conflict).
 
-## Modelo de reglas
+## Rule model
 
-Las reglas se definen desde el dashboard y se guardan como JSON validado con pydantic. No hay `eval`.
+Rules are defined from the dashboard and stored as JSON validated with pydantic. There is no `eval`.
 
 ```json
 {
-  "name": "RSI sobrevendido en tendencia alcista",
+  "name": "RSI oversold in uptrend",
   "signal": "BUY",
   "timeframe": "1d",
   "conditions": {
@@ -82,38 +82,38 @@ Las reglas se definen desde el dashboard y se guardan como JSON validado con pyd
 }
 ```
 
-- Operandos: `{"indicator", "params", "output"?}` · `{"price": "open|high|low|close|volume"}` · `{"value": number}`.
-- Operadores: `<`, `<=`, `>`, `>=`, `crosses_above`, `crosses_below`.
-- Grupos: `all` / `any`, anidables hasta 2 niveles.
-- Indicadores (whitelist inicial): `sma`, `ema`, `rsi`, `macd` (`macd|signal|hist`), `bbands` (`lower|middle|upper`), `atr`, `adx`, `stoch` (`k|d`), `obv`, `volume_sma`.
-- Cada indicador declara sus parámetros permitidos y rangos; el evaluador rechaza cualquier cosa fuera de la whitelist.
-- `cooldown_bars`: velas mínimas entre dos señales de la misma regla y ticker.
-- Una regla se asigna a uno o más tickers.
+- Operands: `{"indicator", "params", "output"?}` · `{"price": "open|high|low|close|volume"}` · `{"value": number}`.
+- Operators: `<`, `<=`, `>`, `>=`, `crosses_above`, `crosses_below`.
+- Groups: `all` / `any`, nestable up to 2 levels.
+- Indicators (initial whitelist): `sma`, `ema`, `rsi`, `macd` (`macd|signal|hist`), `bbands` (`lower|middle|upper`), `atr`, `adx`, `stoch` (`k|d`), `obv`, `volume_sma`.
+- Each indicator declares its allowed parameters and ranges; the evaluator rejects anything outside the whitelist.
+- `cooldown_bars`: minimum candles between two signals of the same rule and ticker.
+- A rule is assigned to one or more tickers.
 
-## Datos persistidos (borrador)
+## Persisted data (draft)
 
 - `tickers(id, symbol, timeframe, enabled, created_at)`
 - `rules(id, name, signal, timeframe, definition_json, enabled, created_at, updated_at)`
 - `ticker_rules(ticker_id, rule_id)`
-- `signals(id, ticker_id, rule_id, timeframe, candle_close_ts, price, indicator_values_json, notified_at)` con unique `(ticker_id, rule_id, timeframe, candle_close_ts)`
-- `bot_state(key, value)`: pausa global, último heartbeat
+- `signals(id, ticker_id, rule_id, timeframe, candle_close_ts, price, indicator_values_json, notified_at)` with unique `(ticker_id, rule_id, timeframe, candle_close_ts)`
+- `bot_state(key, value)`: global pause, last heartbeat
 
-## Configuración (variables de entorno)
+## Configuration (environment variables)
 
-| Variable | Uso |
-|----------|-----|
-| `TB_ENVIRONMENT` | `dev` / `beta` / `prod` (lo fija compose en la Pi) |
-| `TB_VERSION` | Versión inyectada en la imagen |
-| `TB_LOG_LEVEL` | Nivel de log |
-| `TB_TELEGRAM_BOT_TOKEN` | Secreto. Un bot distinto por entorno |
-| `TB_TELEGRAM_ALLOWED_CHAT_IDS` | Chats autorizados (coma-separados) |
-| `TB_DASHBOARD_PASSWORD_HASH` | Secreto. Hash del password del dashboard |
-| `TB_SESSION_SECRET` | Secreto. Firma de cookies de sesión |
+| Variable | Purpose |
+|----------|---------|
+| `TB_ENVIRONMENT` | `dev` / `beta` / `prod` (set by compose on the Pi) |
+| `TB_VERSION` | Version injected into the image |
+| `TB_LOG_LEVEL` | Log level |
+| `TB_TELEGRAM_BOT_TOKEN` | Secret. A different bot per environment |
+| `TB_TELEGRAM_ALLOWED_CHAT_IDS` | Authorized chats (comma-separated) |
+| `TB_DASHBOARD_PASSWORD_HASH` | Secret. Hash of the dashboard password |
+| `TB_SESSION_SECRET` | Secret. Session cookie signing |
 
-## Decisiones
+## Decisions
 
-- **TA-Lib en lugar de pandas-ta.** pandas-ta perdió su repositorio y su historial en PyPI y cambió de maintainer (riesgo de supply chain). TA-Lib ≥ 0.6.5 publica wheels con la librería C incluida, también para aarch64. Queda aislada detrás del registry de indicadores para poder reemplazarla.
-- **Long polling y no webhooks** para Telegram: la Pi no expone endpoints públicos.
-- **HTMX y no una SPA**: una sola imagen Python, sin toolchain de Node.
-- **SQLite**: un solo proceso escritor, volumen Docker y backup previo a cada deploy.
-- **Backtesting** (vectorbt + walk-forward) en una fase posterior, con cuidado por el overfitting (Deflated Sharpe Ratio).
+- **TA-Lib instead of pandas-ta.** pandas-ta lost its repository and its PyPI history and changed maintainers (supply chain risk). TA-Lib ≥ 0.6.5 publishes wheels with the C library included, also for aarch64. It stays isolated behind the indicator registry so it can be replaced.
+- **Long polling and not webhooks** for Telegram: the Pi does not expose public endpoints.
+- **HTMX and not an SPA**: a single Python image, no Node toolchain.
+- **SQLite**: a single writer process, a Docker volume and a backup before each deploy.
+- **Backtesting** (vectorbt + walk-forward) in a later phase, with care for overfitting (Deflated Sharpe Ratio).

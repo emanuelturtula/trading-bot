@@ -1,21 +1,21 @@
 # trading-bot
 
-Bot de análisis técnico que observa velas de tickers configurables, evalúa reglas definidas por el usuario y envía **señales de compra/venta por Telegram** para que el usuario decida si operar.
+Technical analysis bot that watches candles of configurable tickers, evaluates user-defined rules and sends **buy/sell signals via Telegram** so the user can decide whether to trade.
 
-> **No es asesoramiento financiero.** El bot solo emite señales: nunca ejecuta órdenes ni se conecta a brokers para operar.
+> **Not financial advice.** The bot only emits signals: it never executes orders or connects to brokers to trade.
 
-## Estado
+## Status
 
-En desarrollo. Ver el [roadmap](docs/ROADMAP.md).
+In development. See the [roadmap](docs/ROADMAP.md).
 
-## Documentación
+## Documentation
 
-- [Arquitectura](docs/ARCHITECTURE.md)
-- [Deploy y CI/CD](docs/DEPLOYMENT.md)
-- [Seguridad](SECURITY.md)
-- [Guía para agentes / contribución](CLAUDE.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Deploy and CI/CD](docs/DEPLOYMENT.md)
+- [Security](SECURITY.md)
+- [Guide for agents / contributing](CLAUDE.md)
 
-## Desarrollo rápido
+## Quick development
 
 ```sh
 uv sync
@@ -24,8 +24,8 @@ uv run python scripts/check.py
 uv run uvicorn trading_bot.main:create_app --factory --reload
 ```
 
-Requiere Python 3.12, [uv](https://docs.astral.sh/uv/) y [gitleaks](https://github.com/gitleaks/gitleaks).
+Requires Python 3.12, [uv](https://docs.astral.sh/uv/) and [gitleaks](https://github.com/gitleaks/gitleaks).
 
-## Licencia
+## License
 
 [MIT](LICENSE)

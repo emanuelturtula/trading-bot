@@ -1,29 +1,31 @@
-## Qué cambia
+<!-- Write the PR title and every section in English (CLAUDE.md, rule 9). -->
+## What changes
 
-<!-- Resumen corto. Link a la spec: docs/specs/NNN-<slug>.md -->
+<!-- Short summary. Link to the spec: docs/specs/NNN-<slug>.md -->
 
-## Tipo
+## Type
 
 - [ ] feat
 - [ ] fix
 - [ ] refactor / chore / docs / ci / build
 - [ ] breaking change (`!`)
 
-## Flujo del agent team
+## Agent team workflow
 
-- [ ] Spec aprobada por tech-lead
-- [ ] Implementación (developer) con TDD
-- [ ] Verificación (tester): PASS con evidencia
-- [ ] Review final (tech-lead): approve
+- [ ] Spec approved by tech-lead
+- [ ] Implementation (developer) with TDD
+- [ ] Verification (tester): PASS with evidence
+- [ ] Final review (tech-lead): approve
 
 ## Checklist
 
-- [ ] `uv run python scripts/check.py` en verde
-- [ ] Sin secretos, IPs, hostnames ni usuarios de infraestructura en el diff (gitleaks OK)
-- [ ] `domain/` sigue siendo puro; sin look-ahead (solo velas cerradas)
-- [ ] Sin código de ejecución de órdenes
-- [ ] Beta verificada en el puerto 8082 (`/health` con la versión beta)
+- [ ] `uv run python scripts/check.py` green
+- [ ] No secrets, IPs, hostnames or infrastructure users in the diff (gitleaks OK)
+- [ ] `domain/` is still pure; no look-ahead (closed candles only)
+- [ ] No order execution code
+- [ ] Beta verified on port 8082 (`/health` with the beta version)
+- [ ] Everything in English: code, comments, docs, commits, and this PR
 
-## Evidencia de beta
+## Beta evidence
 
-<!-- versión, digest de imagen, link al run -->
+<!-- version, image digest, link to the run -->

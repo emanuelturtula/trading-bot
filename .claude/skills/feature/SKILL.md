@@ -1,49 +1,49 @@
 ---
 name: feature
-description: Desarrolla una feature del trading-bot de punta a punta con el agent team (tech-lead, developer, tester), desde la spec hasta el PR verificado en beta.
+description: Develops a trading-bot feature end to end with the agent team (tech-lead, developer, tester), from the spec to the PR verified on beta.
 disable-model-invocation: true
-argument-hint: "<descripción de la feature>"
+argument-hint: "<feature description>"
 ---
 
-# /feature — flujo obligatorio con Agent Team
+# /feature — mandatory Agent Team workflow
 
-Pedido: $ARGUMENTS
+Request: $ARGUMENTS
 
-Seguí `CLAUDE.md` (sección "Flujo obligatorio de features"). Vos sos el **lead**.
+Follow `CLAUDE.md` (section "Mandatory feature workflow (Agent Team)"). You are the **lead**.
 
-## 0. Preparación
-1. Leé `CLAUDE.md`, `docs/ARCHITECTURE.md` y `docs/ROADMAP.md`. Si el pedido contradice una regla inquebrantable (por ejemplo, ejecutar órdenes), frená y explicáselo al usuario.
-2. Verificá `git status` limpio y partí de `main` actualizado: `git fetch origin` y `git switch -c feature/<slug> origin/main`.
-3. Si el pedido es ambiguo en lo funcional, preguntale al usuario antes de spawnear el equipo.
+## 0. Preparation
+1. Read `CLAUDE.md`, `docs/ARCHITECTURE.md` and `docs/ROADMAP.md`. If the request contradicts an unbreakable rule (for example, executing orders), stop and explain it to the user.
+2. Verify that `git status` is clean and start from an up-to-date `main`: `git fetch origin` and `git switch -c feature/<slug> origin/main` (the `<slug>` is in English).
+3. If the request is functionally ambiguous, ask the user before spawning the team.
 
-## 1. Equipo
-Spawneá tres teammates **usando las definiciones de agente**, con nombres fijos:
+## 1. Team
+Spawn three teammates **using the agent definitions**, with fixed names:
 - `tech-lead` (agent type `tech-lead`)
 - `developer` (agent type `developer`)
 - `tester` (agent type `tester`)
 
-Los teammates no heredan esta conversación: en el prompt de cada uno incluí el pedido completo, la branch, las respuestas del usuario y qué tarea le toca.
+Teammates do not inherit this conversation: in each teammate's prompt include the full request (with an English translation if the user wrote in another language), the branch, the user's answers, which task they own, and a reminder that every artifact must be in English (`CLAUDE.md`, rule 9).
 
-## 2. Tareas compartidas
-Creá las tareas con estos prefijos exactos (el hook `TaskCompleted` depende de ellos) y dependencias en cadena:
+## 2. Shared tasks
+Create the tasks with these exact prefixes (the `TaskCompleted` hook depends on them) and chained dependencies:
 1. `[spec] <slug>` → tech-lead
-2. `[impl] <slug>` → developer (bloqueada por spec)
-3. `[test] <slug>` → tester (bloqueada por impl)
-4. `[review] <slug>` → tech-lead (bloqueada por test)
+2. `[impl] <slug>` → developer (blocked by spec)
+3. `[test] <slug>` → tester (blocked by impl)
+4. `[review] <slug>` → tech-lead (blocked by test)
 
-## 3. Coordinación
-- Cuando la spec esté lista, leela. Si surgen decisiones de producto, consultá al usuario y reenviá las respuestas.
-- Dejá que developer, tester y tech-lead iteren por mensajes (FAIL → developer; REQUEST CHANGES → developer).
-- No implementes vos: si un teammate se traba, redirigilo o reasigná la tarea.
+## 3. Coordination
+- When the spec is ready, read it. If product decisions come up, consult the user and forward the answers.
+- Let developer, tester and tech-lead iterate through messages (FAIL → developer; REQUEST CHANGES → developer).
+- Do not implement yourself: if a teammate gets stuck, redirect them or reassign the task.
 
-## 4. Integración y entrega (solo el lead)
-1. Con `[review]` en APPROVE, corré `uv run python scripts/check.py` y revisá el diff completo buscando secretos, IPs, hostnames o usuarios.
-2. Commits en Conventional Commits en inglés, stageando paths explícitos (nunca `git add -A` a ciegas ni `commit -a`).
-3. `git push -u origin feature/<slug>`. Los hooks corren gitleaks; si bloquean, arreglá la causa y nunca uses `--no-verify`.
-4. Seguí `delivery.yml` con `gh run watch`. Un push o una imagen buildeada no son un deploy verificado: confirmá el job de beta en verde y, si hay acceso, `/health` en el puerto 8082 con la versión `vX.Y.Z-beta.<sha7>`.
-5. Abrí el PR con `gh pr create` usando `.github/PULL_REQUEST_TEMPLATE.md`: link a la spec, veredictos y evidencia de beta.
-6. Cerrá el equipo (pedile a cada teammate que termine).
-7. Reportale al usuario: qué se hizo, versión beta, link al PR y qué probar. **No mergees sin aprobación explícita.**
+## 4. Integration and delivery (lead only)
+1. With `[review]` at APPROVE, run `uv run python scripts/check.py` and review the full diff looking for secrets, IPs, hostnames or users.
+2. Commits in Conventional Commits in English, staging explicit paths (never a blind `git add -A` or `commit -a`).
+3. `git push -u origin feature/<slug>`. The hooks run gitleaks; if they block, fix the cause and never use `--no-verify`.
+4. Follow `delivery.yml` with `gh run watch`. A push or a built image is not a verified deploy: confirm the beta job is green and, if you have access, `/health` on port 8082 with version `vX.Y.Z-beta.<sha7>`.
+5. Open the PR with `gh pr create` using `.github/PULL_REQUEST_TEMPLATE.md`; the PR title and description are in English: spec link, verdicts and beta evidence.
+6. Shut down the team (ask each teammate to finish).
+7. Report to the user (in the user's language): what was done, beta version, PR link and what to test. **Do not merge without explicit approval.**
 
-## 5. Merge (solo con aprobación explícita del usuario)
-`gh pr merge <n> --merge`, seguí el run de `main` y verificá deploy prod en 8081 (`vX.Y.Z`) y la GitHub Release.
+## 5. Merge (only with explicit user approval)
+`gh pr merge <n> --merge`, follow the `main` run and verify the prod deploy on 8081 (`vX.Y.Z`) and the GitHub Release.

@@ -1,46 +1,47 @@
-# NNN — <título de la feature>
+# NNN — <feature title>
 
-- **Estado:** borrador | aprobada | implementada
+- **Status:** draft | approved | implemented
 - **Branch:** `feature/<slug>`
-- **Autor de la spec:** tech-lead
-- **Tipo de commit esperado:** feat | fix | refactor | …
+- **Spec author:** tech-lead
+- **Expected commit type:** feat | fix | refactor | …
 
-## Objetivo
+## Goal
 
-Qué problema resuelve y para quién. Una o dos oraciones.
+What problem it solves and for whom. One or two sentences.
 
-## Fuera de alcance
+## Out of scope
 
-Lo que explícitamente no se hace en esta feature.
+What is explicitly not done in this feature.
 
-## Criterios de aceptación
+## Acceptance criteria
 
-- [ ] CA1: …
-- [ ] CA2: …
+- [ ] AC1: …
+- [ ] AC2: …
 
-## Diseño
+## Design
 
-- Módulos y archivos afectados (con dueño: developer o tester).
-- Interfaces/Protocols nuevos o modificados (firmas).
-- Modelo de datos o migraciones.
-- Configuración nueva (`TB_*`): nombre, tipo, si es secreto.
+- Affected modules and files (with owner: developer or tester).
+- New or modified interfaces/Protocols (signatures).
+- Data model or migrations.
+- New configuration (`TB_*`): name, type, whether it is a secret.
 
-## Plan de tests
+## Test plan
 
-| Caso | Tipo (unit/integration) | Qué verifica |
-|------|--------------------------|--------------|
+| Case | Type (unit/integration) | What it verifies |
+|------|-------------------------|------------------|
 | … | … | … |
 
-Obligatorios según el caso: anti look-ahead (indicadores/reglas), idempotencia (señales), autorización (Telegram/API), redacción de secretos (config/logs).
+Mandatory depending on the case: anti look-ahead (indicators/rules), idempotency (signals), authorization (Telegram/API), secret redaction (config/logs).
 
-## Riesgos y seguridad
+## Risks and security
 
-- Datos sensibles involucrados y cómo se protegen.
-- Impacto en deploy (migraciones, variables nuevas en `secrets.env`).
+- Sensitive data involved and how it is protected.
+- Deploy impact (migrations, new variables in `secrets.env`).
 
-## Checklist de revisión (tech-lead)
+## Review checklist (tech-lead)
 
-- [ ] Cumple las reglas inquebrantables de CLAUDE.md
-- [ ] Diff sin secretos, IPs, hostnames ni usuarios
-- [ ] Tests cubren los criterios de aceptación
-- [ ] `scripts/check.py` en verde
+- [ ] Meets the unbreakable rules of CLAUDE.md
+- [ ] Diff contains no secrets, IPs, hostnames or users
+- [ ] Tests cover the acceptance criteria
+- [ ] `scripts/check.py` green
+- [ ] Every artifact is in English (CLAUDE.md, rule 9)

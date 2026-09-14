@@ -1,130 +1,130 @@
-# 001 — Dependabot sin saltos de Python y documentación de la protección del repo
+# 001 — Dependabot without Python version jumps and repository protection docs
 
-- **Estado:** implementada
+- **Status:** implemented
 - **Branch:** `feature/dependabot-python-pin-docs`
-- **Autor de la spec:** tech-lead
-- **Tipo de commit esperado:** `chore:` (`.github/dependabot.yml`) y `docs:` (documentación). Ninguno es `feat` → bump patch: beta `v0.1.1-beta.<sha7>`, prod `v0.1.1`.
+- **Spec author:** tech-lead
+- **Expected commit type:** `chore:` (`.github/dependabot.yml`) and `docs:` (documentation). Neither is `feat` → patch bump: beta `v0.1.1-beta.<sha7>`, prod `v0.1.1`.
 
-## Objetivo
+## Goal
 
-Evitar que Dependabot vuelva a proponer saltos minor/major de la imagen `python` (el PR #2, `3.12-slim` → `3.14-slim`, rompió `Docker build (arm64)` porque el proyecto fija Python 3.12) y dejar la documentación alineada con la protección real de `main`. Esa protección hace que los PRs de Dependabot no puedan mergearse directamente, así que se formaliza un camino liviano para procesarlos (decisión D1) como excepción explícita al flujo del agent team. Además, se corrige la guía de carga de secrets en PowerShell, que guardaba valores vacíos sin avisar.
+Stop Dependabot from proposing minor/major jumps of the `python` image again (PR #2, `3.12-slim` → `3.14-slim`, broke `Docker build (arm64)` because the project pins Python 3.12) and align the documentation with the real protection of `main`. That protection means Dependabot PRs cannot be merged directly, so a light path to process them is formalized (decision D1) as an explicit exception to the agent team workflow. In addition, the guide for loading secrets in PowerShell, which stored empty values without warning, is fixed.
 
-Configuración real verificada por el tech-lead con `gh api` (solo lectura) el 2026-09-14:
+Real configuration verified by the tech-lead with `gh api` (read-only) on 2026-09-14:
 
-| Ítem | Valor real |
+| Item | Real value |
 |------|------------|
-| Ruleset | nombre `main`, `enforcement: active`, target `~DEFAULT_BRANCH`, `bypass_actors: []` |
-| Pull request | obligatorio, `required_approving_review_count: 0` |
+| Ruleset | name `main`, `enforcement: active`, target `~DEFAULT_BRANCH`, `bypass_actors: []` |
+| Pull request | required, `required_approving_review_count: 0` |
 | Status checks | `Secrets scan`, `Lint & types`, `Tests`, `Docker build (arm64)`, `Deploy beta (8082) / Deploy beta` (GitHub Actions), `strict_required_status_checks_policy: true` |
-| Code scanning | CodeQL, `alerts_threshold: errors`, `security_alerts_threshold: high_or_higher`; default setup `configured`, lenguajes `actions` y `python` |
-| Otras reglas | `deletion` y `non_fast_forward` (sin borrado ni force push); `copilot_code_review` con `review_on_push: true`, `review_draft_pull_requests: false` |
-| Seguridad del repo | secret scanning `enabled`, push protection `enabled`; Dependabot alerts activos (`vulnerability-alerts` → 204); Dependabot security updates `enabled` (`automated-security-fixes`: `enabled: true`, `paused: false`), activados por el lead (D2) |
-| Actions | `default_workflow_permissions: read`, `can_approve_pull_request_reviews: false`, aprobación de workflows de forks: `first_time_contributors` |
+| Code scanning | CodeQL, `alerts_threshold: errors`, `security_alerts_threshold: high_or_higher`; default setup `configured`, languages `actions` and `python` |
+| Other rules | `deletion` and `non_fast_forward` (no deletion or force push); `copilot_code_review` with `review_on_push: true`, `review_draft_pull_requests: false` |
+| Repo security | secret scanning `enabled`, push protection `enabled`; Dependabot alerts enabled (`vulnerability-alerts` → 204); Dependabot security updates `enabled` (`automated-security-fixes`: `enabled: true`, `paused: false`), enabled by the lead (D2) |
+| Actions | `default_workflow_permissions: read`, `can_approve_pull_request_reviews: false`, approval of workflows from forks: `first_time_contributors` |
 
-## Fuera de alcance
+## Out of scope
 
-- Cualquier cambio en `src/`, `tests/`, `scripts/`, `deploy/`, `.github/workflows/`, `.claude/`, `.gitleaks.toml`.
-- `Dockerfile`, `pyproject.toml`, `uv.lock`, `.python-version`: Python sigue en 3.12.
-- Los ecosistemas `github-actions` y `uv` de `dependabot.yml`, y los `schedule`/`commit-message` existentes.
-- Modificar el ruleset o cualquier setting de GitHub: solo se documenta lo que ya existe, incluidos los alerts y las security updates que activó el lead.
-- Fijar la imagen base por digest o automatizar la creación de branches `feature/deps-*` para PRs de Dependabot.
-- Actualizar `.claude/skills/feature/SKILL.md` o las definiciones de agentes: el camino liviano lo ejecuta el lead y no usa ese skill.
+- Any change in `src/`, `tests/`, `scripts/`, `deploy/`, `.github/workflows/`, `.claude/`, `.gitleaks.toml`.
+- `Dockerfile`, `pyproject.toml`, `uv.lock`, `.python-version`: Python stays on 3.12.
+- The `github-actions` and `uv` ecosystems of `dependabot.yml`, and the existing `schedule`/`commit-message`.
+- Modifying the ruleset or any GitHub setting: only what already exists is documented, including the alerts and security updates that the lead enabled.
+- Pinning the base image by digest or automating the creation of `feature/deps-*` branches for Dependabot PRs.
+- Updating `.claude/skills/feature/SKILL.md` or the agent definitions: the light path is run by the lead and does not use that skill.
 - `README.md`, `docs/ARCHITECTURE.md`.
 
-## Criterios de aceptación
+## Acceptance criteria
 
 ### `.github/dependabot.yml`
 
-- [ ] **CA1:** la entrada `package-ecosystem: docker` tiene `ignore` con exactamente un elemento: `dependency-name: python` y `update-types` = `version-update:semver-major` y `version-update:semver-minor`. No incluye `version-update:semver-patch` ni `versions`.
-- [ ] **CA2:** fuera de esa clave `ignore`, el archivo es semánticamente idéntico al de `origin/main`. Además es YAML válido: pasa el script V1 y el hook `check-yaml`.
-- [ ] **CA3:** un comentario YAML en inglés, sobre `ignore`, explica que Python está fijado en 3.12 y que subirlo es una feature explícita, no un bump de Dependabot.
+- [ ] **AC1:** the `package-ecosystem: docker` entry has `ignore` with exactly one element: `dependency-name: python` and `update-types` = `version-update:semver-major` and `version-update:semver-minor`. It does not include `version-update:semver-patch` or `versions`.
+- [ ] **AC2:** apart from that `ignore` key, the file is semantically identical to the one on `origin/main`. It is also valid YAML: it passes the V1 script and the `check-yaml` hook.
+- [ ] **AC3:** a YAML comment in English, above `ignore`, explains that Python is pinned to 3.12 and that upgrading it is an explicit feature, not a Dependabot bump.
 
 ### `docs/DEPLOYMENT.md`
 
-- [ ] **CA4 (sección 5, configuración):** la sección "5. Protección del repositorio" reemplaza la línea vieja del ruleset (que listaba 3 checks) y describe la configuración real de la tabla de arriba:
-  - ruleset `main` sobre la branch por defecto y sin bypass;
-  - PR obligatorio con 0 aprobaciones;
-  - los 5 checks con su nombre literal entre backticks y el requisito de branch actualizada con `main` (strict);
-  - CodeQL obligatorio (default setup, `python` y `actions`, umbrales `errors` / `high_or_higher`);
-  - borrado y force push bloqueados;
-  - Copilot code review en cada push;
-  - secret scanning y push protection activos;
-  - Dependabot alerts y Dependabot security updates activos (D2);
-  - la línea de Actions con los valores reales.
+- [ ] **AC4 (section 5, configuration):** the section "5. Repository protection" replaces the old ruleset line (which listed 3 checks) and describes the real configuration of the table above:
+  - `main` ruleset on the default branch and without bypass;
+  - required PR with 0 approvals;
+  - the 5 checks with their literal name in backticks and the requirement of a branch up to date with `main` (strict);
+  - required CodeQL (default setup, `python` and `actions`, thresholds `errors` / `high_or_higher`);
+  - deletion and force push blocked;
+  - Copilot code review on every push;
+  - secret scanning and push protection enabled;
+  - Dependabot alerts and Dependabot security updates enabled (D2);
+  - the Actions line with the real values.
 
-  Indica la fecha de verificación (2026-09-14).
-- [ ] **CA5 (sección 5, consecuencias):** la sección explica:
-  - (a) `Docker build (arm64)` solo corre en eventos `pull_request` y `Deploy beta (8082) / Deploy beta` solo en push a `feature/**`, así que todo PR mergeable sale de una branch `feature/**` con beta deployada;
-  - (b) por strict, si `main` avanzó hay que actualizar la branch, y ese push vuelve a disparar CI y el deploy a beta;
-  - (c) si `DEPLOY_ENABLED` no es `true`, el check de deploy beta no se reporta y ningún PR puede mergearse.
+  It states the verification date (2026-09-14).
+- [ ] **AC5 (section 5, consequences):** the section explains:
+  - (a) `Docker build (arm64)` only runs on `pull_request` events and `Deploy beta (8082) / Deploy beta` only on push to `feature/**`, so every mergeable PR comes from a `feature/**` branch with beta deployed;
+  - (b) because of strict, if `main` moved ahead the branch must be updated, and that push triggers CI and the beta deploy again;
+  - (c) if `DEPLOY_ENABLED` is not `true`, the beta deploy check is not reported and no PR can be merged.
 
-  La frase de la sección 3 sobre `DEPLOY_ENABLED` remite a (c).
-- [ ] **CA6 (procedimiento Dependabot, camino liviano, D1):** existe una subsección `### PRs de Dependabot` (anchor `#prs-de-dependabot`), enlazada desde la sección 5, que contiene:
-  - **el motivo:** las branches `dependabot/**` no disparan `delivery.yml` y `scripts/remote_deploy.py` solo acepta beta desde `refs/heads/feature/**`, así que nunca cumplen el check obligatorio de deploy beta;
-  - **la condición del camino liviano:** el cambio es **solo** el bump de Dependabot (`Dockerfile`, `pyproject.toml`/`uv.lock` o SHAs de actions), sin cambios de código ni de config. Lo ejecuta el lead, sin agent team;
-  - **los 6 pasos, numerados y en este orden:**
-    1. el lead crea `feature/deps-<slug>` desde `origin/main` (`git fetch origin` + `git switch -c feature/deps-<slug> origin/main`);
-    2. `git cherry-pick <sha>` del commit de Dependabot, o el mismo bump a mano con commit propio `build(deps): …` o `ci(deps): …`. Si el ruleset exige aprobación extra por commits no atribuidos, se usa la opción manual;
+  The section 3 sentence about `DEPLOY_ENABLED` refers to (c).
+- [ ] **AC6 (Dependabot procedure, light path, D1):** there is a subsection `### Dependabot PRs` (anchor `#dependabot-prs`), linked from section 5, that contains:
+  - **the reason:** `dependabot/**` branches do not trigger `delivery.yml` and `scripts/remote_deploy.py` only accepts beta from `refs/heads/feature/**`, so they never satisfy the required beta deploy check;
+  - **the light path condition:** the change is **only** the Dependabot bump (`Dockerfile`, `pyproject.toml`/`uv.lock` or action SHAs), with no code or config changes. The lead runs it, without the agent team;
+  - **the 6 steps, numbered and in this order:**
+    1. the lead creates `feature/deps-<slug>` from `origin/main` (`git fetch origin` + `git switch -c feature/deps-<slug> origin/main`);
+    2. `git cherry-pick <sha>` of the Dependabot commit, or the same bump by hand in a commit of its own `build(deps): …` or `ci(deps): …`. If the ruleset requires extra approval for unattributed commits, the manual option is used;
     3. `uv run python scripts/check.py`;
-    4. push → CI + deploy beta (8082) → verificar `/health` (con placeholder `<DEPLOY_HOST>`) y la versión beta;
-    5. PR desde `feature/deps-<slug>` que referencia al de Dependabot; el de Dependabot se cierra con un comentario que apunta al PR nuevo;
-    6. merge solo con aprobación explícita del usuario;
-  - **la salida del camino liviano:** si el bump rompe tests o requiere cambios de código o config, se usa el flujo completo con `/feature`;
-  - **las security updates** de Dependabot siguen el mismo camino, con prioridad;
-  - **la nota de Python:** fijado en 3.12 en `.python-version`, `requires-python`, `[tool.ruff] target-version`, `[tool.mypy] python_version` y los dos `FROM` del `Dockerfile`. Dependabot ignora sus saltos minor/major; subirlo es una feature explícita con `/feature` (nunca camino liviano) que actualiza esos puntos, `uv.lock` y la regla `ignore`.
-- [ ] **CA7 (sección 3, secrets):** se elimina la recomendación del prompt interactivo (`gh secret set <NOMBRE>` "pide el valor por stdin"). En su lugar hay:
-  - una advertencia: en PowerShell ese prompt puede guardar un valor vacío sin error;
-  - un bloque `powershell` con las tres formas verificadas: `--body "<valor>"` solo para valores no sensibles; `$v = Read-Host ...; gh secret set ... --body $v` y luego `Remove-Variable v`; y para archivos, `` --body ((Get-Content "$HOME\.ssh\<clave>" -Raw) -replace "`r", "") ``, aclarando que `<` no existe en PowerShell;
-  - los síntomas en CI: el mensaje de la action de Tailscale, `ValueError: Invalid host` de `remote_deploy.py` y el valor en blanco en lugar de `***` en el log;
-  - el remedio: recargar el secret y re-ejecutar el job.
+    4. push → CI + beta deploy (8082) → verify `/health` (with the placeholder `<DEPLOY_HOST>`) and the beta version;
+    5. PR from `feature/deps-<slug>` that references the Dependabot one; the Dependabot one is closed with a comment pointing to the new PR;
+    6. merge only with explicit user approval;
+  - **the exit from the light path:** if the bump breaks tests or requires code or config changes, the full workflow with `/feature` is used;
+  - **Dependabot security updates** follow the same path, with priority;
+  - **the Python note:** pinned to 3.12 in `.python-version`, `requires-python`, `[tool.ruff] target-version`, `[tool.mypy] python_version` and the two `FROM` lines of the `Dockerfile`. Dependabot ignores its minor/major jumps; upgrading it is an explicit feature with `/feature` (never the light path) that updates those places, `uv.lock` and the `ignore` rule.
+- [ ] **AC7 (section 3, secrets):** the recommendation of the interactive prompt (`gh secret set <NAME>` "asks for the value via stdin") is removed. In its place there are:
+  - a warning: in PowerShell that prompt can store an empty value without an error;
+  - a `powershell` block with the three verified forms: `--body "<value>"` only for non-sensitive values; `$v = Read-Host ...; gh secret set ... --body $v` and then `Remove-Variable v`; and for files, `` --body ((Get-Content "$HOME\.ssh\<key>" -Raw) -replace "`r", "") ``, noting that `<` does not exist in PowerShell;
+  - the symptoms in CI: the Tailscale action message, `ValueError: Invalid host` from `remote_deploy.py` and the blank value instead of `***` in the log;
+  - the remedy: reload the secret and re-run the job.
 
-  Todo con placeholders (`<NOMBRE>`, `<valor>`, `<clave>`, `<archivo>`).
+  Everything with placeholders (`<NAME>`, `<value>`, `<key>`, `<file>`).
 
 ### `SECURITY.md`
 
-- [ ] **CA8:** la fila `GitHub` de la tabla "Enforcement", en inglés como el resto del archivo, conserva secret scanning + push protection y agrega: Dependabot alerts y security updates activos (D2), ruleset de `main` sin bypass con PR obligatorio, status checks obligatorios (CI y deploy beta) sobre branch actualizada, CodeQL obligatorio y sin force push ni borrado. La tabla sigue teniendo 2 columnas.
+- [ ] **AC8:** the `GitHub` row of the "Enforcement" table, in English like the rest of the file, keeps secret scanning + push protection and adds: Dependabot alerts and security updates enabled (D2), `main` ruleset without bypass with required PR, required status checks (CI and beta deploy) on an up-to-date branch, required CodeQL, and no force push or deletion. The table still has 2 columns.
 
 ### `docs/ROADMAP.md`
 
-- [ ] **CA9:** la tabla tiene una columna `Estado` después de `Feature`: F0 = `Completada (v0.1.0)` y F1–F8 = `Pendiente`. Todas las filas tienen la misma cantidad de columnas.
+- [ ] **AC9:** the table has a `Status` column after `Feature`: F0 = `Completed (v0.1.0)` and F1–F8 = `Pending`. All rows have the same number of columns.
 
 ### `CLAUDE.md`
 
-- [ ] **CA10a (excepción en el flujo, D1):** en "Flujo obligatorio de features (Agent Team)", inmediatamente después del párrafo "Toda feature, fix o cambio… pasa por el equipo…" y antes de la tabla de roles, hay un párrafo de **excepción explícita** para PRs de Dependabot que dice:
-  - aplica solo si el cambio es únicamente el bump (`Dockerfile`, `pyproject.toml`/`uv.lock` o SHAs de actions), sin cambios de código ni de config;
-  - lo ejecuta el lead sin agent team, en `feature/deps-<slug>`: cherry-pick o bump manual `build(deps)`/`ci(deps)` → `scripts/check.py` → beta 8082 con `/health` verificado → PR que referencia al de Dependabot, que se cierra con comentario → merge solo con aprobación explícita del usuario;
-  - las security updates van por el mismo camino, con prioridad;
-  - si rompe tests o requiere código/config, se usa el flujo completo con `/feature`;
-  - enlaza a `docs/DEPLOYMENT.md#prs-de-dependabot`.
-- [ ] **CA10b (Git, versionado y entrega):** hay **un** bullet nuevo (≤ 3 líneas) que dice:
-  - los PRs de Dependabot no se mergean directo: van por una branch `feature/deps-*` según la excepción de "Flujo obligatorio de features";
-  - Python está fijado en 3.12: Dependabot ignora sus saltos minor/major y subir de versión es una feature explícita (nunca camino liviano).
-- [ ] **CA10c (sin otros cambios):** en `CLAUDE.md` solo se agregan esos dos bloques. Las reglas inquebrantables, la tabla de roles, los pasos 1–9, "Los teammates nunca…" y "Protecciones activas" no cambian.
+- [ ] **AC10a (exception in the workflow, D1):** in "Mandatory feature workflow (Agent Team)", immediately after the paragraph "Every feature, fix or change… goes through the team…" and before the roles table, there is an **explicit exception** paragraph for Dependabot PRs that says:
+  - it applies only if the change is solely the bump (`Dockerfile`, `pyproject.toml`/`uv.lock` or action SHAs), with no code or config changes;
+  - the lead runs it without the agent team, on `feature/deps-<slug>`: cherry-pick or manual bump `build(deps)`/`ci(deps)` → `scripts/check.py` → beta 8082 with `/health` verified → PR that references the Dependabot one, which is closed with a comment → merge only with explicit user approval;
+  - security updates go through the same path, with priority;
+  - if it breaks tests or requires code/config, the full workflow with `/feature` is used;
+  - it links to `docs/DEPLOYMENT.md#dependabot-prs`.
+- [ ] **AC10b (Git, versioning and delivery):** there is **one** new bullet (≤ 3 lines) that says:
+  - Dependabot PRs are not merged directly: they go through a `feature/deps-*` branch following the exception in "Mandatory feature workflow";
+  - Python is pinned to 3.12: Dependabot ignores its minor/major jumps and upgrading the version is an explicit feature (never the light path).
+- [ ] **AC10c (no other changes):** in `CLAUDE.md` only those two blocks are added. The unbreakable rules, the roles table, steps 1–9, "Teammates never…" and "Active protections" do not change.
 
-### Transversales
+### Cross-cutting
 
-- [ ] **CA11 (scope):** los únicos archivos modificados o nuevos respecto de `origin/main` son `.github/dependabot.yml`, `docs/DEPLOYMENT.md`, `SECURITY.md`, `docs/ROADMAP.md`, `CLAUDE.md` y esta spec.
-- [ ] **CA12 (datos sensibles):** ningún archivo cambiado contiene IPs, hostnames, usuarios de infraestructura, claves, tokens ni valores reales de secrets; solo placeholders. `gitleaks dir` pasa sobre cada archivo cambiado y la búsqueda por regex (V8) no encuentra nada.
-- [ ] **CA13 (gate):** `uv run python scripts/check.py` y `uv run pre-commit run --files <archivos cambiados>` en verde.
+- [ ] **AC11 (scope):** the only files modified or added relative to `origin/main` are `.github/dependabot.yml`, `docs/DEPLOYMENT.md`, `SECURITY.md`, `docs/ROADMAP.md`, `CLAUDE.md` and this spec.
+- [ ] **AC12 (sensitive data):** no changed file contains IPs, hostnames, infrastructure users, keys, tokens or real secret values; only placeholders. `gitleaks dir` passes on each changed file and the regex search (V8) finds nothing.
+- [ ] **AC13 (gate):** `uv run python scripts/check.py` and `uv run pre-commit run --files <changed files>` green.
 
-## Diseño
+## Design
 
-### Archivos y dueños
+### Files and owners
 
-| Archivo | Dueño | Cambio |
-|---------|-------|--------|
-| `.github/dependabot.yml` | developer | `ignore` en el ecosistema `docker` (CA1–CA3) |
-| `docs/DEPLOYMENT.md` | developer | Secciones 3 y 5 y subsección `### PRs de Dependabot` en "Operación" (CA4–CA7) |
-| `SECURITY.md` | developer | Fila `GitHub` (CA8) |
-| `docs/ROADMAP.md` | developer | Columna `Estado` (CA9) |
-| `CLAUDE.md` | developer | Párrafo de excepción en "Flujo obligatorio de features" y un bullet en "Git, versionado y entrega" (CA10a–CA10c) |
-| — | tester | No agrega ni modifica archivos: ejecuta el plan de verificación y reporta |
+| File | Owner | Change |
+|------|-------|--------|
+| `.github/dependabot.yml` | developer | `ignore` in the `docker` ecosystem (AC1–AC3) |
+| `docs/DEPLOYMENT.md` | developer | Sections 3 and 5 and the `### Dependabot PRs` subsection in "Operations" (AC4–AC7) |
+| `SECURITY.md` | developer | `GitHub` row (AC8) |
+| `docs/ROADMAP.md` | developer | `Status` column (AC9) |
+| `CLAUDE.md` | developer | Exception paragraph in "Mandatory feature workflow" and one bullet in "Git, versioning and delivery" (AC10a–AC10c) |
+| — | tester | Does not add or modify files: runs the verification plan and reports |
 
-**Autorización explícita:** esta spec asigna al developer `.github/dependabot.yml` (el único archivo de `.github/`) y `CLAUDE.md`. No hay Protocols, interfaces, migraciones ni variables `TB_*` nuevas.
+**Explicit authorization:** this spec assigns `.github/dependabot.yml` (the only file under `.github/`) and `CLAUDE.md` to the developer. There are no new Protocols, interfaces, migrations or `TB_*` variables.
 
-**TDD aplicado a configuración:** antes de editar, el developer corre V1 y confirma que falla (el tech-lead ya lo verificó: `CA1 ignore mismatch: None`). Después de editar debe pasar.
+**TDD applied to configuration:** before editing, the developer runs V1 and confirms that it fails (the tech-lead already verified it: `AC1 ignore mismatch: None`). After editing it must pass.
 
-### `.github/dependabot.yml` (texto esperado del bloque docker)
+### `.github/dependabot.yml` (expected text of the docker block)
 
 ```yaml
   - package-ecosystem: docker
@@ -144,79 +144,79 @@ Configuración real verificada por el tech-lead con `gh api` (solo lectura) el 2
 
 ### `docs/DEPLOYMENT.md`
 
-**Sección 3.** Reemplazar el párrafo "Cargar los valores con `gh secret set <NOMBRE>`…" por la advertencia, este bloque y los síntomas. La oración de `DEPLOY_ENABLED` se mantiene y se le agrega la remisión a la sección 5.
+**Section 3.** Replace the paragraph "Load the values with `gh secret set <NAME>`…" with the warning, this block and the symptoms. The `DEPLOY_ENABLED` sentence is kept, with the reference to section 5 added to it.
 
 ```powershell
-# Valor no sensible (queda escrito en la línea de comandos)
-gh secret set <NOMBRE> --repo emanuelturtula/trading-bot --body "<valor>"
+# Non-sensitive value (it is written on the command line)
+gh secret set <NAME> --repo emanuelturtula/trading-bot --body "<value>"
 
-# Valor pegado a la vista, sin escribirlo en la línea de comandos
-$v = Read-Host "<NOMBRE>"
-gh secret set <NOMBRE> --repo emanuelturtula/trading-bot --body $v
+# Value pasted visibly, without writing it on the command line
+$v = Read-Host "<NAME>"
+gh secret set <NAME> --repo emanuelturtula/trading-bot --body $v
 Remove-Variable v
 
-# Archivo: PowerShell no tiene redirección de entrada `<`; se quitan los CR de Windows
-gh secret set DEPLOY_SSH_KEY --repo emanuelturtula/trading-bot --body ((Get-Content "$HOME\.ssh\<clave>" -Raw) -replace "`r", "")
+# File: PowerShell has no `<` input redirection; Windows CRs are removed
+gh secret set DEPLOY_SSH_KEY --repo emanuelturtula/trading-bot --body ((Get-Content "$HOME\.ssh\<key>" -Raw) -replace "`r", "")
 ```
 
-Opcional: una línea para bash/zsh con `gh secret set <NOMBRE> --repo emanuelturtula/trading-bot < <archivo>`.
+Optional: a line for bash/zsh with `gh secret set <NAME> --repo emanuelturtula/trading-bot < <file>`.
 
-**Sección 5.** Estructura sugerida (el developer puede ajustar la redacción mientras cubra CA4 y CA5):
+**Section 5.** Suggested structure (the developer may adjust the wording as long as it covers AC4 and AC5):
 
-1. "Estado verificado el 2026-09-14."
-2. Bullet "Ruleset `main`" con sub-bullets: PR obligatorio (0 aprobaciones), checks + strict, CodeQL, borrado/force push, Copilot review.
-3. Bullets de secret scanning/push protection, de Dependabot alerts + security updates y de Actions.
-4. Párrafo o lista "Consecuencias" con (a), (b), (c) y el link a `#prs-de-dependabot`.
+1. "Status verified on 2026-09-14."
+2. "`main` ruleset" bullet with sub-bullets: required PR (0 approvals), checks + strict, CodeQL, deletion/force push, Copilot review.
+3. Bullets for secret scanning/push protection, for Dependabot alerts + security updates and for Actions.
+4. "Consequences" paragraph or list with (a), (b), (c) and the link to `#dependabot-prs`.
 
-Opcional: cómo re-verificarlo con `gh ruleset list --repo emanuelturtula/trading-bot`.
+Optional: how to re-verify it with `gh ruleset list --repo emanuelturtula/trading-bot`.
 
-**Operación → `### PRs de Dependabot`.** Va al final de "Operación" porque es un procedimiento recurrente, no de setup. Contenido según CA6. El orden sugerido es: motivo → condición del camino liviano → 6 pasos → salida a `/feature` → security updates con prioridad → nota de Python. Es la versión detallada de la excepción de `CLAUDE.md` (CA10a): las dos tienen que decir lo mismo.
+**Operations → `### Dependabot PRs`.** It goes at the end of "Operations" because it is a recurring procedure, not a setup step. Content according to AC6. The suggested order is: reason → light path condition → 6 steps → exit to `/feature` → security updates with priority → Python note. It is the detailed version of the `CLAUDE.md` exception (AC10a): both must say the same thing.
 
-### `SECURITY.md` (texto sugerido)
+### `SECURITY.md` (suggested text)
 
 ```markdown
 | GitHub | Secret scanning and push protection enabled; Dependabot alerts and security updates enabled; `main` ruleset without bypass: pull request required, required status checks (`Secrets scan`, `Lint & types`, `Tests`, `Docker build (arm64)`, beta deploy) on an up-to-date branch, required CodeQL code scanning, no force push or deletion |
 ```
 
-### `CLAUDE.md` (textos sugeridos)
+### `CLAUDE.md` (suggested texts)
 
-Excepción, justo después del párrafo introductorio de "Flujo obligatorio de features (Agent Team)" (CA10a):
-
-```markdown
-**Excepción — PRs de Dependabot (camino liviano).** Si el cambio es solo el bump de Dependabot (`Dockerfile`, `pyproject.toml`/`uv.lock` o SHAs de actions), sin cambios de código ni de config, el lead lo procesa sin agent team: branch `feature/deps-<slug>` desde `origin/main` → cherry-pick del commit de Dependabot (o el mismo bump con commit propio `build(deps)`/`ci(deps)`) → `scripts/check.py` → push, beta 8082 y `/health` verificado → PR que referencia al de Dependabot, que se cierra con comentario → merge solo con aprobación explícita del usuario. Las security updates van por el mismo camino, con prioridad. Si rompe tests o requiere código/config: flujo completo con `/feature`. Detalle en [Deploy](docs/DEPLOYMENT.md#prs-de-dependabot).
-```
-
-Bullet nuevo en "Git, versionado y entrega" (CA10b):
+Exception, right after the introductory paragraph of "Mandatory feature workflow (Agent Team)" (AC10a):
 
 ```markdown
-- Dependabot: sus PRs no se mergean directo (no deployan a beta, que es check obligatorio); se traen a `feature/deps-<slug>` según la excepción de "Flujo obligatorio de features". Python está fijado en 3.12: Dependabot ignora sus saltos minor/major y subir de versión es una feature explícita (nunca camino liviano).
+**Exception — Dependabot PRs (light path).** If the change is only the Dependabot bump (`Dockerfile`, `pyproject.toml`/`uv.lock` or action SHAs), with no code or config changes, the lead processes it without the agent team: branch `feature/deps-<slug>` from `origin/main` → cherry-pick of the Dependabot commit (or the same bump in a commit of its own, `build(deps)`/`ci(deps)`) → `scripts/check.py` → push, beta 8082 and `/health` verified → PR that references the Dependabot one, which is closed with a comment → merge only with explicit user approval. Security updates go through the same path, with priority. If it breaks tests or requires code/config: full workflow with `/feature`. Details in [Deploy](docs/DEPLOYMENT.md#dependabot-prs).
 ```
 
-## Plan de tests
+New bullet in "Git, versioning and delivery" (AC10b):
 
-No hay comportamiento de runtime: no se agregan tests a `tests/`. La verificación son comandos reproducibles; V1 cumple el rol de "test que falla sin la implementación". Casos obligatorios de la plantilla:
+```markdown
+- Dependabot: its PRs are not merged directly (they do not deploy to beta, which is a required check); they are brought into `feature/deps-<slug>` following the exception in "Mandatory feature workflow (Agent Team)". Python is pinned to 3.12: Dependabot ignores its minor/major jumps and upgrading the version is an explicit feature (never the light path).
+```
 
-- anti look-ahead, idempotencia y autorización: **N/A** (no hay indicadores, reglas, señales, Telegram ni API);
-- redacción de secretos: aplica al contenido de la documentación y la cubre V8.
+## Test plan
 
-**Importante para tester y review:** los teammates no commitean, así que los cambios están en el working tree. El `main` local de este worktree está desactualizado, por lo que hay que comparar contra **`origin/main`** con `git diff origin/main` + `git status --porcelain` (no `git diff main...HEAD`). `scripts/secret_scan.py --history` solo escanea commits y no ve cambios sin commitear; por eso V8 usa `gitleaks dir`.
+There is no runtime behavior: no tests are added to `tests/`. Verification consists of reproducible commands; V1 plays the role of the "test that fails without the implementation". Mandatory cases of the template:
 
-| Caso | Tipo | Qué verifica | CA |
-|------|------|--------------|----|
-| V1 | config | Script de abajo con el Python del venv: debe imprimir `dependabot.yml OK`. Sobre `origin/main` falla | CA1, CA2 |
-| V2 | config | `uv run pre-commit run --files .github/dependabot.yml docs/DEPLOYMENT.md SECURITY.md docs/ROADMAP.md CLAUDE.md docs/specs/001-dependabot-python-pin-docs.md` en verde (`check-yaml`, EOF, trailing whitespace, `detect-private-key`) | CA2, CA13 |
-| V3 | docs | En `docs/DEPLOYMENT.md` aparecen literalmente los 5 nombres de checks, `python`, `actions`, `errors`, `high_or_higher`, `Copilot`, `push protection`, `Dependabot alerts`, `security updates` y `2026-09-14`, y **no** queda la línea vieja con 3 checks. Lectura de (a), (b) y (c) | CA4, CA5 |
-| V4 | docs | Existe `### PRs de Dependabot` y la sección 5 enlaza `#prs-de-dependabot`. La subsección incluye: `refs/heads/feature/**`; la condición "solo el bump" con `Dockerfile`, `uv.lock` y SHAs de actions; `feature/deps-`; `cherry-pick`; `build(deps)` y `ci(deps)`; el fallback por aprobación extra de commits no atribuidos; `scripts/check.py`; `8082` y `/health`; el cierre del PR de Dependabot con comentario; la aprobación explícita del usuario; `/feature` como salida; security updates con prioridad; y los puntos donde está fijado Python. Los 6 pasos están en el orden de CA6 | CA6 |
-| V5 | docs | Sección 3: sin "pide el valor por stdin"; con `Read-Host`, `Remove-Variable`, `--body`, `Get-Content`, `-replace`, el mensaje de Tailscale, `Invalid host` y `***` | CA7 |
-| V6 | docs | Fila `GitHub` de `SECURITY.md` con `Dependabot`, `ruleset` y `CodeQL` (CA8); columnas de `ROADMAP.md` con el one-liner de abajo (CA9); `git diff origin/main -- CLAUDE.md` muestra exactamente dos bloques agregados, sin líneas borradas: el párrafo de excepción entre el párrafo introductorio y la tabla de roles de "Flujo obligatorio de features" (CA10a) y un bullet en "Git, versionado y entrega" (CA10b, CA10c). La excepción coincide con los 6 pasos de `docs/DEPLOYMENT.md` y el anchor enlazado existe | CA8–CA10c |
-| V7 | scope | `git diff origin/main --name-only` + `git status --porcelain` listan solo los 6 archivos de CA11 | CA11 |
-| V8 | seguridad | `gitleaks dir --config .gitleaks.toml --redact --no-banner --ignore-gitleaks-allow --exit-code 1 <archivo>` **archivo por archivo** (con varios paths devuelve error) con exit 0 cada uno; grep de abajo sin matches (exit 1); revisión manual de que solo hay placeholders | CA12 |
-| V9 | gate | `uv run python scripts/check.py` y `python scripts/secret_scan.py --history` con exit 0 | CA13 |
-| V10 | post-merge (lead, manual, no bloquea el PR) | Dependabot lee la config desde `main`: en Insights → Dependency graph → Dependabot, el ecosistema docker queda sin error de configuración | CA1 |
+- anti look-ahead, idempotency and authorization: **N/A** (there are no indicators, rules, signals, Telegram or API);
+- secret redaction: applies to the content of the documentation and is covered by V8.
 
-`docker build` no es obligatorio porque el `Dockerfile` no cambia; igual lo cubre `Docker build (arm64)` en el PR.
+**Important for tester and review:** teammates do not commit, so the changes are in the working tree. The local `main` of this worktree is stale, so compare against **`origin/main`** with `git diff origin/main` + `git status --porcelain` (not `git diff main...HEAD`). `scripts/secret_scan.py --history` only scans commits and does not see uncommitted changes; that is why V8 uses `gitleaks dir`.
 
-**V1** (guardar en un archivo temporal fuera del repo y correrlo desde la raíz con `.venv/Scripts/python.exe`; PyYAML ya está en el venv como dependencia transitiva de pre-commit):
+| Case | Type | What it verifies | AC |
+|------|------|------------------|----|
+| V1 | config | Script below with the venv Python: it must print `dependabot.yml OK`. It fails on `origin/main` | AC1, AC2 |
+| V2 | config | `uv run pre-commit run --files .github/dependabot.yml docs/DEPLOYMENT.md SECURITY.md docs/ROADMAP.md CLAUDE.md docs/specs/001-dependabot-python-pin-docs.md` green (`check-yaml`, EOF, trailing whitespace, `detect-private-key`) | AC2, AC13 |
+| V3 | docs | In `docs/DEPLOYMENT.md` the 5 check names, `python`, `actions`, `errors`, `high_or_higher`, `Copilot`, `push protection`, `Dependabot alerts`, `security updates` and `2026-09-14` appear literally, and the old line with 3 checks is **not** left. Reading of (a), (b) and (c) | AC4, AC5 |
+| V4 | docs | `### Dependabot PRs` exists and section 5 links to `#dependabot-prs`. The subsection includes: `refs/heads/feature/**`; the "only the bump" condition with `Dockerfile`, `uv.lock` and action SHAs; `feature/deps-`; `cherry-pick`; `build(deps)` and `ci(deps)`; the fallback for extra approval of unattributed commits; `scripts/check.py`; `8082` and `/health`; closing the Dependabot PR with a comment; explicit user approval; `/feature` as the exit; security updates with priority; and the places where Python is pinned. The 6 steps are in the order of AC6 | AC6 |
+| V5 | docs | Section 3: without "asks for the value via stdin"; with `Read-Host`, `Remove-Variable`, `--body`, `Get-Content`, `-replace`, the Tailscale message, `Invalid host` and `***` | AC7 |
+| V6 | docs | `GitHub` row of `SECURITY.md` with `Dependabot`, `ruleset` and `CodeQL` (AC8); `ROADMAP.md` columns with the one-liner below (AC9); `git diff origin/main -- CLAUDE.md` shows exactly two added blocks, with no deleted lines: the exception paragraph between the introductory paragraph and the roles table of "Mandatory feature workflow" (AC10a) and one bullet in "Git, versioning and delivery" (AC10b, AC10c). The exception matches the 6 steps of `docs/DEPLOYMENT.md` and the linked anchor exists | AC8–AC10c |
+| V7 | scope | `git diff origin/main --name-only` + `git status --porcelain` list only the 6 files of AC11 | AC11 |
+| V8 | security | `gitleaks dir --config .gitleaks.toml --redact --no-banner --ignore-gitleaks-allow --exit-code 1 <file>` **file by file** (with several paths it returns an error) with exit 0 for each; grep below without matches (exit 1); manual review that there are only placeholders | AC12 |
+| V9 | gate | `uv run python scripts/check.py` and `python scripts/secret_scan.py --history` with exit 0 | AC13 |
+| V10 | post-merge (lead, manual, does not block the PR) | Dependabot reads the config from `main`: in Insights → Dependency graph → Dependabot, the docker ecosystem shows no configuration error | AC1 |
+
+`docker build` is not mandatory because the `Dockerfile` does not change; `Docker build (arm64)` covers it on the PR anyway.
+
+**V1** (save it in a temporary file outside the repo and run it from the root with `.venv/Scripts/python.exe`; PyYAML is already in the venv as a transitive dependency of pre-commit):
 
 ```python
 import copy
@@ -242,66 +242,66 @@ old = yaml.safe_load(
 )
 docker = [u for u in new["updates"] if u["package-ecosystem"] == "docker"]
 assert len(docker) == 1, "expected exactly one docker entry"
-assert docker[0].get("ignore") == EXPECTED_IGNORE, f"CA1 ignore mismatch: {docker[0].get('ignore')}"
+assert docker[0].get("ignore") == EXPECTED_IGNORE, f"AC1 ignore mismatch: {docker[0].get('ignore')}"
 stripped = copy.deepcopy(new)
 for u in stripped["updates"]:
     if u["package-ecosystem"] == "docker":
         u.pop("ignore")
-assert stripped == old, "CA2: anything besides docker.ignore changed"
+assert stripped == old, "AC2: anything besides docker.ignore changed"
 print("dependabot.yml OK")
 ```
 
-**V6 (columnas de ROADMAP):**
+**V6 (ROADMAP columns):**
 
 ```bash
 .venv/Scripts/python.exe -c "import sys; rows=[l for l in open('docs/ROADMAP.md',encoding='utf-8') if l.startswith('|')]; n={l.count('|') for l in rows}; print(n); sys.exit(len(n)!=1)"
 ```
 
-**V8 (grep de datos sensibles; lo esperado es exit 1, sin matches):**
+**V8 (sensitive data grep; the expected result is exit 1, no matches):**
 
 ```bash
 grep -nEi '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b|\.ts\.net\b|ssh-(ed25519|rsa)|BEGIN [A-Z ]*PRIVATE KEY|tske[y]-|gh[p]_|github_pa[t]_|\b[a-z_][a-z0-9_-]*@[a-z0-9][a-z0-9.-]*\.[a-z]{2,}\b' CLAUDE.md SECURITY.md docs/DEPLOYMENT.md docs/ROADMAP.md .github/dependabot.yml docs/specs/001-dependabot-python-pin-docs.md
 ```
 
-Los corchetes (`tske[y]-`, `gh[p]_`) evitan que el patrón se encuentre a sí mismo en esta spec. Sobre los archivos actuales y esta spec, el grep ya da exit 1 (sin ruido), así que cualquier match nuevo es un hallazgo a revisar.
+The brackets (`tske[y]-`, `gh[p]_`) keep the pattern from matching itself in this spec. On the current files and this spec, the grep already gives exit 1 (no noise), so any new match is a finding to review.
 
-## Riesgos y seguridad
+## Risks and security
 
-- **Datos de infraestructura en docs públicas.** Los ejemplos de PowerShell y del procedimiento usan solo placeholders. Nunca se pegan salidas reales de `gh secret`, logs de Actions, hostnames del tailnet ni usuarios. El slug `emanuelturtula/trading-bot` es público y ya está en el repo.
-- **`--body "<valor>"` deja el valor en la línea de comandos** (historial del shell, lista de procesos). Por eso la doc lo limita a valores no sensibles y usa `Read-Host` para el resto.
-- **La efectividad del `ignore` recién se ve después del merge a `main`** (Dependabot lee la config de la branch por defecto). Como el PR #2 se cerró, Dependabot tampoco reabriría la 3.14. La prueba real es la próxima minor de Python.
-- **Patches de Python.** Con el tag actual `3.12-slim` (sin componente patch), lo esperable es que Dependabot no proponga PRs para `python`: los parches 3.12.x llegan por el tag flotante en cada rebuild. La regla sigue siendo correcta si en el futuro se fija `3.12.x-slim` o un digest, pero eso queda fuera de alcance.
-- **`require_extra_approval_for_unattributed_changes: true` en el ruleset.** No está verificado cómo interactúa con commits de autoría `dependabot[bot]` traídos por cherry-pick y 0 aprobaciones requeridas. El paso 2 del procedimiento ya prevé la opción manual con commit propio.
-- **El camino liviano no tiene review del tech-lead ni tester.** El riesgo es de supply chain: una dependencia o action comprometida entra sin segunda revisión del equipo. Mitigaciones:
-  - la condición es estricta: cualquier cambio fuera del bump va por `/feature`;
-  - siguen siendo obligatorios gitleaks, lint/mypy, tests, `Docker build (arm64)`, CodeQL, Copilot review y la beta con `/health`;
-  - las actions están fijadas por SHA;
-  - el merge requiere aprobación explícita del usuario.
+- **Infrastructure data in public docs.** The PowerShell and procedure examples use only placeholders. Real output of `gh secret`, Actions logs, tailnet hostnames or users are never pasted. The slug `emanuelturtula/trading-bot` is public and already in the repo.
+- **`--body "<value>"` leaves the value on the command line** (shell history, process list). That is why the doc limits it to non-sensitive values and uses `Read-Host` for the rest.
+- **The effect of the `ignore` rule only becomes visible after the merge to `main`** (Dependabot reads the config from the default branch). Since PR #2 was closed, Dependabot would not reopen 3.14 either. The real test is the next Python minor.
+- **Python patches.** With the current tag `3.12-slim` (without a patch component), Dependabot is expected not to propose PRs for `python`: 3.12.x patches arrive through the floating tag on every rebuild. The rule stays correct if `3.12.x-slim` or a digest is pinned in the future, but that is out of scope.
+- **`require_extra_approval_for_unattributed_changes: true` in the ruleset.** How it interacts with commits authored by `dependabot[bot]` brought in by cherry-pick and 0 required approvals is not verified. Step 2 of the procedure already provides the manual option with a commit of the lead's own.
+- **The light path has no tech-lead or tester review.** The risk is supply chain: a compromised dependency or action gets in without a second review by the team. Mitigations:
+  - the condition is strict: any change beyond the bump goes through `/feature`;
+  - gitleaks, lint/mypy, tests, `Docker build (arm64)`, CodeQL, Copilot review and the beta with `/health` are still mandatory;
+  - actions are pinned by SHA;
+  - the merge requires explicit user approval.
 
-  Recomendado, aunque no forma parte de los CA: que el lead lea las release notes del PR de Dependabot antes del cherry-pick.
-- **Cerrar el PR de Dependabot en el paso 5, antes del merge del reemplazo.** Si el PR de reemplazo se abandona, Dependabot no vuelve a proponer esa misma versión (sí las siguientes). Es aceptable por la decisión D1, pero conviene tenerlo presente.
-- **`DEPLOY_ENABLED` distinto de `true` bloquea todos los merges** (el check de deploy beta nunca se reporta). Queda documentado en CA5 (c).
-- **Deploy:** sin impacto funcional. No hay migraciones, variables `TB_*` ni cambios en `secrets.env`. El push de la branch genera una beta `v0.1.1-beta.<sha7>` con la misma imagen funcional.
-- **Reglas inquebrantables:** no aplica código de runtime; signal-only, `domain/` puro, UTC y un solo worker quedan intactos.
+  Recommended, although not part of the ACs: the lead reads the release notes of the Dependabot PR before the cherry-pick.
+- **Closing the Dependabot PR in step 5, before the replacement is merged.** If the replacement PR is abandoned, Dependabot does not propose that same version again (it does propose later ones). This is acceptable per decision D1, but worth keeping in mind.
+- **`DEPLOY_ENABLED` other than `true` blocks all merges** (the beta deploy check is never reported). It is documented in AC5 (c).
+- **Deploy:** no functional impact. There are no migrations, `TB_*` variables or changes to `secrets.env`. Pushing the branch generates a beta `v0.1.1-beta.<sha7>` with the same functional image.
+- **Unbreakable rules:** no runtime code is involved; signal-only, pure `domain/`, UTC and a single worker remain intact.
 
-## Decisiones del usuario (2026-09-14)
+## User decisions (2026-09-14)
 
-- **D1 (antes P1): camino liviano para PRs de Dependabot.** No pasan por el agent team cuando el cambio es solo el bump de Dependabot (`Dockerfile`, `pyproject.toml`/`uv.lock` o SHAs de actions), sin cambios de código ni de config. Procedimiento, a cargo del lead:
-  1. `feature/deps-<slug>` desde `origin/main`;
-  2. cherry-pick, o el mismo bump a mano con commit propio `build(deps)`/`ci(deps)`, que es la opción a usar si el ruleset exige aprobación extra por commits no atribuidos;
+- **D1 (formerly P1): light path for Dependabot PRs.** They do not go through the agent team when the change is only the Dependabot bump (`Dockerfile`, `pyproject.toml`/`uv.lock` or action SHAs), with no code or config changes. Procedure, owned by the lead:
+  1. `feature/deps-<slug>` from `origin/main`;
+  2. cherry-pick, or the same bump by hand in a commit of the lead's own `build(deps)`/`ci(deps)`, which is the option to use if the ruleset requires extra approval for unattributed commits;
   3. `uv run python scripts/check.py`;
   4. push → CI + beta 8082 → `/health`;
-  5. PR que referencia al de Dependabot, que se cierra con comentario;
-  6. merge solo con aprobación explícita del usuario.
+  5. PR that references the Dependabot one, which is closed with a comment;
+  6. merge only with explicit user approval.
 
-  Si rompe tests o requiere código/config, se usa el flujo completo con `/feature`. Se documenta como excepción explícita en `CLAUDE.md` (CA10a) y en detalle en `docs/DEPLOYMENT.md` (CA6).
-- **D2 (antes P2): Dependabot alerts y security updates activados** por el lead. El tech-lead también lo verificó: `automated-security-fixes` `enabled: true`, `vulnerability-alerts` → 204 y `dependabot_security_updates: enabled`. Las security updates siguen el camino liviano con prioridad. Se documentan en `docs/DEPLOYMENT.md` sección 5 (CA4), en `SECURITY.md` (CA8) y en la excepción de `CLAUDE.md` (CA10a).
+  If it breaks tests or requires code/config, the full workflow with `/feature` is used. It is documented as an explicit exception in `CLAUDE.md` (AC10a) and in detail in `docs/DEPLOYMENT.md` (AC6).
+- **D2 (formerly P2): Dependabot alerts and security updates enabled** by the lead. The tech-lead also verified it: `automated-security-fixes` `enabled: true`, `vulnerability-alerts` → 204 and `dependabot_security_updates: enabled`. Security updates follow the light path with priority. They are documented in `docs/DEPLOYMENT.md` section 5 (AC4), in `SECURITY.md` (AC8) and in the `CLAUDE.md` exception (AC10a).
 
-## Checklist de revisión (tech-lead)
+## Review checklist (tech-lead)
 
-- [ ] Cumple las reglas inquebrantables de CLAUDE.md
-- [ ] Diff sin secretos, IPs, hostnames ni usuarios (V8 + revisión manual)
-- [ ] Cada CA verificado por el tester con evidencia (V1–V9); V1 falla sin la implementación
-- [ ] Scope limitado a los 6 archivos de CA11
-- [ ] La excepción de `CLAUDE.md` está acotada a bumps puros de Dependabot y coincide con `docs/DEPLOYMENT.md` (D1)
-- [ ] `scripts/check.py` en verde
+- [ ] Meets the unbreakable rules of CLAUDE.md
+- [ ] Diff contains no secrets, IPs, hostnames or users (V8 + manual review)
+- [ ] Each AC verified by the tester with evidence (V1–V9); V1 fails without the implementation
+- [ ] Scope limited to the 6 files of AC11
+- [ ] The `CLAUDE.md` exception is limited to pure Dependabot bumps and matches `docs/DEPLOYMENT.md` (D1)
+- [ ] `scripts/check.py` green

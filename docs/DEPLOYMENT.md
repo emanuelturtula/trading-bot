@@ -1,35 +1,35 @@
 # Deploy
 
-> Este documento es público: usa placeholders. **Nunca** escribir acá IPs (LAN o tailnet), hostnames, usuarios, claves ni tokens reales.
+> This document is public: it uses placeholders. **Never** write real IPs (LAN or tailnet), hostnames, users, keys or tokens here.
 
-## Resumen
+## Summary
 
-| Evento | Pipeline | Imagen | Destino |
-|--------|----------|--------|---------|
-| Pull request | `ci.yml` | build arm64 sin push | — |
-| Push a `feature/**` | `delivery.yml` | `ghcr.io/emanuelturtula/trading-bot:vX.Y.Z-beta.<sha7>` | contenedor `trading-bot-beta`, puerto **8082** |
-| Push a `main` (merge) | `delivery.yml` | `...:sha-<sha>`; tras deploy sano: `:vX.Y.Z` y `:latest` | contenedor `trading-bot-prod`, puerto **8081**, tag git + GitHub Release |
+| Event | Pipeline | Image | Target |
+|-------|----------|-------|--------|
+| Pull request | `ci.yml` | arm64 build without push | — |
+| Push to `feature/**` | `delivery.yml` | `ghcr.io/emanuelturtula/trading-bot:vX.Y.Z-beta.<sha7>` | container `trading-bot-beta`, port **8082** |
+| Push to `main` (merge) | `delivery.yml` | `...:sha-<sha>`; after a healthy deploy: `:vX.Y.Z` and `:latest` | container `trading-bot-prod`, port **8081**, git tag + GitHub Release |
 
-Flujo de `delivery.yml`: `ci.yml` (gitleaks → lint/mypy → tests) → `next_version.py` → build arm64 nativo (`ubuntu-24.04-arm`) → push a GHCR → `remote-deploy.yml` → release (solo main).
+`delivery.yml` flow: `ci.yml` (gitleaks → lint/mypy → tests) → `next_version.py` → native arm64 build (`ubuntu-24.04-arm`) → push to GHCR → `remote-deploy.yml` → release (main only).
 
-`remote-deploy.yml` une el runner al tailnet con Tailscale OIDC (nodo efímero con `tag:trading-bot-ci`), y `scripts/remote_deploy.py`:
+`remote-deploy.yml` joins the runner to the tailnet with Tailscale OIDC (ephemeral node with `tag:trading-bot-ci`), and `scripts/remote_deploy.py`:
 
-1. valida todos los inputs y que el run sea un push de este repo (`main` → prod, `feature/**` → beta);
-2. copia `deploy/deploy.py` y `deploy/compose.yml` a un directorio temporal de la Pi;
-3. hace `docker login ghcr.io` con el token efímero del job **por stdin**;
-4. ejecuta `deploy.py` y borra el directorio temporal.
+1. validates all inputs and that the run is a push from this repo (`main` → prod, `feature/**` → beta);
+2. copies `deploy/deploy.py` and `deploy/compose.yml` to a temporary directory on the Pi;
+3. runs `docker login ghcr.io` with the job's ephemeral token **via stdin**;
+4. runs `deploy.py` and deletes the temporary directory.
 
-`deploy/deploy.py` (en la Pi):
+`deploy/deploy.py` (on the Pi):
 
-- toma un lock de host (beta y prod nunca deployan en paralelo);
-- rechaza runs más viejos que el deployado (un rerun viejo no pisa uno nuevo);
-- hace `docker pull` por digest y verifica los labels OCI `revision` y `version`;
-- hace backup de la base SQLite del contenedor actual;
-- `docker compose up --wait` y verifica que corra el digest exacto con healthcheck `healthy`;
-- si falla, restaura el deploy anterior; si no había, baja el contenedor y conserva el volumen;
-- escribe `current.json` solo si el deploy quedó sano y conserva los últimos 10 intentos.
+- takes a host lock (beta and prod never deploy in parallel);
+- rejects runs older than the deployed one (an old rerun does not overwrite a new one);
+- runs `docker pull` by digest and verifies the OCI labels `revision` and `version`;
+- backs up the SQLite database of the current container;
+- `docker compose up --wait` and verifies that the exact digest is running with a `healthy` healthcheck;
+- if it fails, restores the previous deploy; if there was none, stops the container and keeps the volume;
+- writes `current.json` only if the deploy ended up healthy and keeps the last 10 attempts.
 
-## Layout en la Raspberry
+## Layout on the Raspberry
 
 ```
 ~/trading-bot-deploy/                 (chmod 700)
@@ -38,142 +38,142 @@ Flujo de `delivery.yml`: `ci.yml` (gitleaks → lint/mypy → tests) → `next_v
   prod/  secrets.env (600)  current.json  attempts/...
 ```
 
-Proyectos compose: `trading-bot-beta` (8082 → 8000) y `trading-bot-prod` (8081 → 8000), cada uno con su volumen `data`.
+Compose projects: `trading-bot-beta` (8082 → 8000) and `trading-bot-prod` (8081 → 8000), each with its own `data` volume.
 
-## Setup inicial (una sola vez)
+## Initial setup (only once)
 
-Requisitos en la Pi: Docker con Compose v2, `python3` y la Pi unida al tailnet.
+Requirements on the Pi: Docker with Compose v2, `python3` and the Pi joined to the tailnet.
 
 ### 1. Tailscale
 
-1. En la policy del tailnet, **agregar** (sin reemplazar la policy existente) el tag `tag:trading-bot-ci` con un tag owner adecuado y acceso **solo** al puerto TCP 22 de la Raspberry.
-2. Crear una credencial **OpenID Connect trust** con issuer GitHub y subject:
+1. In the tailnet policy, **add** (without replacing the existing policy) the tag `tag:trading-bot-ci` with a suitable tag owner and access **only** to TCP port 22 of the Raspberry.
+2. Create an **OpenID Connect trust** credential with the GitHub issuer and subject:
    `repo:emanuelturtula@<OWNER_ID>/trading-bot@<REPO_ID>:ref:refs/heads/*`
-   Los IDs se obtienen con `gh api repos/emanuelturtula/trading-bot --jq '.owner.id, .id'`. Scope: solo *Auth Keys write* con `tag:trading-bot-ci`. No ampliar el subject a otros repos ni a pull requests.
-3. Guardar el client ID y el audience como secrets del repo: `TS_OAUTH_CLIENT_ID` y `TS_AUDIENCE`.
+   The IDs are obtained with `gh api repos/emanuelturtula/trading-bot --jq '.owner.id, .id'`. Scope: only *Auth Keys write* with `tag:trading-bot-ci`. Do not widen the subject to other repos or to pull requests.
+3. Store the client ID and the audience as repo secrets: `TS_OAUTH_CLIENT_ID` and `TS_AUDIENCE`.
 
-### 2. Clave SSH de deploy
+### 2. Deploy SSH key
 
-1. Generar una clave Ed25519 **dedicada** (no reutilizar tu clave personal ni la de GitHub).
-2. Agregar la mitad pública al `authorized_keys` del usuario de deploy en la Pi.
-3. Guardar la privada como secret `DEPLOY_SSH_KEY`.
-4. Armar la entrada `known_hosts` de la Pi **para su hostname o IP del tailnet** desde una sesión SSH de confianza (no con un `ssh-keyscan` sin verificar) y guardarla como `DEPLOY_KNOWN_HOSTS`.
+1. Generate a **dedicated** Ed25519 key (do not reuse your personal key or your GitHub key).
+2. Add the public half to the `authorized_keys` of the deploy user on the Pi.
+3. Store the private half as the `DEPLOY_SSH_KEY` secret.
+4. Build the Pi's `known_hosts` entry **for its tailnet hostname or IP** from a trusted SSH session (not with an unverified `ssh-keyscan`) and store it as `DEPLOY_KNOWN_HOSTS`.
 
-### 3. Secrets y variables de GitHub
+### 3. GitHub secrets and variables
 
-| Nombre | Tipo | Contenido |
-|--------|------|-----------|
-| `TS_OAUTH_CLIENT_ID` | secret | Client ID de la credencial OIDC de Tailscale |
-| `TS_AUDIENCE` | secret | Audience de la credencial OIDC |
-| `DEPLOY_HOST` | secret | Hostname o IP del tailnet de la Pi (es secret para que se enmascare en los logs públicos) |
-| `DEPLOY_USER` | secret | Usuario de deploy en la Pi |
-| `DEPLOY_SSH_KEY` | secret | Clave privada de deploy |
-| `DEPLOY_KNOWN_HOSTS` | secret | Entrada known_hosts de la Pi |
-| `DEPLOY_ENABLED` | **variable** | `true` cuando todo lo anterior está listo |
+| Name | Type | Content |
+|------|------|---------|
+| `TS_OAUTH_CLIENT_ID` | secret | Client ID of the Tailscale OIDC credential |
+| `TS_AUDIENCE` | secret | Audience of the OIDC credential |
+| `DEPLOY_HOST` | secret | Tailnet hostname or IP of the Pi (a secret so that it is masked in the public logs) |
+| `DEPLOY_USER` | secret | Deploy user on the Pi |
+| `DEPLOY_SSH_KEY` | secret | Deploy private key |
+| `DEPLOY_KNOWN_HOSTS` | secret | known_hosts entry of the Pi |
+| `DEPLOY_ENABLED` | **variable** | `true` when everything above is ready |
 
-> **Atención (PowerShell):** no cargar secrets con el prompt interactivo de `gh secret set <NOMBRE>` (sin `--body`). En PowerShell ese prompt puede guardar un valor **vacío** sin mostrar ningún error, y el problema recién aparece cuando falla el deploy.
+> **Warning (PowerShell):** do not load secrets with the interactive prompt of `gh secret set <NAME>` (without `--body`). In PowerShell that prompt can store an **empty** value without showing any error, and the problem only shows up when the deploy fails.
 
-Formas verificadas en PowerShell:
+Verified forms in PowerShell:
 
 ```powershell
-# Valor no sensible (queda escrito en la línea de comandos y en el historial)
-gh secret set <NOMBRE> --repo emanuelturtula/trading-bot --body "<valor>"
+# Non-sensitive value (it is written on the command line and in the history)
+gh secret set <NAME> --repo emanuelturtula/trading-bot --body "<value>"
 
-# Valor pegado a la vista, sin escribirlo en la línea de comandos
-$v = Read-Host "<NOMBRE>"
-gh secret set <NOMBRE> --repo emanuelturtula/trading-bot --body $v
+# Value pasted visibly, without writing it on the command line
+$v = Read-Host "<NAME>"
+gh secret set <NAME> --repo emanuelturtula/trading-bot --body $v
 Remove-Variable v
 
-# Archivo: PowerShell no tiene redirección de entrada `<`; se quitan los CR de Windows
-gh secret set DEPLOY_SSH_KEY --repo emanuelturtula/trading-bot --body ((Get-Content "$HOME\.ssh\<clave>" -Raw) -replace "`r", "")
+# File: PowerShell has no `<` input redirection; Windows CRs are removed
+gh secret set DEPLOY_SSH_KEY --repo emanuelturtula/trading-bot --body ((Get-Content "$HOME\.ssh\<key>" -Raw) -replace "`r", "")
 ```
 
-`DEPLOY_KNOWN_HOSTS` se carga igual que la clave, con la ruta de su `<archivo>`. En bash/zsh, donde `<` sí existe, alcanza con `gh secret set <NOMBRE> --repo emanuelturtula/trading-bot < <archivo>`.
+`DEPLOY_KNOWN_HOSTS` is loaded the same way as the key, with the path of its `<file>`. In bash/zsh, where `<` does exist, `gh secret set <NAME> --repo emanuelturtula/trading-bot < <file>` is enough.
 
-Síntomas de un secret vacío en el job de deploy (`Deploy beta (8082) / Deploy beta` o `Deploy production (8081) / Deploy prod`):
+Symptoms of an empty secret in the deploy job (`Deploy beta (8082) / Deploy beta` or `Deploy production (8081) / Deploy prod`):
 
-- el step `Join tailnet (OIDC, ephemeral)` falla con `Please provide either an auth key, OAuth secret and tags, or federated identity client ID and audience with tags.` (`TS_OAUTH_CLIENT_ID` o `TS_AUDIENCE` vacíos);
-- el step `Deploy and verify health` falla con `ValueError: Invalid host` (o `Invalid user`) de `scripts/remote_deploy.py` (`DEPLOY_HOST` o `DEPLOY_USER` vacíos);
-- `DEPLOY_SSH_KEY` o `DEPLOY_KNOWN_HOSTS` vacíos o con CR de Windows terminan en errores de `ssh` (`Permission denied (publickey)`, `Host key verification failed`);
-- en el log, los inputs y variables de entorno del step muestran el valor **en blanco** en lugar de `***` (GitHub solo enmascara secrets con contenido).
+- the `Join tailnet (OIDC, ephemeral)` step fails with `Please provide either an auth key, OAuth secret and tags, or federated identity client ID and audience with tags.` (`TS_OAUTH_CLIENT_ID` or `TS_AUDIENCE` empty);
+- the `Deploy and verify health` step fails with `ValueError: Invalid host` (or `Invalid user`) from `scripts/remote_deploy.py` (`DEPLOY_HOST` or `DEPLOY_USER` empty);
+- `DEPLOY_SSH_KEY` or `DEPLOY_KNOWN_HOSTS` empty or containing Windows CRs end in `ssh` errors (`Permission denied (publickey)`, `Host key verification failed`);
+- in the log, the step's inputs and environment variables show the value **blank** instead of `***` (GitHub only masks secrets that have content).
 
-Remedio: recargar el secret con una de las formas de arriba y re-ejecutar el job fallido (*Re-run failed jobs* o `gh run rerun <run-id> --failed --repo emanuelturtula/trading-bot`). Los secrets se leen al ejecutar el job, así que no hace falta un push nuevo.
+Remedy: reload the secret with one of the forms above and re-run the failed job (*Re-run failed jobs* or `gh run rerun <run-id> --failed --repo emanuelturtula/trading-bot`). Secrets are read when the job runs, so a new push is not needed.
 
-Mientras `DEPLOY_ENABLED` no sea `true`, el pipeline buildea la imagen y reporta "deployment NOT performed", y ningún PR puede mergearse porque el check obligatorio de deploy beta nunca se reporta (ver [sección 5, consecuencia (c)](#5-protección-del-repositorio)).
+While `DEPLOY_ENABLED` is not `true`, the pipeline builds the image and reports "deployment NOT performed", and no PR can be merged because the required beta deploy check is never reported (see [section 5, consequence (c)](#5-repository-protection)).
 
-### 4. Secretos de la aplicación (en la Pi)
+### 4. Application secrets (on the Pi)
 
-Crear un bot distinto por entorno con @BotFather. En la Pi:
+Create a different bot per environment with @BotFather. On the Pi:
 
 ```sh
 mkdir -p ~/trading-bot-deploy/beta ~/trading-bot-deploy/prod
 chmod 700 ~/trading-bot-deploy
 umask 077
 cat > ~/trading-bot-deploy/beta/secrets.env <<'EOF'
-TB_TELEGRAM_BOT_TOKEN=<token del bot beta>
+TB_TELEGRAM_BOT_TOKEN=<beta bot token>
 TB_TELEGRAM_ALLOWED_CHAT_IDS=<chat id>
 TB_DASHBOARD_PASSWORD_HASH=<hash>
-TB_SESSION_SECRET=<valor aleatorio largo>
+TB_SESSION_SECRET=<long random value>
 EOF
 chmod 600 ~/trading-bot-deploy/beta/secrets.env
 ```
 
-Repetir para `prod/secrets.env` con el token del bot de producción. `deploy.py` nunca lee este archivo; solo lo crea vacío si falta y se niega a deployar si tiene permisos más abiertos que 600. Los cambios aplican al reiniciar: `docker compose --project-name trading-bot-beta restart app` (o `trading-bot-prod`).
+Repeat for `prod/secrets.env` with the production bot token. `deploy.py` never reads this file; it only creates it empty if it is missing and refuses to deploy if its permissions are more open than 600. Changes apply on restart: `docker compose --project-name trading-bot-beta restart app` (or `trading-bot-prod`).
 
-### 5. Protección del repositorio
+### 5. Repository protection
 
-Estado verificado el 2026-09-14 (solo lectura). Para re-verificarlo: `gh ruleset list --repo emanuelturtula/trading-bot` y `gh ruleset view <id> --repo emanuelturtula/trading-bot`.
+Status verified on 2026-09-14 (read-only). To re-verify it: `gh ruleset list --repo emanuelturtula/trading-bot` and `gh ruleset view <id> --repo emanuelturtula/trading-bot`.
 
-- **Ruleset `main`**: activo sobre la branch por defecto, **sin bypass** (nadie puede saltearlo, tampoco los administradores).
-  - Pull request obligatorio, con 0 aprobaciones requeridas.
-  - Status checks obligatorios (GitHub Actions): `Secrets scan`, `Lint & types`, `Tests`, `Docker build (arm64)` y `Deploy beta (8082) / Deploy beta`. Modo strict: la branch del PR tiene que estar actualizada con `main`.
-  - Code scanning obligatorio con CodeQL (default setup, lenguajes `python` y `actions`): bloquea el merge con alertas de severidad `errors` o alertas de seguridad `high_or_higher`.
-  - Borrado de la branch y force push bloqueados.
-  - Copilot code review automático en cada push (no en PRs draft).
-- Secret scanning y push protection: **activos**.
-- Dependabot alerts y security updates: **activos**. Sus PRs, igual que los de version updates, se procesan según [PRs de Dependabot](#prs-de-dependabot).
-- Actions: permisos por defecto del `GITHUB_TOKEN` en solo lectura (`read`), GitHub Actions no puede aprobar pull requests y los workflows de forks requieren aprobación para contribuidores primerizos (`first_time_contributors`).
+- **`main` ruleset**: active on the default branch, **without bypass** (nobody can skip it, not even administrators).
+  - Pull request required, with 0 required approvals.
+  - Required status checks (GitHub Actions): `Secrets scan`, `Lint & types`, `Tests`, `Docker build (arm64)` and `Deploy beta (8082) / Deploy beta`. Strict mode: the PR branch must be up to date with `main`.
+  - Required code scanning with CodeQL (default setup, languages `python` and `actions`): it blocks the merge on alerts of severity `errors` or security alerts `high_or_higher`.
+  - Branch deletion and force push blocked.
+  - Automatic Copilot code review on every push (not on draft PRs).
+- Secret scanning and push protection: **enabled**.
+- Dependabot alerts and security updates: **enabled**. Their PRs, like those of version updates, are processed according to [Dependabot PRs](#dependabot-prs).
+- Actions: default `GITHUB_TOKEN` permissions set to read-only (`read`), GitHub Actions cannot approve pull requests and workflows from forks require approval for first-time contributors (`first_time_contributors`).
 
-Consecuencias:
+Consequences:
 
-- **(a) Todo PR mergeable sale de una branch `feature/**` con beta deployada.** `Docker build (arm64)` solo corre en eventos `pull_request` (`ci.yml`) y `Deploy beta (8082) / Deploy beta` solo en push a `feature/**` (`delivery.yml`). Un PR desde otra branch nunca reporta el check de deploy beta; los de Dependabot se procesan según [PRs de Dependabot](#prs-de-dependabot).
-- **(b) Branch actualizada (strict).** Si `main` avanzó, hay que actualizar la branch (botón *Update branch* o `git merge origin/main` + push). Ese push vuelve a disparar CI y el deploy a beta, y hay que esperar a que terminen en verde antes de mergear.
-- **(c) `DEPLOY_ENABLED`.** Si la variable no es `true`, el job `Deploy beta (8082)` se saltea, el check obligatorio `Deploy beta (8082) / Deploy beta` no se reporta (queda esperando el status) y **ningún PR puede mergearse**.
+- **(a) Every mergeable PR comes from a `feature/**` branch with beta deployed.** `Docker build (arm64)` only runs on `pull_request` events (`ci.yml`) and `Deploy beta (8082) / Deploy beta` only on push to `feature/**` (`delivery.yml`). A PR from any other branch never reports the beta deploy check; Dependabot PRs are processed according to [Dependabot PRs](#dependabot-prs).
+- **(b) Up-to-date branch (strict).** If `main` moved ahead, the branch must be updated (*Update branch* button or `git merge origin/main` + push). That push triggers CI and the beta deploy again, and you must wait for them to finish green before merging.
+- **(c) `DEPLOY_ENABLED`.** If the variable is not `true`, the `Deploy beta (8082)` job is skipped, the required check `Deploy beta (8082) / Deploy beta` is not reported (it keeps waiting for the status) and **no PR can be merged**.
 
-### 6. Setup local (cada clon)
+### 6. Local setup (every clone)
 
 ```sh
-winget install Gitleaks.Gitleaks      # o: brew install gitleaks
-pip install uv                        # o el instalador oficial de uv
+winget install Gitleaks.Gitleaks      # or: brew install gitleaks
+pip install uv                        # or the official uv installer
 uv sync
 uv run pre-commit install
 ```
 
-## Operación
+## Operations
 
-- Estado: `curl http://<DEPLOY_HOST>:8082/health` (beta) y `:8081/health` (prod) desde la LAN o el tailnet.
+- Status: `curl http://<DEPLOY_HOST>:8082/health` (beta) and `:8081/health` (prod) from the LAN or the tailnet.
 - Logs: `docker compose --project-name trading-bot-prod logs -f app`.
-- Último deploy: `~/trading-bot-deploy/prod/current.json`; historial en `attempts/`.
-- Rollback manual: re-ejecutar el workflow del commit anterior no está permitido (protección de orden de runs). Revertir con un PR (`git revert`) y mergear.
-- Restaurar la base: el backup previo a cada deploy queda en `attempts/<id>/database.sqlite3`.
+- Last deploy: `~/trading-bot-deploy/prod/current.json`; history in `attempts/`.
+- Manual rollback: re-running the workflow of the previous commit is not allowed (run ordering protection). Revert with a PR (`git revert`) and merge.
+- Restoring the database: the backup taken before each deploy is kept in `attempts/<id>/database.sqlite3`.
 
-### PRs de Dependabot
+### Dependabot PRs
 
-Los PRs de Dependabot (version updates y security updates) **no se mergean directo**. Sus branches `dependabot/**` no disparan `delivery.yml` (solo corre en push a `feature/**` y `main`) y `scripts/remote_deploy.py` solo acepta deploys beta desde `refs/heads/feature/**`, así que el check obligatorio `Deploy beta (8082) / Deploy beta` nunca se reporta y el PR queda bloqueado (ver [sección 5](#5-protección-del-repositorio)). El cambio se trae a una branch `feature/deps-<slug>`.
+Dependabot PRs (version updates and security updates) **are not merged directly**. Their `dependabot/**` branches do not trigger `delivery.yml` (it only runs on push to `feature/**` and `main`) and `scripts/remote_deploy.py` only accepts beta deploys from `refs/heads/feature/**`, so the required check `Deploy beta (8082) / Deploy beta` is never reported and the PR stays blocked (see [section 5](#5-repository-protection)). The change is brought into a `feature/deps-<slug>` branch.
 
-**Camino liviano (sin agent team).** Aplica solo si el cambio es exclusivamente el bump generado por Dependabot: tag o digest en el `Dockerfile`, versiones en `pyproject.toml`/`uv.lock` o SHAs de actions en `.github/workflows/`, sin cambios de código ni de configuración. Las security updates siguen este mismo camino, con prioridad. Lo ejecuta el lead:
+**Light path (without the agent team).** It applies only if the change is exclusively the bump generated by Dependabot: tag or digest in the `Dockerfile`, versions in `pyproject.toml`/`uv.lock` or action SHAs in `.github/workflows/`, with no code or configuration changes. Security updates follow this same path, with priority. The lead runs it:
 
-1. Revisar el PR de Dependabot (changelog de la dependencia, diff y CI) y crear la branch desde `main` actualizado:
+1. Review the Dependabot PR (the dependency's changelog, diff and CI) and create the branch from an up-to-date `main`:
    ```sh
    git fetch origin
    git switch -c feature/deps-<slug> origin/main
    ```
-2. Traer el cambio con `git cherry-pick <sha>` del commit de Dependabot (`gh pr view <número> --repo emanuelturtula/trading-bot --json commits --jq '.commits[].oid'` lista los SHAs), o aplicar el mismo bump a mano en un commit propio (`build(deps): ...` o `ci(deps): ...`). Usar la opción manual si el cherry-pick no aplica limpio (`git cherry-pick --abort`) o si el ruleset pide aprobación extra por commits no atribuidos (autoría `dependabot[bot]`).
-3. Correr `uv run python scripts/check.py`.
-4. Pushear la branch: corre CI y el deploy a beta (puerto 8082). Verificar con `curl http://<DEPLOY_HOST>:8082/health` que la respuesta traiga `status` `ok`, `environment` `beta` y la `version` de ese run (`vX.Y.Z-beta.<sha7>`, la del summary del run). Un `/health` sano con la versión anterior no prueba que el bump esté deployado.
-5. Abrir el PR desde `feature/deps-<slug>` referenciando el de Dependabot (por ejemplo, "Reemplaza #<número>") y cerrar el de Dependabot con un comentario que apunte al reemplazo: `gh pr close <número> --repo emanuelturtula/trading-bot --comment "Reemplazado por #<número del PR nuevo>"`. Al cerrarlo, Dependabot no vuelve a proponer esa versión: si el reemplazo no llega a mergearse, retomar el bump desde `feature/deps-<slug>` o aplicarlo a mano (Dependabot borra su branch al cerrar el PR, así que reabrirlo no es una vía confiable).
-6. Merge solo con aprobación explícita del usuario.
+2. Bring in the change with `git cherry-pick <sha>` of the Dependabot commit (`gh pr view <number> --repo emanuelturtula/trading-bot --json commits --jq '.commits[].oid'` lists the SHAs), or apply the same bump by hand in a commit of your own (`build(deps): ...` or `ci(deps): ...`). Use the manual option if the cherry-pick does not apply cleanly (`git cherry-pick --abort`) or if the ruleset asks for extra approval because of unattributed commits (authored by `dependabot[bot]`).
+3. Run `uv run python scripts/check.py`.
+4. Push the branch: CI and the beta deploy run (port 8082). Verify with `curl http://<DEPLOY_HOST>:8082/health` that the response contains `status` `ok`, `environment` `beta` and the `version` of that run (`vX.Y.Z-beta.<sha7>`, the one in the run summary). A healthy `/health` with the previous version does not prove that the bump is deployed.
+5. Open the PR from `feature/deps-<slug>` referencing the Dependabot one (for example, "Replaces #<number>") and close the Dependabot one with a comment pointing to the replacement: `gh pr close <number> --repo emanuelturtula/trading-bot --comment "Replaced by #<new PR number>"`. Once it is closed, Dependabot does not propose that version again: if the replacement does not get merged, resume the bump from `feature/deps-<slug>` or apply it by hand (Dependabot deletes its branch when the PR is closed, so reopening it is not a reliable route).
+6. Merge only with explicit user approval.
 
-Si el bump rompe tests o requiere cambios de código o de configuración, deja de ser liviano y pasa por el flujo completo del agent team (`/feature`, ver [CLAUDE.md](../CLAUDE.md)).
+If the bump breaks tests or requires code or configuration changes, it is no longer light and goes through the full agent team workflow (`/feature`, see [CLAUDE.md](../CLAUDE.md)).
 
-**Python está fijado en 3.12** en `.python-version`, `requires-python` (`pyproject.toml`), `[tool.ruff] target-version`, `[tool.mypy] python_version` y los dos `FROM` del `Dockerfile`. Dependabot ignora sus saltos minor/major (regla `ignore` del ecosistema `docker` en `.github/dependabot.yml`). Subir de versión es una feature explícita que actualiza todos esos puntos, `uv.lock` y la regla `ignore`.
+**Python is pinned to 3.12** in `.python-version`, `requires-python` (`pyproject.toml`), `[tool.ruff] target-version`, `[tool.mypy] python_version` and the two `FROM` lines of the `Dockerfile`. Dependabot ignores its minor/major jumps (`ignore` rule of the `docker` ecosystem in `.github/dependabot.yml`). Upgrading the version is an explicit feature that updates all those places, `uv.lock` and the `ignore` rule.

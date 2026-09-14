@@ -71,7 +71,35 @@ Requisitos en la Pi: Docker con Compose v2, `python3` y la Pi unida al tailnet.
 | `DEPLOY_KNOWN_HOSTS` | secret | Entrada known_hosts de la Pi |
 | `DEPLOY_ENABLED` | **variable** | `true` cuando todo lo anterior está listo |
 
-Cargar los valores con `gh secret set <NOMBRE>` (pide el valor por stdin, así no queda en el historial del shell). Mientras `DEPLOY_ENABLED` no sea `true`, el pipeline buildea la imagen y reporta "deployment NOT performed".
+> **Atención (PowerShell):** no cargar secrets con el prompt interactivo de `gh secret set <NOMBRE>` (sin `--body`). En PowerShell ese prompt puede guardar un valor **vacío** sin mostrar ningún error, y el problema recién aparece cuando falla el deploy.
+
+Formas verificadas en PowerShell:
+
+```powershell
+# Valor no sensible (queda escrito en la línea de comandos y en el historial)
+gh secret set <NOMBRE> --repo emanuelturtula/trading-bot --body "<valor>"
+
+# Valor pegado a la vista, sin escribirlo en la línea de comandos
+$v = Read-Host "<NOMBRE>"
+gh secret set <NOMBRE> --repo emanuelturtula/trading-bot --body $v
+Remove-Variable v
+
+# Archivo: PowerShell no tiene redirección de entrada `<`; se quitan los CR de Windows
+gh secret set DEPLOY_SSH_KEY --repo emanuelturtula/trading-bot --body ((Get-Content "$HOME\.ssh\<clave>" -Raw) -replace "`r", "")
+```
+
+`DEPLOY_KNOWN_HOSTS` se carga igual que la clave, con la ruta de su `<archivo>`. En bash/zsh, donde `<` sí existe, alcanza con `gh secret set <NOMBRE> --repo emanuelturtula/trading-bot < <archivo>`.
+
+Síntomas de un secret vacío en el job de deploy (`Deploy beta (8082) / Deploy beta` o `Deploy production (8081) / Deploy prod`):
+
+- el step `Join tailnet (OIDC, ephemeral)` falla con `Please provide either an auth key, OAuth secret and tags, or federated identity client ID and audience with tags.` (`TS_OAUTH_CLIENT_ID` o `TS_AUDIENCE` vacíos);
+- el step `Deploy and verify health` falla con `ValueError: Invalid host` (o `Invalid user`) de `scripts/remote_deploy.py` (`DEPLOY_HOST` o `DEPLOY_USER` vacíos);
+- `DEPLOY_SSH_KEY` o `DEPLOY_KNOWN_HOSTS` vacíos o con CR de Windows terminan en errores de `ssh` (`Permission denied (publickey)`, `Host key verification failed`);
+- en el log, los inputs y variables de entorno del step muestran el valor **en blanco** en lugar de `***` (GitHub solo enmascara secrets con contenido).
+
+Remedio: recargar el secret con una de las formas de arriba y re-ejecutar el job fallido (*Re-run failed jobs* o `gh run rerun <run-id> --failed --repo emanuelturtula/trading-bot`). Los secrets se leen al ejecutar el job, así que no hace falta un push nuevo.
+
+Mientras `DEPLOY_ENABLED` no sea `true`, el pipeline buildea la imagen y reporta "deployment NOT performed", y ningún PR puede mergearse porque el check obligatorio de deploy beta nunca se reporta (ver [sección 5, consecuencia (c)](#5-protección-del-repositorio)).
 
 ### 4. Secretos de la aplicación (en la Pi)
 
@@ -94,9 +122,23 @@ Repetir para `prod/secrets.env` con el token del bot de producción. `deploy.py`
 
 ### 5. Protección del repositorio
 
-- Secret scanning y push protection: **activos** (verificado).
-- Ruleset para `main`: PR obligatorio, checks requeridos (`Secrets scan`, `Lint & types`, `Tests`), sin force push ni borrado.
-- Actions: permisos por defecto del `GITHUB_TOKEN` en solo lectura y aprobación requerida para workflows de forks.
+Estado verificado el 2026-09-14 (solo lectura). Para re-verificarlo: `gh ruleset list --repo emanuelturtula/trading-bot` y `gh ruleset view <id> --repo emanuelturtula/trading-bot`.
+
+- **Ruleset `main`**: activo sobre la branch por defecto, **sin bypass** (nadie puede saltearlo, tampoco los administradores).
+  - Pull request obligatorio, con 0 aprobaciones requeridas.
+  - Status checks obligatorios (GitHub Actions): `Secrets scan`, `Lint & types`, `Tests`, `Docker build (arm64)` y `Deploy beta (8082) / Deploy beta`. Modo strict: la branch del PR tiene que estar actualizada con `main`.
+  - Code scanning obligatorio con CodeQL (default setup, lenguajes `python` y `actions`): bloquea el merge con alertas de severidad `errors` o alertas de seguridad `high_or_higher`.
+  - Borrado de la branch y force push bloqueados.
+  - Copilot code review automático en cada push (no en PRs draft).
+- Secret scanning y push protection: **activos**.
+- Dependabot alerts y security updates: **activos**. Sus PRs, igual que los de version updates, se procesan según [PRs de Dependabot](#prs-de-dependabot).
+- Actions: permisos por defecto del `GITHUB_TOKEN` en solo lectura (`read`), GitHub Actions no puede aprobar pull requests y los workflows de forks requieren aprobación para contribuidores primerizos (`first_time_contributors`).
+
+Consecuencias:
+
+- **(a) Todo PR mergeable sale de una branch `feature/**` con beta deployada.** `Docker build (arm64)` solo corre en eventos `pull_request` (`ci.yml`) y `Deploy beta (8082) / Deploy beta` solo en push a `feature/**` (`delivery.yml`). Un PR desde otra branch nunca reporta el check de deploy beta; los de Dependabot se procesan según [PRs de Dependabot](#prs-de-dependabot).
+- **(b) Branch actualizada (strict).** Si `main` avanzó, hay que actualizar la branch (botón *Update branch* o `git merge origin/main` + push). Ese push vuelve a disparar CI y el deploy a beta, y hay que esperar a que terminen en verde antes de mergear.
+- **(c) `DEPLOY_ENABLED`.** Si la variable no es `true`, el job `Deploy beta (8082)` se saltea, el check obligatorio `Deploy beta (8082) / Deploy beta` no se reporta (queda esperando el status) y **ningún PR puede mergearse**.
 
 ### 6. Setup local (cada clon)
 
@@ -114,3 +156,24 @@ uv run pre-commit install
 - Último deploy: `~/trading-bot-deploy/prod/current.json`; historial en `attempts/`.
 - Rollback manual: re-ejecutar el workflow del commit anterior no está permitido (protección de orden de runs). Revertir con un PR (`git revert`) y mergear.
 - Restaurar la base: el backup previo a cada deploy queda en `attempts/<id>/database.sqlite3`.
+
+### PRs de Dependabot
+
+Los PRs de Dependabot (version updates y security updates) **no se mergean directo**. Sus branches `dependabot/**` no disparan `delivery.yml` (solo corre en push a `feature/**` y `main`) y `scripts/remote_deploy.py` solo acepta deploys beta desde `refs/heads/feature/**`, así que el check obligatorio `Deploy beta (8082) / Deploy beta` nunca se reporta y el PR queda bloqueado (ver [sección 5](#5-protección-del-repositorio)). El cambio se trae a una branch `feature/deps-<slug>`.
+
+**Camino liviano (sin agent team).** Aplica solo si el cambio es exclusivamente el bump generado por Dependabot: tag o digest en el `Dockerfile`, versiones en `pyproject.toml`/`uv.lock` o SHAs de actions en `.github/workflows/`, sin cambios de código ni de configuración. Las security updates siguen este mismo camino, con prioridad. Lo ejecuta el lead:
+
+1. Revisar el PR de Dependabot (changelog de la dependencia, diff y CI) y crear la branch desde `main` actualizado:
+   ```sh
+   git fetch origin
+   git switch -c feature/deps-<slug> origin/main
+   ```
+2. Traer el cambio con `git cherry-pick <sha>` del commit de Dependabot (`gh pr view <número> --repo emanuelturtula/trading-bot --json commits --jq '.commits[].oid'` lista los SHAs), o aplicar el mismo bump a mano en un commit propio (`build(deps): ...` o `ci(deps): ...`). Usar la opción manual si el cherry-pick no aplica limpio (`git cherry-pick --abort`) o si el ruleset pide aprobación extra por commits no atribuidos (autoría `dependabot[bot]`).
+3. Correr `uv run python scripts/check.py`.
+4. Pushear la branch: corre CI y el deploy a beta (puerto 8082). Verificar con `curl http://<DEPLOY_HOST>:8082/health` que la respuesta traiga `status` `ok`, `environment` `beta` y la `version` de ese run (`vX.Y.Z-beta.<sha7>`, la del summary del run). Un `/health` sano con la versión anterior no prueba que el bump esté deployado.
+5. Abrir el PR desde `feature/deps-<slug>` referenciando el de Dependabot (por ejemplo, "Reemplaza #<número>") y cerrar el de Dependabot con un comentario que apunte al reemplazo: `gh pr close <número> --repo emanuelturtula/trading-bot --comment "Reemplazado por #<número del PR nuevo>"`. Al cerrarlo, Dependabot no vuelve a proponer esa versión: si el reemplazo no llega a mergearse, retomar el bump desde `feature/deps-<slug>` o aplicarlo a mano (Dependabot borra su branch al cerrar el PR, así que reabrirlo no es una vía confiable).
+6. Merge solo con aprobación explícita del usuario.
+
+Si el bump rompe tests o requiere cambios de código o de configuración, deja de ser liviano y pasa por el flujo completo del agent team (`/feature`, ver [CLAUDE.md](../CLAUDE.md)).
+
+**Python está fijado en 3.12** en `.python-version`, `requires-python` (`pyproject.toml`), `[tool.ruff] target-version`, `[tool.mypy] python_version` y los dos `FROM` del `Dockerfile`. Dependabot ignora sus saltos minor/major (regla `ignore` del ecosistema `docker` en `.github/dependabot.yml`). Subir de versión es una feature explícita que actualiza todos esos puntos, `uv.lock` y la regla `ignore`.

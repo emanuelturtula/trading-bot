@@ -23,6 +23,8 @@ RUN useradd --uid 1000 --create-home --shell /usr/sbin/nologin app \
     && chown app:app /app/data
 WORKDIR /app
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
+# Fail the build if TA-Lib cannot load or compute on this platform (linux/arm64 in CI).
+RUN ["python", "-c", "import numpy as np, talib, trading_bot.domain.indicators.catalog; raise SystemExit(0 if talib.SMA(np.arange(1.0, 6.0), timeperiod=5)[-1] == 3.0 else 1)"]
 USER app
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 \

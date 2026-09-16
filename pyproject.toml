@@ -12,6 +12,7 @@ dependencies = [
     "pandas>=3.0.5",
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
+    "ta-lib>=0.8.0",
     "uvicorn>=0.30",
 ]
 

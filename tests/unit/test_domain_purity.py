@@ -1,9 +1,11 @@
-"""Purity guard for ``src/trading_bot/domain`` (spec 004, Test plan T15, AC15).
+"""Purity guard for ``src/trading_bot/domain`` (spec 004, Test plan T15, AC15; spec 005, T12).
 
 An AST scan enforces the import allowlist, the ban on reading the clock and the ban on
-mutable module-level state (everything except ``__all__``). A subprocess check confirms
-that importing the lightweight modules (``utc``, ``timeframe``, ``signals``) in a fresh
-interpreter never pulls ``pandas``/``numpy`` into ``sys.modules`` (CLAUDE.md rule 3).
+mutable module-level state (everything except ``__all__``). ``talib`` is allowed only in
+``indicators/talib_kernels.py``, so TA-Lib stays replaceable (spec 005, Design 9). A subprocess
+check confirms that importing the lightweight modules (``utc``, ``timeframe``, ``signals``,
+``indicators.errors``, ``indicators.params``) in a fresh interpreter never pulls
+``pandas``/``numpy`` into ``sys.modules`` (CLAUDE.md rule 3).
 
 The scanner itself is exercised against synthetic source snippets first, so a green result
 on the real domain modules is not just "the scanner never triggers".
@@ -38,10 +40,17 @@ _ALLOWED_EXACT_MODULES = frozenset(
     }
 )
 _ALLOWED_PREFIXES = ("numpy", "pandas", "trading_bot.domain")
+# Extra import prefixes allowed in one module only, by path relative to the domain package.
+_EXTRA_PREFIXES_BY_FILE = {"indicators/talib_kernels.py": ("talib",)}
 _CLOCK_ATTRIBUTES = frozenset({"now", "utcnow", "today"})
 
 DOMAIN_DIR = Path(trading_bot.domain.__file__).resolve().parent
 DOMAIN_FILES = sorted(DOMAIN_DIR.rglob("*.py"))
+
+
+def _relative(path: Path) -> str:
+    """``path`` relative to the domain package, with forward slashes on every platform."""
+    return path.relative_to(DOMAIN_DIR).as_posix()
 
 
 def _imported_module_names(node: ast.Import | ast.ImportFrom) -> list[str]:
@@ -53,19 +62,23 @@ def _imported_module_names(node: ast.Import | ast.ImportFrom) -> list[str]:
     return [f"{dots}{alias.name}" for alias in node.names]
 
 
-def _is_allowed_module(name: str) -> bool:
+def _is_allowed_module(name: str, prefixes: tuple[str, ...]) -> bool:
     if name in _ALLOWED_EXACT_MODULES:
         return True
-    return any(name == prefix or name.startswith(f"{prefix}.") for prefix in _ALLOWED_PREFIXES)
+    return any(name == prefix or name.startswith(f"{prefix}.") for prefix in prefixes)
 
 
-def disallowed_imports(tree: ast.Module) -> list[str]:
-    """Names imported by ``tree`` that are outside the spec 004 allowlist, in source order."""
+def disallowed_imports(tree: ast.Module, *, extra_prefixes: tuple[str, ...] = ()) -> list[str]:
+    """Names imported by ``tree`` that are outside the allowlist, in source order.
+
+    ``extra_prefixes`` extends the allowed prefixes for one module (``talib`` for the kernels).
+    """
+    prefixes = (*_ALLOWED_PREFIXES, *extra_prefixes)
     found: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import | ast.ImportFrom):
             names = _imported_module_names(node)
-            found.extend(name for name in names if not _is_allowed_module(name))
+            found.extend(name for name in names if not _is_allowed_module(name, prefixes))
     return found
 
 
@@ -120,36 +133,48 @@ def _parse(path: Path) -> ast.Module:
 # --- The real domain modules (T15) ----------------------------------------------------------
 
 
-@pytest.mark.parametrize("path", DOMAIN_FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", DOMAIN_FILES, ids=_relative)
 def test_domain_module_imports_stay_within_the_allowlist(path: Path) -> None:
-    found = disallowed_imports(_parse(path))
+    extra = _EXTRA_PREFIXES_BY_FILE.get(_relative(path), ())
+    found = disallowed_imports(_parse(path), extra_prefixes=extra)
 
-    assert found == [], f"{path.name} imports outside the spec 004 allowlist: {found}"
+    assert found == [], f"{_relative(path)} imports outside the domain allowlist: {found}"
 
 
-@pytest.mark.parametrize("path", DOMAIN_FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", DOMAIN_FILES, ids=_relative)
 def test_domain_module_never_reads_the_clock(path: Path) -> None:
     found = clock_calls(_parse(path))
 
-    assert found == [], f"{path.name} reads the clock: {found}"
+    assert found == [], f"{_relative(path)} reads the clock: {found}"
 
 
-@pytest.mark.parametrize("path", DOMAIN_FILES, ids=lambda p: p.name)
+@pytest.mark.parametrize("path", DOMAIN_FILES, ids=_relative)
 def test_domain_module_has_no_mutable_module_level_state(path: Path) -> None:
     found = mutable_module_level_names(_parse(path))
 
-    assert found == [], f"{path.name} has mutable module-level state: {found}"
+    assert found == [], f"{_relative(path)} has mutable module-level state: {found}"
 
 
 def test_at_least_the_expected_modules_were_scanned() -> None:
     """Guards against an empty glob silently making every parametrized test vacuous."""
-    assert {path.name for path in DOMAIN_FILES} == {
+    assert {_relative(path) for path in DOMAIN_FILES} == {
         "__init__.py",
         "utc.py",
         "timeframe.py",
         "candles.py",
         "signals.py",
+        "indicators/__init__.py",
+        "indicators/errors.py",
+        "indicators/params.py",
+        "indicators/spec.py",
+        "indicators/registry.py",
+        "indicators/talib_kernels.py",
+        "indicators/catalog.py",
     }
+
+
+def test_talib_is_allowed_only_in_the_kernels_module() -> None:
+    assert _EXTRA_PREFIXES_BY_FILE == {"indicators/talib_kernels.py": ("talib",)}
 
 
 # --- Self-tests: the scanner rejects synthetic violations, not just real code ---------------
@@ -186,6 +211,22 @@ def test_scanner_accepts_every_form_of_allowed_import() -> None:
         "import trading_bot.domain.timeframe\n"
     )
     assert disallowed_imports(ast.parse(source)) == []
+
+
+def test_scanner_flags_talib_without_the_kernels_allowance() -> None:
+    tree = ast.parse("import talib\nfrom talib._ta_lib import MA_Type\n")
+
+    assert disallowed_imports(tree) == ["talib", "talib._ta_lib"]
+
+
+def test_scanner_accepts_talib_with_the_kernels_allowance() -> None:
+    tree = ast.parse("import talib\nfrom talib._ta_lib import MA_Type\nimport os\n")
+
+    assert disallowed_imports(tree, extra_prefixes=("talib",)) == ["os"]
+
+
+def test_scanner_does_not_treat_a_longer_name_as_an_allowed_prefix() -> None:
+    assert disallowed_imports(ast.parse("import talibx\n"), extra_prefixes=("talib",)) == ["talibx"]
 
 
 def test_scanner_flags_datetime_now() -> None:
@@ -261,6 +302,8 @@ def _fresh_interpreter_sys_modules(*modules: str) -> dict[str, bool]:
         "trading_bot.domain.utc",
         "trading_bot.domain.timeframe",
         "trading_bot.domain.signals",
+        "trading_bot.domain.indicators.errors",
+        "trading_bot.domain.indicators.params",
     ],
 )
 def test_lightweight_domain_modules_do_not_load_pandas_or_numpy(module: str) -> None:

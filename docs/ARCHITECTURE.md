@@ -122,6 +122,70 @@ signal = Signal(
 assert str(signal.idempotency_key) == "AAPL|1d|42|2024-01-03T05:00:00+00:00"
 ```
 
+## Indicators
+
+Rules can only use the closed catalog of `domain/indicators/` (`CLAUDE.md` rules 3, 4 and 8). Design, exact definitions and decisions: spec [005](specs/005-indicator-registry.md).
+
+```python
+from tests.fixtures.candles import synthetic_candles
+from trading_bot.domain.indicators.catalog import REGISTRY
+
+candles = synthetic_candles(300)  # validated closed candles from the data provider in production
+params = REGISTRY.validate_params("macd", {"fast": 8})  # fast=8, slow=26, signal=9
+output = REGISTRY.resolve_output("macd", "hist")  # required: macd has several outputs
+
+hist = REGISTRY.compute("macd", params, candles)[output]  # float64 series on candles.index
+assert hist.iloc[: REGISTRY.lookback("macd", params)].isna().all()
+assert REGISTRY.warmup("macd", params) == 34  # candles for a value at the last candle
+assert REGISTRY.stable_warmup("macd", params) == 164  # candles to fetch for reproducible values
+```
+
+`REGISTRY` (`catalog.py`) is an immutable `IndicatorRegistry`. Names are exact and case-sensitive. `validate_params` rejects undeclared names, booleans, non-integral values for integer parameters, values out of range and violated constraints with an `IndicatorError` (a `ValueError` with `kind`, `indicator`, `parameter` and `output`), and fills defaults. `describe()` returns the catalog as JSON-ready metadata for the dashboard.
+
+### Catalog
+
+| Name | Inputs | Parameters: default `[min, max]` | Outputs | `lookback` | `settle` |
+|------|--------|----------------------------------|---------|------------|----------|
+| `sma` | close | `length` 20 `[2, 500]` | `value` | `length - 1` | `0` |
+| `ema` | close | `length` 20 `[2, 500]` | `value` | `length - 1` | `ema_settle(length)` |
+| `rsi` | close | `length` 14 `[2, 100]` | `value` | `length` | `7 * length` |
+| `macd` | close | `fast` 12 `[2, 100]`, `slow` 26 `[3, 200]`, `signal` 9 `[1, 100]`; `fast < slow` | `macd`, `signal`, `hist` | `slow + signal - 2` | `ema_settle(slow) + ema_settle(signal)` |
+| `bbands` | close | `length` 20 `[2, 500]`, `std` 2.0 `[0.1, 5.0]` (float) | `lower`, `middle`, `upper` | `length - 1` | `0` |
+| `atr` | high, low, close | `length` 14 `[1, 100]` | `value` | `length` | `7 * length` |
+| `adx` | high, low, close | `length` 14 `[2, 100]` | `value` | `2 * length - 1` | `10 * length` |
+| `stoch` | high, low, close | `length` 14 `[1, 100]`, `smooth_k` 3 `[1, 100]`, `smooth_d` 3 `[1, 100]` | `k`, `d` | `length + smooth_k + smooth_d - 3` | `0` |
+| `obv` | close, volume | `signal` 20 `[2, 500]` | `value`, `signal` | `signal - 1` | `0` |
+| `volume_sma` | volume | `length` 20 `[2, 500]` | `value` | `length - 1` | `0` |
+
+Parameters are integers except `bbands` `std`. `ema_settle(p) = (7 * (p + 1) + 1) // 2`, that is `ceil(3.5 * (p + 1))`. Renaming a parameter or changing a range requires migrating stored rules.
+
+### Outputs
+
+- `compute(name, params, candles)` validates the name, the parameters and then the frame (`validate_candles`), and returns a new `dict` with one series per output in declared order: `float64`, named after the output, as long as the frame and indexed by `candles.index`. It never modifies `candles`.
+- Every output is NaN before row position `lookback` (never back-filled), and never `±inf`. `macd`, `stoch` and `obv` start all their outputs at the same position, although their first line is defined earlier.
+- Values are NaN, not TA-Lib's substituted `0`, where they are undefined: `rsi` while every close so far equals the first one; `adx` until the first candle with directional movement; `stoch` `k` when the high-low range of a window it averages is zero, and `d` when one of the `k` values it averages is undefined. Flat candles of a halted or illiquid ticker therefore do not fire `stoch k < 20` on substituted zeros. `macd` and `atr` give `0` and `bbands` three equal bands on flat data, which are correct values.
+- `macd`, `bbands`, `stoch` and `obv` have several outputs and no default: rules must name one (`resolve_output`). The others default to `value`.
+
+### Warmup and reproducibility
+
+- `warmup = lookback + 1` is the minimum frame length for a value at the last candle; rules can fire from it (crossovers need one more candle).
+- `stable_warmup = warmup + settle` is the frame length after which a recursive indicator no longer depends on where the history starts, within about 0.1% (the seed weighs about `e^-7`). The window indicators (`sma`, `bbands`, `stoch`, `volume_sma`) have `settle = 0`.
+- Values computed on a fetch window that starts later differ slightly from long-history values until `stable_warmup`. That is not look-ahead, but it affects reproducibility between runs and against backtests. The data layer and the engine (#8, #14) fetch at least the rules' `stable_warmup` candles, or everything available, and log when a provider limit caps the history. Requiring `stable_warmup` to fire would silence young tickers (`ema` `length=200` would need 904 daily candles).
+- History limits: 730 days of `1h` US equity data is about 3 500 bars and the `4h` resample about 1 000. `stable_warmup` exceeds 1 000 from `ema` `length=222`, `rsi` and `atr` `length=125`, `adx` `length=84`, and `macd` `slow=200` with `signal >= 21`; such rules still fire from `warmup`, but runs may differ by up to about 0.1% as the window moves.
+- **`obv`:** the level is a cumulative sum from the first candle of the frame, so moving the start shifts `value` by a constant, and `signal` (its simple moving average) by the same constant. Comparing `value` with `signal`, including crossovers, does not depend on the history start; comparing `value` or `signal` with a fixed value, a price or another indicator never becomes reproducible.
+
+### TA-Lib isolation
+
+- Only `talib_kernels.py` imports `talib`; `registry.py`, `spec.py`, `params.py` and `errors.py` never load it, so TA-Lib can be replaced by rewriting one module. The purity guard enforces it.
+- TA-Lib unstable-period setters change results process-wide: they are never called in `src/` and must not be called by any code in the process. The `ema`, `macd`, `rsi`, `atr` and `adx` kernels check that the relevant unstable period is `0` on every call and raise `IndicatorComputationError` (a `RuntimeError`) otherwise, instead of returning shifted values. The compatibility setter has been a no-op since TA-Lib C 0.8.1, which removed the MetaStock compatibility mode; it is not called either. With no setter calls, `compute` holds no state and is safe to call from several threads.
+
+### How to add an indicator
+
+1. A spec with the definition, parameters (names, defaults, ranges), outputs, `lookback`, `settle` and undefined values.
+2. A kernel in `talib_kernels.py`: every TA-Lib parameter by keyword, explicit moving-average types, masks for undefined values computed from candles at or before each position, and the unstable-period guard when the TA-Lib function has one.
+3. A `catalog.py` entry with `lookback` and `settle`, and its row in the catalog table above.
+4. Golden cases computed by hand, an independent plain-Python reference compared on the fixture matrix, look-ahead tests on every `Scenario` plus the property test, warmup and stable-warmup tests, and the updated `describe()` expectations.
+
 ## Rule model
 
 Rules are defined from the dashboard and stored as JSON validated with pydantic. There is no `eval`.
@@ -152,7 +216,7 @@ Rules are defined from the dashboard and stored as JSON validated with pydantic.
 - Operands: `{"indicator", "params", "output"?}` · `{"price": "open|high|low|close|volume"}` · `{"value": number}`.
 - Operators: `<`, `<=`, `>`, `>=`, `crosses_above`, `crosses_below`.
 - Groups: `all` / `any`, nestable up to 2 levels.
-- Indicators (initial whitelist): `sma`, `ema`, `rsi`, `macd` (`macd|signal|hist`), `bbands` (`lower|middle|upper`), `atr`, `adx`, `stoch` (`k|d`), `obv`, `volume_sma`.
+- Indicators (initial whitelist): `sma`, `ema`, `rsi`, `macd` (`macd|signal|hist`), `bbands` (`lower|middle|upper`), `atr`, `adx`, `stoch` (`k|d`), `obv` (`value|signal`), `volume_sma`. Parameters, ranges and outputs: [Indicators](#indicators).
 - Each indicator declares its allowed parameters and ranges; the evaluator rejects anything outside the whitelist.
 - `cooldown_bars`: minimum candles between two signals of the same rule and ticker.
 - A rule is assigned to one or more tickers.
@@ -299,7 +363,7 @@ Misuse of the harness (for example fewer than 2 candles or `ks` containing 0) ra
 
 ## Decisions
 
-- **TA-Lib instead of pandas-ta.** pandas-ta lost its repository and its PyPI history and changed maintainers (supply chain risk). TA-Lib ≥ 0.6.5 publishes wheels with the C library included, also for aarch64. It stays isolated behind the indicator registry so it can be replaced.
+- **TA-Lib instead of pandas-ta.** pandas-ta lost its repository and its PyPI history and changed maintainers (supply chain risk). The `ta-lib` 0.8.0 wheels bundle the TA-Lib C library, including `manylinux` aarch64 for Python 3.12, so the image needs no compiler or system package (the `Dockerfile` smoke check fails the build otherwise). It is imported only by `domain/indicators/talib_kernels.py`, behind the indicator registry, so it can be replaced. TA-Lib global setters must never be called.
 - **Long polling and not webhooks** for Telegram: the Pi does not expose public endpoints.
 - **HTMX and not an SPA**: a single Python image, no Node toolchain.
 - **SQLite**: a single writer process, a Docker volume and a backup before each deploy.

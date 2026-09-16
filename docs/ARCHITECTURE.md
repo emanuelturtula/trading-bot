@@ -42,7 +42,7 @@ The user decides whether to trade. **There is no order execution layer** and one
 
 | Layer | Responsibility | Rules |
 |-------|----------------|-------|
-| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`; `Rule` in #6), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
+| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator (#7) | No I/O, no clock, no globals. Testable with fixed DataFrames. |
 | `data/` | `MarketDataProvider` (Protocol) and `YFinanceProvider`: normalizes to UTC OHLCV, discards the open candle, retries with backoff | Never decides signals. Respects Yahoo's limits (intraday max. 60 days; 1h up to 730 days). |
 | `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → dedupe/cooldown → persistence → notification | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`. |
 | `scheduler/` | APScheduler (AsyncIOScheduler). One job per timeframe, fired at candle close + margin, only during market hours | A single instance per process. |
@@ -188,7 +188,7 @@ Parameters are integers except `bbands` `std`. `ema_settle(p) = (7 * (p + 1) + 1
 
 ## Rule model
 
-Rules are defined from the dashboard and stored as JSON validated with pydantic. There is no `eval`.
+Rules are defined from the dashboard, validated with pydantic against the indicator whitelist and stored as JSON. There is no `eval` (`CLAUDE.md` rule 8). Design, bounds and decisions: spec [006](specs/006-rule-schema.md).
 
 ```json
 {
@@ -213,13 +213,81 @@ Rules are defined from the dashboard and stored as JSON validated with pydantic.
 }
 ```
 
-- Operands: `{"indicator", "params", "output"?}` · `{"price": "open|high|low|close|volume"}` · `{"value": number}`.
-- Operators: `<`, `<=`, `>`, `>=`, `crosses_above`, `crosses_below`.
-- Groups: `all` / `any`, nestable up to 2 levels.
-- Indicators (initial whitelist): `sma`, `ema`, `rsi`, `macd` (`macd|signal|hist`), `bbands` (`lower|middle|upper`), `atr`, `adx`, `stoch` (`k|d`), `obv` (`value|signal`), `volume_sma`. Parameters, ranges and outputs: [Indicators](#indicators).
-- Each indicator declares its allowed parameters and ranges; the evaluator rejects anything outside the whitelist.
-- `cooldown_bars`: minimum candles between two signals of the same rule and ticker.
-- A rule is assigned to one or more tickers.
+```python
+import json
+
+from trading_bot.domain.rules.schema import dump_rule, parse_rule
+
+rule = parse_rule(document)  # the JSON above as text, UTF-8 bytes or a mapping
+canonical = dump_rule(rule)  # every default filled, in the canonical key order
+assert canonical["conditions"]["all"][0]["left"] == {
+    "indicator": "rsi",
+    "params": {"length": 14},
+    "output": "value",
+}
+assert parse_rule(json.dumps(canonical)) == rule  # the canonical form is a fixed point
+assert rule.warmup() == 200  # candles before the rule can fire
+assert rule.stable_warmup() == 200  # candles for values independent of the history start
+```
+
+### Grammar
+
+```text
+rule        := {"name": string, "signal": "BUY"|"SELL", "timeframe": "1h"|"4h"|"1d",
+                "conditions": group, "cooldown_bars"?: integer}
+group       := {"all": [item, ...]} | {"any": [item, ...]}          # exactly one key, 1..10 items
+item        := condition | nested                                    # only inside the root group
+nested      := {"all": [condition, ...]} | {"any": [condition, ...]} # exactly one key, 1..10 items
+condition   := {"left": operand, "op": operator, "right": operand}
+operand     := {"indicator": name, "params"?: object, "output"?: string}
+             | {"price": "open"|"high"|"low"|"close"|"volume"}
+             | {"value": number}
+operator    := "<" | "<=" | ">" | ">=" | "crosses_above" | "crosses_below"
+```
+
+- **Operands.** An operand has **exactly one** of `indicator`, `price` or `value`. `indicator` is an exact, case-sensitive name of the [whitelist](#indicators) (`sma`, `ema`, `rsi`, `macd`, `bbands`, `atr`, `adx`, `stoch`, `obv`, `volume_sma`); its `params` are validated by the registry and its `output` must be named for `macd`, `bbands`, `stoch` and `obv`, which have no default output. `price` is a candle column and `value` a constant.
+- **Levels.** The root group is level 1 and a group inside it is level 2; a group at level 3 is rejected. `conditions` is always a group: a single condition is written `{"all": [condition]}`.
+- **Optional keys are absent, not null.** `params`, `output` and `cooldown_bars` are omitted when unset; an explicit `null` is rejected.
+- **Nothing is coerced and unknown keys are rejected everywhere:** `"14"`, `14.0` and `true` are not integers, `"30"` is not a number, and `"1D"`, `" 1d "` or `"buy"` are not valid codes.
+- **Semantics.** A condition whose two sides are constants, or whose two operands are equal once normalized, is rejected: it cannot depend on the market. Duplicated, contradictory or unit-mismatched conditions stay valid; the domain does not judge a strategy.
+- `cooldown_bars` is the minimum number of closed candles between two notified signals of the same rule and ticker; `0` means no cooldown (idempotency by `(ticker, timeframe, rule_id, candle_close_ts)` still prevents resending the same candle). It is implemented in #14.
+- `timeframe` is the candle timeframe the rule is evaluated on, a `Timeframe` code with the exact [#4 semantics](#timeframes). It must equal the timeframe of every ticker the rule is assigned to: #12 rejects an assignment whose timeframes differ.
+- A rule is assigned to one or more tickers (#12). A rule document carries no identifier and no ticker list: `rule_id` and `enabled` belong to the database.
+
+| Bound | Value |
+|-------|-------|
+| Members per group | 10 |
+| Conditions per rule | 20 |
+| Nesting levels | 2 |
+| Rule name | 1 to 80 printable characters, surrounding whitespace stripped |
+| `cooldown_bars` | integer in `[0, 500]`, default `0` |
+| Constant operand | finite number with `abs(value) <= 1e15` |
+| Document | 65 536 UTF-8 bytes |
+| Problems per error | 20 |
+
+### Canonical form
+
+`dump_rule(rule)` writes the accepted rule back with every default filled: `params` holds every declared parameter in declaration order, `output` is always explicit and `value` is always a float. The keys are in the order of the grammar above (`name`, `signal`, `timeframe`, `conditions`, `cooldown_bars`; `left`, `op`, `right`; `indicator`, `params`, `output`). Two documents that differ only in omitted defaults, key order or `30` against `30.0` give equal, hashable and frozen rules.
+
+`Rule.model_dump(mode="json")` and `Rule.model_dump_json()` produce the same document, so a rule encoded through pydantic (a stored row, an API response) is the canonical one too.
+
+This is what keeps stored rules stable (#12 stores `json.dumps(dump_rule(rule))`): changing a catalog default later cannot silently change the meaning of a rule already saved, and the same document always produces the same signals.
+
+### Validation and errors
+
+`parse_rule` is the only entry point for untrusted input and raises `RuleValidationError` (a `ValueError`) for every rejection, including a payload above the byte cap, invalid UTF-8, malformed JSON, `NaN`/`Infinity` literals, duplicate JSON keys and documents nested thousands of levels deep. `Rule.model_validate` stays available for in-process construction from trusted values and raises pydantic's `ValidationError` instead.
+
+The error carries `kind`, `path` and `problems`: one `RuleProblem(kind, path, message)` per rejected field, in document order, at most 20. `kind` is a `RuleErrorKind` (`unknown_indicator`, `invalid_parameter`, `invalid_operand`, `nested_too_deep`, `degenerate_condition`, `too_large`, ... with `invalid_rule` as the catch-all), and `path` locates the field (`conditions.all[1].left.params.length`). Every message is one English line, every path segment is at most 32 characters and every path at most 160: rule documents are attacker-controlled and these strings reach logs, Telegram and HTTP responses, so user input only appears as a `repr()`-escaped, truncated echo and the raw input is never copied.
+
+### Warmup
+
+`rule.warmup()` is the number of candles the rule needs before it can fire: the maximum over its conditions of the maximum over the two operands of `REGISTRY.warmup(indicator, params)` for an indicator, `1` for a price and `0` for a constant, plus one candle for both sides when the operator is a crossover, and never below `1`. `rule.stable_warmup()` is the same with `REGISTRY.stable_warmup` and is always at least `warmup()`. The rule above gives `200`/`200`; `macd` crossing its signal line gives `35`/`165`, `rsi` crossing `30` gives `16`/`114` and a rule of prices and constants gives `1`/`1`. The data layer and the engine (#8, #14) fetch at least `stable_warmup()` candles over the rules of a ticker.
+
+### JSON Schema
+
+`rule_json_schema()` exports the document as a JSON Schema draft 2020-12, with the indicator operand inlined as a `oneOf` with one branch per registry indicator: a `const` name, one typed property per declared parameter (`integer`/`number` with `minimum`, `maximum`, `default`, `title` and `description` from `describe()`), the allowed outputs as an `enum` and the parameter constraints as advisory `x-constraints`. It is generated from the models and the catalog, so it cannot drift from them, and the dashboard rule builder (#24) uses it to render forms and pre-validate.
+
+The server is authoritative: in four documented cases the schema accepts what the model rejects, because draft 2020-12 cannot express them — non-integral numbers for integer fields (`14.0`), the `less_than` constraints between parameters (`macd` `fast < slow`), the degenerate-condition checks, and the rule-name stripping and printability rules together with the total number of conditions.
 
 ## Look-ahead testing
 

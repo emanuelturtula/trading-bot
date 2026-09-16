@@ -122,7 +122,7 @@ Repeat for `prod/secrets.env` with the production bot token. `deploy.py` never r
 
 ### 5. Repository protection
 
-Status verified on 2026-09-14 (read-only). To re-verify it: `gh ruleset list --repo emanuelturtula/trading-bot` and `gh ruleset view <id> --repo emanuelturtula/trading-bot`.
+Ruleset status verified on 2026-09-14 and merge settings verified on 2026-09-16 (read-only). To re-verify: `gh ruleset list --repo emanuelturtula/trading-bot`, `gh ruleset view <id> --repo emanuelturtula/trading-bot` and `gh api repos/emanuelturtula/trading-bot --jq '{allow_merge_commit, allow_squash_merge, allow_rebase_merge}'`.
 
 - **`main` ruleset**: active on the default branch, **without bypass** (nobody can skip it, not even administrators).
   - Pull request required, with 0 required approvals.
@@ -130,6 +130,7 @@ Status verified on 2026-09-14 (read-only). To re-verify it: `gh ruleset list --r
   - Required code scanning with CodeQL (default setup, languages `python` and `actions`): it blocks the merge on alerts of severity `errors` or security alerts `high_or_higher`.
   - Branch deletion and force push blocked.
   - Automatic Copilot code review on every push (not on draft PRs).
+- **Merge method: squash only.** Repository settings: `allow_squash_merge: true`, `allow_merge_commit: false`, `allow_rebase_merge: false`; default squash title `COMMIT_OR_PR_TITLE` and message `COMMIT_MESSAGES`; `delete_branch_on_merge: false`. The `main` ruleset lists merge, squash and rebase in `allowed_merge_methods`, but the repository settings also apply: `gh pr merge --merge` fails with "Merge commits are not allowed on this repository". How to merge: [Merging pull requests](#merging-pull-requests).
 - Secret scanning and push protection: **enabled**.
 - Dependabot alerts and security updates: **enabled**. Their PRs, like those of version updates, are processed according to [Dependabot PRs](#dependabot-prs).
 - Actions: default `GITHUB_TOKEN` permissions set to read-only (`read`), GitHub Actions cannot approve pull requests and workflows from forks require approval for first-time contributors (`first_time_contributors`).
@@ -139,6 +140,9 @@ Consequences:
 - **(a) Every mergeable PR comes from a `feature/**` branch with beta deployed.** `Docker build (arm64)` only runs on `pull_request` events (`ci.yml`) and `Deploy beta (8082) / Deploy beta` only on push to `feature/**` (`delivery.yml`). A PR from any other branch never reports the beta deploy check; Dependabot PRs are processed according to [Dependabot PRs](#dependabot-prs).
 - **(b) Up-to-date branch (strict).** If `main` moved ahead, the branch must be updated (*Update branch* button or `git merge origin/main` + push). That push triggers CI and the beta deploy again, and you must wait for them to finish green before merging.
 - **(c) `DEPLOY_ENABLED`.** If the variable is not `true`, the `Deploy beta (8082)` job is skipped, the required check `Deploy beta (8082) / Deploy beta` is not reported (it keeps waiting for the status) and **no PR can be merged**.
+- **(d) One commit per PR on `main`.** Only the squash commit reaches `main`, and `scripts/next_version.py` computes the version from the commits since the last tag: its subject must be a Conventional Commit that describes the whole PR (see [Merging pull requests](#merging-pull-requests)).
+- **(e) Stacked PRs.** After a PR is squash-merged, the next PR of the stack still contains the original commits of the merged one and is behind `main`. Force push is blocked, so it is updated with a merge and a normal push (no force push), following the procedure in [Merging pull requests](#merging-pull-requests).
+- **(f) CodeQL on retargeted or reopened PRs.** CodeQL default setup analyzes a PR when it is opened or receives a push with base `main`. A PR retargeted to `main` after its last push, or closed and reopened, is not analyzed and stays blocked on the code scanning rule until a new push to its branch.
 
 ### 6. Local setup (every clone)
 
@@ -157,6 +161,33 @@ uv run pre-commit install
 - Manual rollback: re-running the workflow of the previous commit is not allowed (run ordering protection). Revert with a PR (`git revert`) and merge.
 - Restoring the database: the backup taken before each deploy is kept in `attempts/<id>/database.sqlite3`.
 
+### Merging pull requests
+
+Only with explicit user approval, and only as a squash merge (see [section 5](#5-repository-protection)):
+
+```sh
+gh pr merge <n> --repo emanuelturtula/trading-bot --squash --subject "<PR title> (#<n>)" --body "<body>"
+```
+
+- **Subject.** The PR title, a Conventional Commit in English (`<type>[(<scope>)][!]: <description>`), followed by ` (#<n>)`. `scripts/next_version.py` only sees this commit, so the type describes the whole PR: `feat` if it adds any feature (minor), `!` if any change is breaking (major, minor while < 1.0), otherwise the type of the change (patch).
+- **Body.** Always explicit, for example `Closes #<issue>. Spec: docs/specs/NNN-<slug>.md.` The default body (`COMMIT_MESSAGES`) concatenates every branch commit, review fixups included, and can carry a `BREAKING CHANGE:` line into `main`, which `scripts/next_version.py` reads as a breaking change. Add a `BREAKING CHANGE:` footer only when the PR is breaking.
+- After the merge, follow the `main` run of `delivery.yml` and verify the prod deploy on 8081 (`vX.Y.Z`) and the GitHub Release.
+
+**Stacked PRs.** PR k+1 targets branch k. Merge the stack one PR at a time, from the bottom:
+
+1. Squash-merge PR k. Do not delete branch k before PR k+1 is retargeted.
+2. `git fetch origin`, `git switch <branch-k+1>` and `git pull --ff-only`. **Only then** check both preconditions (each must exit 0):
+   - `git diff --quiet origin/main origin/<branch-k>`: the tree of `main` equals branch k;
+   - `git merge-base --is-ancestor origin/<branch-k> HEAD`: branch k+1 contains the final branch k.
+
+   If either fails, do **not** use `-s ours` (it would silently drop changes): still retarget first (step 3), then, instead of the `-s ours` merge and checks of steps 4 and 5, run a normal `git merge origin/main`, resolve conflicts, review `git diff origin/main HEAD` and continue with step 6.
+3. Retarget PR k+1 to `main` **before pushing** (see [consequence (f)](#5-repository-protection)): `gh pr edit <k+1> --repo emanuelturtula/trading-bot --base main`.
+4. Without any `git fetch` or `git pull` since step 2 (if one happened, go back to step 2), so that `origin/main` is the one checked there, note `git rev-parse "HEAD^{tree}"` and run `git merge -s ours origin/main`. The merge commit keeps the tree of branch k+1 and makes `main` an ancestor; the squash later discards it.
+5. Check that `git rev-parse "HEAD^{tree}"` is unchanged **and** that `git diff --quiet origin/main origin/<branch-k>` still exits 0, so `git diff origin/main HEAD` shows only the changes of PR k+1. Reading `git diff --stat` alone is not the check. If either check fails, do not push: undo the merge with `git reset --keep HEAD~1` and go back to step 2.
+6. `git push` (a normal push, never a force push), wait for CI and the beta deploy of that push to finish green, verify `/health`, and squash-merge PR k+1 with its own subject.
+
+**PR blocked on code scanning.** If a PR was retargeted to `main` after its last push, or closed and reopened, CodeQL does not analyze it (see [consequence (f)](#5-repository-protection)). Push a new commit to its branch (a real change or `git commit --allow-empty -m "chore: re-run checks"`), wait for CI, the beta deploy and CodeQL to finish green, then merge.
+
 ### Dependabot PRs
 
 Dependabot PRs (version updates and security updates) **are not merged directly**. Their `dependabot/**` branches do not trigger `delivery.yml` (it only runs on push to `feature/**` and `main`) and `scripts/remote_deploy.py` only accepts beta deploys from `refs/heads/feature/**`, so the required check `Deploy beta (8082) / Deploy beta` is never reported and the PR stays blocked (see [section 5](#5-repository-protection)). The change is brought into a `feature/deps-<slug>` branch.
@@ -172,7 +203,7 @@ Dependabot PRs (version updates and security updates) **are not merged directly*
 3. Run `uv run python scripts/check.py`.
 4. Push the branch: CI and the beta deploy run (port 8082). Verify with `curl http://<DEPLOY_HOST>:8082/health` that the response contains `status` `ok`, `environment` `beta` and the `version` of that run (`vX.Y.Z-beta.<sha7>`, the one in the run summary). A healthy `/health` with the previous version does not prove that the bump is deployed.
 5. Open the PR from `feature/deps-<slug>` referencing the Dependabot one (for example, "Replaces #<number>") and close the Dependabot one with a comment pointing to the replacement: `gh pr close <number> --repo emanuelturtula/trading-bot --comment "Replaced by #<new PR number>"`. Once it is closed, Dependabot does not propose that version again: if the replacement does not get merged, resume the bump from `feature/deps-<slug>` or apply it by hand (Dependabot deletes its branch when the PR is closed, so reopening it is not a reliable route).
-6. Merge only with explicit user approval.
+6. Merge only with explicit user approval, as a squash merge with a `build(deps): …` or `ci(deps): …` subject (see [Merging pull requests](#merging-pull-requests)).
 
 If the bump breaks tests or requires code or configuration changes, it is no longer light and goes through the full agent team workflow (`/feature`, see [CLAUDE.md](../CLAUDE.md)).
 

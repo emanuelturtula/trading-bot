@@ -117,8 +117,12 @@ pre-validate what the server will accept.
       `Mapping`. Payloads above `MAX_RULE_BYTES` (65 536) are rejected before parsing (`TOO_LARGE`);
       duplicate JSON keys are rejected (`DUPLICATE_KEY`); `NaN`, `Infinity` and `-Infinity` literals
       are rejected (`INVALID_JSON`); a 5 000-level nested payload raises `RuleValidationError`
-      (`TOO_DEEP`), never `RecursionError`; invalid UTF-8 and malformed JSON raise `INVALID_JSON`; a
-      `Mapping` with a non-`str` key raises `RuleValidationError`, never `TypeError`.
+      (`TOO_DEEP` when the parser overflows, `NOT_AN_OBJECT` when it does not), never
+      `RecursionError`, with one bounded, single-line problem; the `RecursionError` → `TOO_DEEP`
+      mapping itself is pinned deterministically by a test that makes the parser raise it
+      (amendment of 2026-09-16, Design §9.3); invalid UTF-8 and malformed JSON raise
+      `INVALID_JSON`; a `Mapping` with a non-`str` key raises `RuleValidationError`, never
+      `TypeError`.
 
 ### Warmup
 
@@ -199,7 +203,7 @@ pre-validate what the server will accept.
 | Strictness | Global `extra="forbid"` and `frozen=True`, lax-but-exact scalars, `Strict()` on `cooldown_bars`, an explicit number check on `value` | Measured: pydantic's global `strict=True` rejects `"BUY"` for `Side` and a JSON array for a tuple in Python mode, which breaks the `dict` path #22 uses. Per-field strictness gives the same guarantees (`"14"`, `14.0`, `true` rejected) on both the text and the mapping path. |
 | Semantic checks | Only the two that cannot depend on data (constant vs constant, identical sides) | They are cheap, local and certainly user errors. Anything beyond that (unit compatibility, contradictions) is the user's strategy. |
 | Error mapping | One private mapper turns a pydantic `ValidationError` into `RuleValidationError`, with a catch-all kind | The dashboard and #22 need field-level errors, and pydantic's `msg`/`loc` are stable but internal. The catch-all means a pydantic upgrade that renames an error type degrades to a generic kind instead of crashing. Original exceptions arrive in `ctx["error"]` (measured), so registry kinds survive. |
-| Text parsing | `json.loads` with `object_pairs_hook` and `parse_constant`, a byte cap and `RecursionError` mapped to `TOO_DEEP` | Measured: `Rule.model_validate_json` silently keeps the **last** duplicate key, while the stdlib parser can reject duplicates; the stdlib parser raises a clean, catchable `RecursionError` on deep input. Rejecting duplicates prevents a client and the server from reading different rules out of the same bytes. |
+| Text parsing | `json.loads` with `object_pairs_hook` and `parse_constant`, a byte cap and `RecursionError` mapped to `TOO_DEEP` | Measured: `Rule.model_validate_json` silently keeps the **last** duplicate key, while the stdlib parser can reject duplicates; the stdlib parser raises a clean, catchable `RecursionError` on deep input, at a depth that depends on the interpreter build (Design §9.3). Rejecting duplicates prevents a client and the server from reading different rules out of the same bytes. |
 | JSON Schema | pydantic's `model_json_schema()` post-processed: `$schema`, a title, and the `IndicatorOperand` definition replaced by a generated `oneOf` over `REGISTRY.describe()` | Pydantic cannot know the whitelist, and #24 needs labels, ranges and defaults to render forms. Generating from `describe()` means the schema can never drift from the catalog. Measured: about 9.8 KB, 1.3 ms per call, so no caching (which would be mutable module state) is needed. |
 | Bounded echo | `rules/errors.py` keeps its own private `_echo`, as `timeframe.py`, `signals.py` and `indicators/errors.py` do | Keeps this feature's diff to new files and avoids touching the still-open #4/#5 branches. Extracting a shared `domain/text.py` is a mechanical follow-up once #3–#6 are merged; it is not part of this feature. |
 
@@ -509,8 +513,21 @@ class RuleValidationError(ValueError):
    - the pairs hook raises on a duplicate key → `DUPLICATE_KEY` (the key is echoed, bounded);
    - `parse_constant` raises for `NaN`, `Infinity` and `-Infinity` → `INVALID_JSON`;
    - `json.JSONDecodeError` → `INVALID_JSON` with the position, never the offending text;
-   - `RecursionError` → `TOO_DEEP` (the C scanner raises it cleanly; measured on a 5 000-level
-     payload).
+   - `RecursionError` → `TOO_DEEP` (the C scanner raises it cleanly and catchably).
+
+   **Amendment of 2026-09-16 (CI failure on the Linux runner).** The *depth* at which the parser
+   overflows is a property of the interpreter build, not of this code: CPython 3.12 guards the C
+   scanner with the interpreter's C-recursion limit, which `sys.setrecursionlimit` does not move,
+   so the same 5 000-level payload raised `RecursionError` on the developer machine (Windows) and
+   parsed successfully on the runner, where the resulting list was then rejected as
+   `NOT_AN_OBJECT`. Both are safe, bounded `RuleValidationError` rejections, and no raw
+   `RecursionError` escapes either way; only the claim about *which* path is taken was
+   unportable. Therefore: the deep-payload test asserts the invariant (a `RuleValidationError`
+   with one bounded, single-line problem whose kind is `TOO_DEEP` or `NOT_AN_OBJECT`), and a
+   separate test makes `json.loads` raise `RecursionError` to pin this mapping deterministically
+   on every platform. The nesting guarantee of a rule document does not come from the parser: it
+   comes from the non-recursive model types (§0, §3), which reject a group at level 3 whatever the
+   parser accepts.
 4. A parsed value that is not an object → `NOT_AN_OBJECT`.
 5. `Rule.model_validate(data)`; `ValidationError` → `RuleValidationError` through §8. A `TypeError`
    escaping validation (only reachable from a `Mapping` with non-`str` keys) is caught and reported
@@ -680,7 +697,7 @@ All tests are unit tests, without network, with synthetic payloads only. Mandato
 | T4 semantic checks | unit | Constant vs constant; identical operands (including one written with defaults and one without); crossover with a constant side accepted; price against indicator accepted; duplicated conditions accepted | AC12, AC13 | developer |
 | T5 scalars | unit | `name` stripping, 1/80/81 boundaries, control characters, accents; `signal` and `timeframe` exact codes; `cooldown_bars` default, bounds and rejections; `value` bounds, `-0.0`, `5e-324`, `1e15`, `1e15 + 1` | AC7, AC10, AC11 | developer |
 | T6 errors | unit | `RuleValidationError` is a `ValueError`; `kind`/`path`/`problems`; document order; the `too_short` companion filtered; every row of the §8 mapping table; an unknown pydantic type maps to `invalid_rule`; path and message bounds and single-line rendering; `str(error)` format | AC14, AC15 | developer |
-| T7 text parsing | unit | Valid `str` and UTF-8 `bytes`; invalid UTF-8; malformed JSON; trailing content; `NaN`/`Infinity`/`-Infinity`; duplicate keys at every level; a 5 000-level payload (typed error, no `RecursionError`); a payload above 64 KiB; a `Mapping` with a non-`str` key (no `TypeError`) | AC16 | developer |
+| T7 text parsing | unit | Valid `str` and UTF-8 `bytes`; invalid UTF-8; malformed JSON; trailing content; `NaN`/`Infinity`/`-Infinity`; duplicate keys at every level; a 5 000-level payload (a `RuleValidationError` with one bounded problem whose kind is `TOO_DEEP` or `NOT_AN_OBJECT`, never a `RecursionError`) plus a test that makes the parser raise `RecursionError` and pins the `TOO_DEEP` mapping on every platform; a payload above 64 KiB; a `Mapping` with a non-`str` key (no `TypeError`) | AC16 | developer |
 | T8 warmup | unit | The §10 formula per operand kind and per operator; the four AC17 numbers; `warmup <= stable_warmup`; the floor of 1; warmup unchanged by the group shape | AC17 | developer |
 | T9 JSON Schema | unit | `check_schema` (draft 2020-12); top-level keys and order; one branch per registry name; the literal `rsi` branch; `macd` requires `output` and carries `x-constraints`; parameter type/range/default mapping for an `int` and for `bbands` `std`; determinism; `allow_nan=False` serialization | AC18, AC19 | developer |
 | T10 schema conformance | unit | Every valid fixture payload validates against the exported schema; every invalid fixture payload is rejected by the model and also by the schema, except the §11.4 gap list, which is asserted as an exact set (a new divergence fails) | AC20 | tester |
@@ -716,9 +733,11 @@ shared fixtures (extract them as soon as T1 and T2 exist) → docs.
   anywhere; a closed whitelist of indicators, outputs, operators and price columns; `extra="forbid"`
   at every level; bounded payload size, nesting, item counts and total conditions; duplicate-key and
   non-finite-literal rejection; every message and path bounded and escaped (T11).
-- **Denial of service through parsing.** The byte cap, the `RecursionError` mapping and the depth
-  limit built into the types bound the work per payload; measured parse cost is about 7 µs for a
-  typical rule.
+- **Denial of service through parsing.** The byte cap and the depth limit built into the types
+  bound the work per payload; measured parse cost is about 7 µs for a typical rule. The load-bearing
+  limit is the type design: a document nested beyond level 2 is rejected by the models whatever the
+  JSON parser accepts. The `RecursionError` mapping is a safety net whose trigger point depends on
+  the interpreter build (Design §9.3), not a bound this feature relies on.
 - **Error messages leaking or injecting.** Paths are built from user-controlled keys, so segments
   are truncated and `repr()`-escaped; pydantic's `input` field is never read; messages are
   single-line. This matters because #12/#14/#17 will log and display them.
@@ -787,3 +806,10 @@ Reviewed on 2026-09-16 (second round). First round requested five changes: the p
 serialization of `params` (§4), raw bidi and invisible characters in three test files, the
 `domain/__init__.py` docstring, an exact `$defs` assertion and two test docstrings that described
 the review process. All are fixed. Approved.
+
+Amended on 2026-09-16 after the branch failed on the Linux CI runner: AC16, Design §9.3, the
+"Text parsing" row of §0, the T7 row and the parsing risk now say that the JSON parser's overflow
+depth is interpreter-specific, so the deep-payload test asserts the invariant (a bounded
+`RuleValidationError` of kind `TOO_DEEP` or `NOT_AN_OBJECT`, never a raw `RecursionError`) while a
+second test pins the `RecursionError` → `TOO_DEEP` mapping deterministically. The source is
+unchanged; the amendment corrects a claim of this spec, not the implementation.

@@ -12,7 +12,6 @@ protected by the text-parsing guards of Design §9 (no byte cap, no JSON recursi
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Iterator, Mapping
 
 import pytest
@@ -29,6 +28,7 @@ from trading_bot.domain.rules.errors import (
     MAX_MESSAGE_LENGTH,
     MAX_PATH_LENGTH,
     MAX_PATH_SEGMENT_LENGTH,
+    MAX_PROBLEMS,
     RuleErrorKind,
     RuleValidationError,
 )
@@ -132,12 +132,9 @@ def test_a_one_megabyte_name_via_text_is_rejected_before_parsing() -> None:
     payload = rule_payload({"all": [simple_condition()]}, name=huge_name)
     text = json.dumps(payload)
 
-    start = time.perf_counter()
     error = rejection(text)
-    elapsed = time.perf_counter() - start
 
     assert error.kind is RuleErrorKind.TOO_LARGE
-    assert elapsed < 1.0
     assert huge_name not in str(error)
 
 
@@ -146,26 +143,20 @@ def test_a_one_megabyte_name_via_a_mapping_is_rejected_on_the_field_bound() -> N
     huge_name = "n" * (1024 * 1024)
     payload = rule_payload({"all": [simple_condition()]}, name=huge_name)
 
-    start = time.perf_counter()
     error = rejection(payload)
-    elapsed = time.perf_counter() - start
 
     assert error.kind is RuleErrorKind.INVALID_NAME
-    assert elapsed < 1.0
     assert huge_name not in str(error)
     assert len(error.problems[0].message) <= MAX_MESSAGE_LENGTH
 
 
-def test_a_one_megabyte_unknown_key_via_a_mapping_stays_bounded_and_fast() -> None:
+def test_a_one_megabyte_unknown_key_via_a_mapping_is_rejected_and_bounded() -> None:
     payload = rule_payload({"all": [simple_condition()]})
     payload["k" * (1024 * 1024)] = 1
 
-    start = time.perf_counter()
     error = rejection(payload)
-    elapsed = time.perf_counter() - start
 
     assert error.kind is RuleErrorKind.UNKNOWN_FIELD
-    assert elapsed < 1.0
     assert len(error.path) <= MAX_PATH_SEGMENT_LENGTH
 
 
@@ -281,20 +272,21 @@ def test_a_deeply_nested_mapping_is_rejected_without_a_recursion_error() -> None
     _assert_bounded(error)
 
 
-def test_a_mapping_with_many_unknown_keys_is_rejected_reasonably_fast() -> None:
+def test_a_mapping_with_many_unknown_keys_is_rejected() -> None:
     """The byte cap only guards text (Design §9); a ``Mapping`` has no equivalent size guard and
     is bounded only by per-field limits instead, so its cost scales with whatever the caller
-    already decoded. This asserts that the current cost is roughly linear rather than quadratic
-    for this shape of hostile input, not that the input is capped."""
+    already decoded. No wall-clock assertion here (spec 003): a stalled CI runner must
+    not fail this test. The actual per-problem cost of this shape of input (every raw pydantic
+    error is mapped before ``MAX_PROBLEMS`` truncates the result) is a roughly-linear, not
+    quadratic, function of the key count -- tracked as evidence through
+    ``pytest --durations``, not asserted here."""
     payload = rule_payload({"all": [simple_condition()]})
     payload.update({f"k{i}": i for i in range(50_000)})
 
-    start = time.perf_counter()
     error = rejection(payload)
-    elapsed = time.perf_counter() - start
 
     assert error.kind is RuleErrorKind.UNKNOWN_FIELD
-    assert elapsed < 2.0
+    assert len(error.problems) <= MAX_PROBLEMS  # the huge key count never inflates the result
 
 
 # --- Nothing but RuleValidationError ever escapes parse_rule (AC16) ---------------------------

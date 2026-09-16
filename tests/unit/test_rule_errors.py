@@ -536,9 +536,45 @@ def test_a_duplicate_key_is_echoed_bounded() -> None:
 
 
 def test_a_deeply_nested_payload_is_rejected_without_a_recursion_error() -> None:
+    """5 000 levels: the parser may give up or not, but only a bounded rejection comes out.
+
+    The depth at which the stdlib JSON scanner raises ``RecursionError`` belongs to the
+    interpreter build, not to this code: measured, 5 000 levels overflow on one platform and
+    parse cleanly on another (where the document is then a list, so it is rejected as
+    ``NOT_AN_OBJECT``). Both are safe rejections, so this test pins the property that must hold
+    everywhere instead of the path taken. The mapping of a ``RecursionError`` is pinned by the
+    next test, and the nesting bound of a rule document by the ``group at the third level``
+    case of ``invalid_payloads`` (``NESTED_TOO_DEEP``), which needs no recursion at all.
+    """
     text = "[" * 5_000 + "]" * 5_000
 
-    assert rejection(text).kind is RuleErrorKind.TOO_DEEP
+    error = rejection(text)
+
+    assert error.kind in (RuleErrorKind.TOO_DEEP, RuleErrorKind.NOT_AN_OBJECT)
+    assert len(error.problems) == 1
+    assert len(error.problems[0].message) <= MAX_MESSAGE_LENGTH
+    assert "\n" not in str(error)
+
+
+def test_a_recursion_error_while_parsing_becomes_a_typed_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``RecursionError`` from the parser maps to ``TOO_DEEP`` on every platform.
+
+    ``sys.setrecursionlimit`` does not move the limit of the C scanner (measured), so the only
+    portable way to reach that branch is to make the parser raise it. ``parse_rule`` calls
+    ``json.loads`` from the stdlib module patched here.
+    """
+
+    def exhausted(*args: object, **kwargs: object) -> object:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(json, "loads", exhausted)
+
+    error = rejection('{"name": "Deep"}')
+
+    assert error.kind is RuleErrorKind.TOO_DEEP
+    assert len(error.problems[0].message) <= MAX_MESSAGE_LENGTH
 
 
 def test_a_payload_above_the_byte_cap_is_rejected() -> None:

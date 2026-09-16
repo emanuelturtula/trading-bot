@@ -1,8 +1,9 @@
-"""Purity guard for ``src/trading_bot/domain`` (spec 004, Test plan T15, AC15; spec 005, T12).
+"""Purity guard for ``src/trading_bot/domain`` (spec 004, T15, AC15; spec 005, T12; spec 007, T12).
 
 An AST scan enforces the import allowlist, the ban on reading the clock and the ban on
 mutable module-level state (everything except ``__all__``). ``talib`` is allowed only in
-``indicators/talib_kernels.py``, so TA-Lib stays replaceable (spec 005, Design 9). A subprocess
+``indicators/talib_kernels.py``, so TA-Lib stays replaceable (spec 005, Design 9), and the rule
+evaluator passes with the default allowlist (spec 007, AC15). A subprocess
 check confirms that importing the lightweight modules (``utc``, ``timeframe``, ``signals``,
 ``indicators.errors``, ``indicators.params``) in a fresh interpreter never pulls
 ``pandas``/``numpy`` into ``sys.modules`` (CLAUDE.md rule 3).
@@ -182,6 +183,7 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "rules/errors.py",
         "rules/schema.py",
         "rules/json_schema.py",
+        "rules/evaluator.py",
     }
 
 
@@ -191,6 +193,28 @@ def test_talib_and_pydantic_are_allowed_only_in_their_own_modules() -> None:
         "rules/schema.py": ("json", "pydantic", "pydantic_core"),
         "rules/json_schema.py": ("pydantic",),
     }
+
+
+def test_the_rule_evaluator_needs_no_allowance() -> None:
+    """The evaluator consumes the rule models without defining any (spec 007, AC15).
+
+    It must pass with the default allowlist: no pydantic, no ``json``, no clock, no module-level
+    cache, and the models come through ``trading_bot.domain.rules.schema``.
+    """
+    tree = _parse(DOMAIN_DIR / "rules" / "evaluator.py")
+    imported = {
+        name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for name in _imported_module_names(node)
+    }
+
+    assert "rules/evaluator.py" not in _EXTRA_PREFIXES_BY_FILE
+    assert disallowed_imports(tree) == []
+    assert clock_calls(tree) == []
+    assert mutable_module_level_names(tree) == []
+    assert not {"json", "pydantic", "pydantic_core"} & {name.split(".")[0] for name in imported}
+    assert "trading_bot.domain.rules.schema" in imported
 
 
 def test_scanner_flags_pydantic_without_the_rule_schema_allowance() -> None:

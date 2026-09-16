@@ -68,7 +68,7 @@ DOMAIN_FILES = sorted(DOMAIN_DIR.rglob("*.py"))
 
 def test_at_least_the_expected_rules_files_were_scanned() -> None:
     """Guards against an empty glob making the parametrized tests below vacuously green."""
-    expected = {"__init__.py", "errors.py", "schema.py", "json_schema.py"}
+    expected = {"__init__.py", "errors.py", "schema.py", "json_schema.py", "evaluator.py"}
 
     assert {path.name for path in RULES_FILES} == expected
 

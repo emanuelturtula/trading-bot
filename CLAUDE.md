@@ -88,7 +88,7 @@ Every feature, fix or change in `src/`, `tests/`, `deploy/`, `scripts/`, `.githu
 6. `[review]` tech-lead reviews the full diff against this file. Request changes → back to the developer.
 7. The `[impl]`, `[test]` and `[review]` tasks can only be closed with `scripts/check.py --fast` green (`TaskCompleted` hook).
 8. The lead runs the full gate, commits and pushes → CI + **beta deploy (port 8082)**, verifies `/health`, opens the PR with the evidence.
-9. **Merge only with explicit user approval** (`gh pr merge --merge`). Main → **prod deploy (port 8081)** + tag + GitHub Release.
+9. **Merge only with explicit user approval**, always as a squash merge (the only method the repository allows): `gh pr merge <n> --squash --subject "<type>: <description> (#<n>)" --body "<body>"`. The squash commit is the only commit of the PR that reaches `main`, so its subject must be a Conventional Commit describing the whole PR (`feat` if it adds any feature, `!` if any change is breaking): it drives the version bump. Stacked PRs and CodeQL details in [Deploy](docs/DEPLOYMENT.md#merging-pull-requests). Main → **prod deploy (port 8081)** + tag + GitHub Release.
 
 Teammates **never** commit, push, merge, tag or deploy.
 

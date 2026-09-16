@@ -40,8 +40,16 @@ _ALLOWED_EXACT_MODULES = frozenset(
     }
 )
 _ALLOWED_PREFIXES = ("numpy", "pandas", "trading_bot.domain")
-# Extra import prefixes allowed in one module only, by path relative to the domain package.
-_EXTRA_PREFIXES_BY_FILE = {"indicators/talib_kernels.py": ("talib",)}
+# Extra import prefixes allowed in some modules only, by path relative to the domain package.
+# ``talib`` stays behind the kernels (spec 005, Design 9) and ``pydantic`` behind the rule
+# schema (spec 006, AC22), so the rest of the domain keeps both replaceable. ``pydantic_core``
+# only provides the ``ErrorDetails`` type of a ``ValidationError``, and ``json`` is the strict
+# JSON reader of ``parse_rule`` (spec 006, Design 9); both are pure and side-effect free.
+_EXTRA_PREFIXES_BY_FILE = {
+    "indicators/talib_kernels.py": ("talib",),
+    "rules/schema.py": ("json", "pydantic", "pydantic_core"),
+    "rules/json_schema.py": ("pydantic",),
+}
 _CLOCK_ATTRIBUTES = frozenset({"now", "utcnow", "today"})
 
 DOMAIN_DIR = Path(trading_bot.domain.__file__).resolve().parent
@@ -170,11 +178,25 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "indicators/registry.py",
         "indicators/talib_kernels.py",
         "indicators/catalog.py",
+        "rules/__init__.py",
+        "rules/errors.py",
+        "rules/schema.py",
+        "rules/json_schema.py",
     }
 
 
-def test_talib_is_allowed_only_in_the_kernels_module() -> None:
-    assert _EXTRA_PREFIXES_BY_FILE == {"indicators/talib_kernels.py": ("talib",)}
+def test_talib_and_pydantic_are_allowed_only_in_their_own_modules() -> None:
+    assert _EXTRA_PREFIXES_BY_FILE == {
+        "indicators/talib_kernels.py": ("talib",),
+        "rules/schema.py": ("json", "pydantic", "pydantic_core"),
+        "rules/json_schema.py": ("pydantic",),
+    }
+
+
+def test_scanner_flags_pydantic_without_the_rule_schema_allowance() -> None:
+    tree = ast.parse("import pydantic\nfrom pydantic import BaseModel\n")
+
+    assert disallowed_imports(tree) == ["pydantic", "pydantic"]
 
 
 # --- Self-tests: the scanner rejects synthetic violations, not just real code ---------------
@@ -304,6 +326,7 @@ def _fresh_interpreter_sys_modules(*modules: str) -> dict[str, bool]:
         "trading_bot.domain.signals",
         "trading_bot.domain.indicators.errors",
         "trading_bot.domain.indicators.params",
+        "trading_bot.domain.rules.errors",
     ],
 )
 def test_lightweight_domain_modules_do_not_load_pandas_or_numpy(module: str) -> None:
@@ -312,8 +335,15 @@ def test_lightweight_domain_modules_do_not_load_pandas_or_numpy(module: str) -> 
     assert report == {"pandas": False, "numpy": False}
 
 
-def test_the_fresh_interpreter_check_actually_detects_pandas_and_numpy() -> None:
-    """Control: ``candles`` does use pandas/numpy, so the check above is not vacuously green."""
-    report = _fresh_interpreter_sys_modules("trading_bot.domain.candles")
+@pytest.mark.parametrize(
+    "module", ["trading_bot.domain.candles", "trading_bot.domain.rules.schema"]
+)
+def test_the_fresh_interpreter_check_actually_detects_pandas_and_numpy(module: str) -> None:
+    """Control: these modules do use pandas/numpy, so the checks above are not vacuously green.
+
+    ``rules.schema`` imports the indicator catalog, so it loads pandas, numpy and TA-Lib;
+    ``rules.errors`` must not (spec 006, AC22).
+    """
+    report = _fresh_interpreter_sys_modules(module)
 
     assert report == {"pandas": True, "numpy": True}

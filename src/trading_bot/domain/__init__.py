@@ -7,5 +7,7 @@ re-exports nothing, so consumers that only need ``Signal`` or ``Timeframe`` do n
 The ``indicators`` subpackage holds the indicator registry (spec 005); only its
 ``talib_kernels`` module imports TA-Lib. The ``rules`` subpackage holds the rule document
 (spec 006); only its ``schema`` and ``json_schema`` modules import pydantic, so ``rules.errors``
-stays free of pandas, numpy and TA-Lib for the callers that only map error kinds.
+stays free of pandas, numpy and TA-Lib for the callers that only map error kinds. The ``rules``
+subpackage also holds the rule evaluator (``rules.evaluator``: ``evaluate`` and
+``evaluate_each``, spec 007), which decides whether a rule fires on closed candles.
 """

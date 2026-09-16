@@ -42,7 +42,7 @@ The user decides whether to trade. **There is no order execution layer** and one
 
 | Layer | Responsibility | Rules |
 |-------|----------------|-------|
-| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator (#7) | No I/O, no clock, no globals. Testable with fixed DataFrames. |
+| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
 | `data/` | `MarketDataProvider` (Protocol) and `YFinanceProvider`: normalizes to UTC OHLCV, discards the open candle, retries with backoff | Never decides signals. Respects Yahoo's limits (intraday max. 60 days; 1h up to 730 days). |
 | `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → dedupe/cooldown → persistence → notification | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`. |
 | `scheduler/` | APScheduler (AsyncIOScheduler). One job per timeframe, fired at candle close + margin, only during market hours | A single instance per process. |
@@ -117,7 +117,7 @@ signal = Signal(
     side=Side.BUY,
     candle_close_ts=timeframe.nominal_close(datetime(2024, 1, 2, 5, 0, tzinfo=UTC)),
     close_price=187.5,
-    indicator_values={"rsi_14": 28.4},
+    indicator_values={"rsi(length=14).value": 28.4},
 )
 assert str(signal.idempotency_key) == "AAPL|1d|42|2024-01-03T05:00:00+00:00"
 ```
@@ -288,6 +288,99 @@ The error carries `kind`, `path` and `problems`: one `RuleProblem(kind, path, me
 `rule_json_schema()` exports the document as a JSON Schema draft 2020-12, with the indicator operand inlined as a `oneOf` with one branch per registry indicator: a `const` name, one typed property per declared parameter (`integer`/`number` with `minimum`, `maximum`, `default`, `title` and `description` from `describe()`), the allowed outputs as an `enum` and the parameter constraints as advisory `x-constraints`. It is generated from the models and the catalog, so it cannot drift from them, and the dashboard rule builder (#24) uses it to render forms and pre-validate.
 
 The server is authoritative: in four documented cases the schema accepts what the model rejects, because draft 2020-12 cannot express them — non-integral numbers for integer fields (`14.0`), the `less_than` constraints between parameters (`macd` `fast < slow`), the degenerate-condition checks, and the rule-name stripping and printability rules together with the total number of conditions.
+
+## Rule evaluation
+
+`domain/rules/evaluator.py` decides whether a parsed rule fires on a candle frame and returns the data the rest of the bot needs to act on that decision. It is pure (`CLAUDE.md` rules 3 and 4) and signal-only: it returns a boolean and the values behind it, nothing else. Design and decisions: spec [007](specs/007-rule-evaluator.md).
+
+```python
+from tests.fixtures.candles import synthetic_candles
+from trading_bot.domain.rules.evaluator import evaluate, evaluate_each
+from trading_bot.domain.rules.schema import parse_rule
+
+rule = parse_rule(document)  # the rule of the Rule model section
+candles = synthetic_candles(300)  # validated closed candles from the data provider in production
+
+evaluation = evaluate(rule, candles)  # about candles.index[-1], the last closed candle
+assert evaluation.candle_close_ts == rule.timeframe.nominal_close(candles.index[-1])
+assert evaluation.close_price == candles["close"].iloc[-1]
+assert list(evaluation.indicator_values) == ["rsi(length=14).value", "sma(length=200).value"]
+
+recent = evaluate_each(rule, candles, last=20)  # one Evaluation per candle, oldest first
+assert recent[-1] == evaluation
+```
+
+`Evaluation` is a frozen, slotted, keyword-only dataclass (immutable, hashable, equal by value, picklable) with:
+
+- `triggered`: the conditions hold **and** the candle has at least `rule.warmup()` candles of history in the frame;
+- `candle_close_ts`: `rule.timeframe.nominal_close(open time)`, a stdlib `datetime` in UTC. It is the identity field of a signal, not the market close ([Nominal candle close](#nominal-candle-close));
+- `close_price`: the close of the candle;
+- `indicator_values`: the finite values of the indicator operands the rule uses, with the keys below;
+- `condition_results`: the raw outcome of each entry of `rule.all_conditions`, in that order and before the warmup gate, so the dashboard can explain why a rule did or did not fire.
+
+### Frames and entry points
+
+- The last row of the frame is treated as the **last closed candle**. Dropping the in-progress candle is the data layer's job (#8); the evaluator reads no clock and cannot tell.
+- The frame is checked with `validate_candles` (`CandleValidationError`, also for rules without indicators) and never modified. Arguments of the wrong type raise `TypeError` and registry errors propagate unchanged. A returned candle whose open time has sub-microsecond precision raises `ValueError` (from `to_utc`, it cannot name a `candle_close_ts`); normalizing labels is the data layer's job (#8). NaN values, flat prices, short histories and extreme values never raise.
+- `evaluate` on an empty frame raises `ValueError` (there is no candle to describe); `evaluate_each` returns `()`.
+- `evaluate_each(rule, candles, last=N)` covers the last `N` candles: `None` means the whole frame, a value above the frame length is clamped, `0` gives `()`, a negative value raises `ValueError` and a non-`int` (including `bool`) raises `TypeError`. `evaluate(rule, candles) == evaluate_each(rule, candles)[-1]` and `evaluate_each(rule, candles, last=k) == evaluate_each(rule, candles)[-k:]`, bitwise. The dashboard "test rule" (#24) and backtesting (F8) use this form.
+- `registry=` injects an `IndicatorRegistry`, meant for instrumented doubles in tests. It must be compatible with the catalog that validated the rule, because the rule's parameters and `rule.warmup()` come from that catalog.
+
+### Operators
+
+Comparisons read the evaluated candle only, with the left value `l` and the right value `r`:
+
+| Case | `<` | `<=` | `>` | `>=` |
+|------|-----|------|-----|------|
+| `l < r` | True | True | False | False |
+| `l == r` | False | True | False | True |
+| `l > r` | False | False | True | True |
+| `l` or `r` is NaN (or both) | False | False | False | False |
+
+Crossovers also read the **previous row** of the same frame (`pl`, `pr`); a touch counts as a cross (decision D13):
+
+- `crosses_above` is `pl <= pr and l > r`;
+- `crosses_below` is `pl >= pr and l < r`.
+
+| Previous close | Close | `close crosses_above 100` |
+|----------------|-------|---------------------------|
+| — (first row) | 99 | False: no previous candle |
+| 99 | 100 | False: equal, not above |
+| 100 | 101 | **True**: touched, then broke above |
+| 101 | 101 | False: already above |
+| 100 | 100 | False: equal, not above |
+
+The first row of a frame never crosses, a crossover implies the strict comparison at the candle, the two crossovers are never true at the same candle and the same crossover is never true at two consecutive candles.
+
+### NaN, warmup and groups
+
+- **NaN never fires and never raises** (decision D4). A condition whose operands are NaN at any candle it reads is `False`, so a crossover needs two finite candles, and `rsi`, `adx` and `stoch` rules never fire on flat data, where those indicators are undefined.
+- **Warmup gate** (decision D12). At row position `i` the candle has `i + 1` candles of history; while `i + 1 < rule.warmup()`, `triggered` is `False` whatever the conditions say. It only changes an outcome for `any` groups, where a cheap leg could otherwise fire before an expensive leg is computable: `any` of [`close > 50`, `close > sma(200)`] on 30 candles gives `condition_results == (True, False)` and `triggered == False`. The gate depends on the row position only, so a prefix and the full frame agree.
+- `stable_warmup()` is **not** required to fire: requiring it would silence young tickers. Fetching enough history for reproducible values is the job of #8 and #14.
+- **Groups.** `all` is the conjunction and `any` the disjunction of its members, nested groups first. Evaluation is complete, never short-circuited, so `indicator_values` and `condition_results` are complete even when an early `all` member is already `False`.
+
+### Indicator value keys
+
+Keys are `indicator(param=value, ...).output` (decision D14): parameters in declared order with the canonical values of the rule model (integers as integers, `bbands` `std` as a float) and the output always present, for example `rsi(length=14).value` and `macd(fast=12, slow=26, signal=9).hist`.
+
+- One entry per distinct indicator operand, in first-appearance order (`left` before `right`). Operands that are equal once normalized (`{"indicator": "rsi"}` and `{"indicator": "rsi", "params": {"length": 14}, "output": "value"}`) share one entry.
+- Only finite values appear: an operand that is NaN at the candle is absent, never NaN, which is what `Signal` requires.
+- Prices and constants are never included; `close_price` is its own field.
+- These are the keys #13 stores with each signal: changing the scheme later requires migrating stored signals.
+
+### Purity and cost
+
+- No clock, no I/O, no globals and no cache across calls. The module passes the purity guard with the default allowlist: it consumes the rule models without importing pydantic.
+- Everything is vectorized over the frame. Each distinct `(indicator, params)` pair is computed exactly once per call, through a dictionary local to the call (`macd.macd` and `macd.signal` share one computation), whatever the frame length and `last` are. Comparisons read one row and crossovers the previous row, so every value at a candle depends only on that candle and earlier ones; the [look-ahead tests](#look-ahead-testing) verify it on every scenario instead of assuming it.
+
+### What the engine adds
+
+The evaluator answers "do the conditions hold at this candle?" and nothing else. The engine (#14):
+
+- evaluates only rules whose `timeframe` equals the ticker's, on frames whose open candle was dropped (#8) and that hold at least `rule.stable_warmup()` candles when available, never on an empty frame;
+- builds `Signal(ticker=..., timeframe=rule.timeframe, rule_id=..., side=rule.signal, candle_close_ts=evaluation.candle_close_ts, close_price=evaluation.close_price, indicator_values=evaluation.indicator_values)` when `triggered` is true;
+- deduplicates by `Signal.idempotency_key` (`CLAUDE.md` rule 5) before notifying;
+- applies `cooldown_bars` by row position over the evaluated frame, against the last notified signal of the same ticker and rule, never with `(t2 - t1) / duration`.
 
 ## Look-ahead testing
 

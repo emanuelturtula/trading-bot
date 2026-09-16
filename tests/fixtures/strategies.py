@@ -21,17 +21,12 @@ from tests.fixtures.candles import (
     TimeframeCode,
     synthetic_candles,
 )
+from trading_bot.domain.timeframe import Timeframe
 
 MAX_SEED = 2**32 - 1
 MAX_START_OFFSET = 5000  # grid steps after DEFAULT_START
 MIN_PRICE_EXPONENT = -3.0
 MAX_PRICE_EXPONENT = 5.0
-
-_DURATIONS: dict[str, pd.Timedelta] = {
-    "1h": pd.Timedelta(hours=1),
-    "4h": pd.Timedelta(hours=4),
-    "1d": pd.Timedelta(days=1),
-}
 
 
 def candle_frames(
@@ -39,7 +34,7 @@ def candle_frames(
     min_size: int = 2,
     max_size: int = 120,
     scenarios: Sequence[Scenario] = ALL_SCENARIOS,
-    timeframes: Sequence[TimeframeCode] = TIMEFRAMES,
+    timeframes: Sequence[Timeframe | TimeframeCode] = TIMEFRAMES,
     max_volatility: float = 0.25,
 ) -> st.SearchStrategy[pd.DataFrame]:
     """Strategy of valid synthetic candle frames; invalid arguments raise ``ValueError`` now."""
@@ -52,10 +47,7 @@ def candle_frames(
     scenario_options = tuple(_scenario(scenario) for scenario in scenarios)
     if not timeframes:
         raise ValueError("timeframes must not be empty")
-    for timeframe in timeframes:
-        if timeframe not in TIMEFRAMES:
-            raise ValueError(f"unknown timeframe {timeframe!r}; expected one of {TIMEFRAMES}")
-    timeframe_options = tuple(timeframes)
+    timeframe_options = tuple(_timeframe(timeframe) for timeframe in timeframes)
     if not (math.isfinite(max_volatility) and max_volatility >= 0.0):
         raise ValueError(f"max_volatility must be a finite number >= 0, got {max_volatility!r}")
 
@@ -73,12 +65,19 @@ def candle_frames(
             seed=seed,
             scenario=scenario,
             timeframe=timeframe,
-            start=pd.Timestamp(DEFAULT_START) + offset * _DURATIONS[timeframe],
+            start=pd.Timestamp(DEFAULT_START) + offset * pd.Timedelta(timeframe.duration),
             start_price=10.0**exponent,
             volatility=volatility,
         )
 
     return frames()
+
+
+def _timeframe(timeframe: Timeframe | str) -> Timeframe:
+    try:
+        return Timeframe(timeframe)
+    except ValueError:
+        raise ValueError(f"unknown timeframe {timeframe!r}; expected one of {TIMEFRAMES}") from None
 
 
 def _scenario(scenario: Scenario | str) -> Scenario:

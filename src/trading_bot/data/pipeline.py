@@ -7,9 +7,10 @@ be the last slot closed at ``now`` (decisions D32, D33 and D43). The engine can 
 evaluate a stale frame by accident: a missing or invalid last candle is a typed, retryable
 ``CandleNotPublishedError``.
 
-This is the only module of the data layer that logs. Records carry counts, reason codes, the
-normalized ticker, the timeframe code and ISO labels: never frame values, raw column labels or
-provider text.
+``log_dropped_rows`` logs a normalization report. ``prepare_candles`` uses it, and so does a
+provider that normalizes rows before building candles from them (the ``4h`` resampling of spec
+011), so both emit the same records. Records carry counts, reason codes, the normalized ticker,
+the timeframe code and ISO labels: never frame values, raw column labels or provider text.
 """
 
 from __future__ import annotations
@@ -37,8 +38,10 @@ from trading_bot.domain.candle_normalization import (
 )
 from trading_bot.domain.closed_candles import drop_open_candle
 from trading_bot.domain.market_calendar.sessions import CandleSlot, MarketCalendar
+from trading_bot.domain.timeframe import Timeframe
+from trading_bot.domain.utc import to_utc
 
-__all__ = ["CandleWindow", "candle_window", "prepare_candles"]
+__all__ = ["CandleWindow", "candle_window", "log_dropped_rows", "prepare_candles"]
 
 _LOGGER_NAME: Final = "trading_bot.data.pipeline"
 _DROPPED_MESSAGE: Final = "dropped %d %s candle rows for %s %s (first %s, last %s)"
@@ -103,11 +106,12 @@ def prepare_candles(
             timeframe=request.timeframe,
         ) from None
     expected = calendar.closed_candles(request.timeframe, request.now, 1)[-1].label
-    _log_dropped(
+    log_dropped_rows(
         normalized.dropped,
-        expected,
-        request,
-        logging.getLogger(_LOGGER_NAME) if logger is None else logger,
+        ticker=request.ticker,
+        timeframe=request.timeframe,
+        last_label=expected,
+        logger=logging.getLogger(_LOGGER_NAME) if logger is None else logger,
     )
     closed = drop_open_candle(normalized.candles, request.timeframe, request.now, calendar=calendar)
     labels = pd.DatetimeIndex(closed.index)
@@ -141,18 +145,26 @@ def _check_arguments(request: object, calendar: object) -> None:
         raise TypeError(f"calendar must be a MarketCalendar, got {type(calendar).__name__}")
 
 
-def _log_dropped(
+def log_dropped_rows(
     dropped: Sequence[DroppedRow],
-    expected: datetime,
-    request: CandleRequest,
-    logger: logging.Logger,
+    *,
+    ticker: str,
+    timeframe: Timeframe,
+    last_label: datetime,  # the label of the last slot closed at now
+    logger: logging.Logger | None = None,
 ) -> None:
-    """One record per reason and level, in ``DropReason`` order (Design 8.4).
+    """One record per reason and level, in ``DropReason`` order (spec 010, Design 8.4).
 
-    Rows labelled at or before the last closed slot (or ``NaT``) are ``WARNING``: they were
-    closed candles the provider sent broken. Later rows belong to the in-progress candle and
-    are ``DEBUG``, and so are exact duplicates, which lose nothing.
+    Rows labelled at or before ``last_label`` (or ``NaT``) are ``WARNING``: they were closed
+    candles the provider sent broken. Later rows belong to the in-progress candle and are
+    ``DEBUG``, and so are exact duplicates, which lose nothing. A non-``Timeframe`` raises
+    ``TypeError``; ``last_label`` goes through ``to_utc``. ``logger`` defaults to
+    ``trading_bot.data.pipeline``.
     """
+    if not isinstance(timeframe, Timeframe):
+        raise TypeError(f"timeframe must be a Timeframe, got {type(timeframe).__name__}")
+    expected = to_utc(last_label)
+    target = logging.getLogger(_LOGGER_NAME) if logger is None else logger
     by_reason: dict[DropReason, list[DroppedRow]] = {}
     for row in dropped:
         by_reason.setdefault(row.reason, []).append(row)
@@ -171,13 +183,13 @@ def _log_dropped(
             stamps = [row.label for row in group if row.label is not None]
             first = min(stamps).isoformat() if stamps else "none"
             last = max(stamps).isoformat() if stamps else "none"
-            logger.log(
+            target.log(
                 level,
                 _DROPPED_MESSAGE,
                 len(group),
                 reason.value,
-                request.ticker,
-                request.timeframe.value,
+                ticker,
+                timeframe.value,
                 first,
                 last,
             )

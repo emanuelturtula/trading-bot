@@ -1,13 +1,16 @@
-"""Tests of the provider request, the fetch window and ``prepare_candles`` (spec 010, T10-T11).
+"""Tests of the provider request, the fetch window and ``prepare_candles`` (spec 010, T10-T11),
+and of ``log_dropped_rows`` (spec 011, T17).
 
 AC12: ``CandleRequest`` and ``MAX_LOOKBACK``; AC14: ``candle_window``; AC15: the steps, the
-outcome table and the logging of ``prepare_candles``. Every expectation is a literal from the
+outcome table and the logging of ``prepare_candles``; spec 011 AC28: the public
+``log_dropped_rows`` helper. Every expectation is a literal from the
 spec tables (Design 8.1, 8.3 and 8.4); nothing is recomputed with the code under test.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import logging
 import math
 from datetime import UTC, date, datetime
@@ -28,8 +31,14 @@ from trading_bot.data.errors import (
     ProviderDataError,
     UnpublishedReason,
 )
-from trading_bot.data.pipeline import CandleWindow, candle_window, prepare_candles
+from trading_bot.data.pipeline import (
+    CandleWindow,
+    candle_window,
+    log_dropped_rows,
+    prepare_candles,
+)
 from trading_bot.data.provider import MAX_LOOKBACK, CandleRequest
+from trading_bot.domain.candle_normalization import normalize_candles
 from trading_bot.domain.indicators.catalog import REGISTRY
 from trading_bot.domain.market_calendar.sessions import CalendarRangeError
 from trading_bot.domain.timeframe import Timeframe
@@ -177,7 +186,13 @@ def test_candle_request_validates_ticker_timeframe_lookback_then_now(
 
 
 def test_the_pipeline_module_exports_exactly_the_spec_names() -> None:
-    assert pipeline_module.__all__ == ["CandleWindow", "candle_window", "prepare_candles"]
+    # spec 011 (Design 12) adds log_dropped_rows.
+    assert pipeline_module.__all__ == [
+        "CandleWindow",
+        "candle_window",
+        "log_dropped_rows",
+        "prepare_candles",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -748,3 +763,172 @@ def test_dropped_rows_are_logged_before_an_unpublished_error(
             "last 2024-07-05T04:00:00+00:00)",
         )
     ]
+
+
+# --- spec 011, T17: log_dropped_rows (AC28, Design 12) ------------------------------------------
+
+
+def test_the_private_helper_was_replaced_by_the_public_one() -> None:
+    assert not hasattr(pipeline_module, "_log_dropped")
+    assert "log_dropped_rows" in pipeline_module.__all__
+
+
+def test_log_dropped_rows_has_the_spec_signature() -> None:
+    signature = inspect.signature(log_dropped_rows)
+
+    assert list(signature.parameters) == ["dropped", "ticker", "timeframe", "last_label", "logger"]
+    assert [parameter.kind for parameter in signature.parameters.values()] == [
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        *[inspect.Parameter.KEYWORD_ONLY] * 4,
+    ]
+    assert signature.parameters["logger"].default is None
+
+
+def test_log_dropped_rows_called_directly_reproduces_the_golden_records(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=PIPELINE_LOGGER)
+    dropped = normalize_candles(golden_raw(), H1, calendar=NYSE).dropped
+
+    log_dropped_rows(dropped, ticker="AAPL", timeframe=H1, last_label=utc("2024-07-03T16:30"))
+
+    records = [record for record in caplog.records if record.name == PIPELINE_LOGGER]
+    assert [(record.levelname, record.getMessage()) for record in records] == GOLDEN_RECORDS
+
+
+def test_log_dropped_rows_accepts_a_timestamp_in_another_zone(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=PIPELINE_LOGGER)
+    dropped = normalize_candles(golden_raw(), H1, calendar=NYSE).dropped
+
+    log_dropped_rows(
+        dropped,
+        ticker="AAPL",
+        timeframe=H1,
+        last_label=pd.Timestamp("2024-07-03T12:30", tz="America/New_York"),
+    )
+
+    records = [record for record in caplog.records if record.name == PIPELINE_LOGGER]
+    assert [(record.levelname, record.getMessage()) for record in records] == GOLDEN_RECORDS
+
+
+def test_log_dropped_rows_uses_the_timeframe_and_ticker_it_is_given(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=PIPELINE_LOGGER)
+    dropped = normalize_candles(golden_raw(), H1, calendar=NYSE).dropped
+
+    log_dropped_rows(dropped, ticker="SPY", timeframe=H4, last_label=utc("2024-07-03T16:30"))
+
+    messages = [record.getMessage() for record in caplog.records if record.name == PIPELINE_LOGGER]
+    assert (
+        messages[0] == "dropped 1 missing_timestamp candle rows for SPY 4h (first none, last none)"
+    )
+    assert all(" for SPY 4h (" in message for message in messages)
+
+
+def test_log_dropped_rows_splits_levels_at_the_last_label(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=PIPELINE_LOGGER)
+    dropped = normalize_candles(golden_raw(), H1, calendar=NYSE).dropped
+
+    log_dropped_rows(dropped, ticker="AAPL", timeframe=H1, last_label=utc("2024-07-02T13:30"))
+
+    records = [
+        (record.levelname, record.getMessage())
+        for record in caplog.records
+        if record.name == PIPELINE_LOGGER
+    ]
+    assert records[:4] == [
+        ("WARNING", "dropped 1 missing_timestamp candle rows for AAPL 1h (first none, last none)"),
+        (
+            "WARNING",
+            "dropped 1 outside_calendar candle rows for AAPL 1h (first 2020-12-31T15:30:00+00:00, "
+            "last 2020-12-31T15:30:00+00:00)",
+        ),
+        (
+            "DEBUG",
+            "dropped 1 not_a_session candle rows for AAPL 1h (first 2024-07-04T14:30:00+00:00, "
+            "last 2024-07-04T14:30:00+00:00)",
+        ),
+        (
+            "DEBUG",
+            "dropped 2 outside_session candle rows for AAPL 1h (first 2024-07-02T20:00:00+00:00, "
+            "last 2024-07-03T12:00:00+00:00)",
+        ),
+    ]
+
+
+def test_log_dropped_rows_with_nothing_dropped_logs_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=PIPELINE_LOGGER)
+
+    log_dropped_rows((), ticker="AAPL", timeframe=H1, last_label=utc("2024-07-03T16:30"))
+
+    assert [record for record in caplog.records if record.name == PIPELINE_LOGGER] == []
+
+
+def test_log_dropped_rows_sends_records_to_an_injected_logger(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    injected = logging.getLogger("tests.market_data.injected_helper")
+    caplog.set_level(logging.DEBUG, logger=injected.name)
+    caplog.set_level(logging.DEBUG, logger=PIPELINE_LOGGER)
+    dropped = normalize_candles(golden_raw(), H1, calendar=NYSE).dropped
+
+    log_dropped_rows(
+        dropped, ticker="AAPL", timeframe=H1, last_label=utc("2024-07-03T16:30"), logger=injected
+    )
+
+    assert [record.name for record in caplog.records] == [injected.name] * 12
+
+
+def test_log_dropped_rows_rejects_a_non_timeframe() -> None:
+    with pytest.raises(TypeError, match="Timeframe"):
+        log_dropped_rows(
+            (),
+            ticker="AAPL",
+            timeframe="1h",  # type: ignore[arg-type]
+            last_label=utc("2024-07-03T16:30"),
+        )
+
+
+def test_log_dropped_rows_checks_last_label_with_to_utc() -> None:
+    with pytest.raises(ValueError, match="naive"):
+        log_dropped_rows((), ticker="AAPL", timeframe=H1, last_label=datetime(2024, 7, 3, 16, 30))
+    with pytest.raises(TypeError, match="datetime"):
+        log_dropped_rows(
+            (),
+            ticker="AAPL",
+            timeframe=H1,
+            last_label="2024-07-03",  # type: ignore[arg-type]
+        )
+
+
+def test_prepare_candles_logs_through_log_dropped_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[int, str, Timeframe, datetime, logging.Logger | None]] = []
+
+    def recorder(
+        dropped: tuple[object, ...],
+        *,
+        ticker: str,
+        timeframe: Timeframe,
+        last_label: datetime,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        calls.append((len(dropped), ticker, timeframe, last_label, logger))
+
+    monkeypatch.setattr(pipeline_module, "log_dropped_rows", recorder)
+    injected = logging.getLogger("tests.market_data.recorded")
+
+    prepare_candles(golden_raw(), GOLDEN_REQUEST, calendar=NYSE, logger=injected)
+    prepare_candles(golden_raw(), GOLDEN_REQUEST, calendar=NYSE)
+
+    assert calls[0] == (16, "AAPL", H1, utc("2024-07-03T16:30"), injected)
+    assert calls[1][:4] == (16, "AAPL", H1, utc("2024-07-03T16:30"))
+    default_logger = calls[1][4]
+    assert default_logger is not None
+    assert default_logger.name == PIPELINE_LOGGER

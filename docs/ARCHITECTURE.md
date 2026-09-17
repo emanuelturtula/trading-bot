@@ -42,8 +42,8 @@ The user decides whether to trade. **There is no order execution layer** and one
 
 | Layer | Responsibility | Rules |
 |-------|----------------|-------|
-| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the market calendar (`MarketCalendar`: NYSE sessions, candle grid and real closes), candle normalization and open-candle removal (`normalize_candles`, `drop_open_candle`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
-| `data/` | `MarketDataProvider` (async Protocol), `TickerInfo` and the D27 policy, typed errors, and `prepare_candles`, which every provider uses to normalize, drop bad rows and the open candle, and require the last closed candle; `YFinanceProvider` (#10) with retries and backoff | Never decides signals. Respects Yahoo's limits (intraday max. 60 days; 1h up to 730 days). |
+| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the market calendar (`MarketCalendar`: NYSE sessions, candle grid and real closes), candle normalization and open-candle removal (`normalize_candles`, `drop_open_candle`), `4h` candles resampled from hourly candles (`resample_hourly_to_4h`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
+| `data/` | `MarketDataProvider` (async Protocol), `TickerInfo` and the D27 policy, typed errors, and `prepare_candles`, which every provider uses to normalize, drop bad rows and the open candle, and require the last closed candle; `YFinanceProvider` in `data/yahoo/`, with `4h` candles built from `1h` bars; `ProviderTransport` (retries with backoff and jitter, timeouts, pacing) | Never decides signals. Respects Yahoo's limits: `1h` requests start at most 720 days back; `1d` is unlimited. |
 | `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → dedupe/cooldown → persistence → notification | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`. |
 | `scheduler/` | APScheduler (AsyncIOScheduler). One job per timeframe, fired at candle close + margin, only during market hours | A single instance per process. |
 | `notifications/` | `Notifier` (Protocol) + `TelegramNotifier` | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk. |
@@ -313,6 +313,109 @@ assert [label.isoformat() for label in frame.index] == [
 ]
 ```
 
+### Yahoo provider
+
+`YFinanceProvider` (`data/yahoo/`) implements the provider contract on yfinance for US-listed stocks and ETFs. Design and decisions: spec [011](specs/011-yfinance-provider.md).
+
+- **Layout.** `history.py` holds the request and answer types and the blocking `YahooClient` port; `instruments.py` checks symbols and maps chart metadata to `TickerInfo`; `client.py` (`YFinanceClient`) is the only module that imports yfinance; `provider.py` plans, resamples and publishes; `factory.py` wires everything. `data/transport.py` (`ProviderTransport`) knows nothing about Yahoo. The provider, its types, the transport and the test fakes load without yfinance, so the source can be replaced by rewriting `client.py`.
+- **Wiring waits for #16.** Nothing in the running app builds the provider yet; the lifespan will build it once, **inside the running event loop**, with a per-process temporary cache directory, and close it at shutdown. A provider and its transport belong to that loop: their `asyncio` primitives bind to the first loop that waits on them, so they are never shared with another loop (a test that calls `asyncio.run` builds its own).
+
+```python
+import shutil
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+from trading_bot.data.yahoo.factory import build_yfinance_provider
+from trading_bot.domain.market_calendar.nyse import (
+    NYSE_FIRST_SUPPORTED_DAY,
+    NYSE_LAST_SUPPORTED_DAY,
+    build_nyse_calendar,
+)
+from trading_bot.domain.timeframe import Timeframe
+
+calendar = build_nyse_calendar(NYSE_FIRST_SUPPORTED_DAY, NYSE_LAST_SUPPORTED_DAY)
+cache_dir = Path(tempfile.mkdtemp(prefix="trading-bot-yfinance-"))  # private, never /app/data
+
+
+async def run_once(now: datetime) -> None:  # now: the scheduled close of the run (#15)
+    provider = build_yfinance_provider(calendar=calendar, cache_dir=cache_dir)
+    try:
+        info = await provider.validate_ticker(" spy ")  # SPY: etf on ARCX, quoted in USD
+        candles = await provider.fetch_candles(info.symbol, Timeframe.H4, 200, now=now)
+        last = calendar.closed_candles(Timeframe.H4, now, 1)[-1]
+        assert candles.index[-1] == last.label  # otherwise CandleNotPublishedError was raised
+    finally:
+        await provider.aclose()  # waits for a worker thread that is still running
+        shutil.rmtree(cache_dir, ignore_errors=True)
+```
+
+#### What is requested
+
+| Timeframe | Yahoo request | Result |
+|-----------|---------------|--------|
+| `1h` | `Ticker.history(start=…, interval="1h")` | `prepare_candles` on the answer |
+| `4h` | the same `1h` request | normalized `1h` bars (dropped rows logged as `1h`) → `resample_hourly_to_4h` → `publishable_4h` → `prepare_candles` |
+| `1d` | `Ticker.history(start=…, interval="1d")` | `prepare_candles` on the answer |
+
+- Every request passes `prepost=False` (regular hours, D28), `auto_adjust=False` (`close` is Yahoo's split-adjusted `Close`, never `Adj Close`, D30), `repair=False`, `keepna=False` and a 15 s request timeout, and never `end`: yfinance answers requests whose `end` lies in the past from an in-memory cache, so a retry could re-read a stale answer.
+- `plan_history` starts at the label of the first candle of `candle_window`. Yahoo rejects `1h` requests that start 730 days back or earlier, so a `1h` or `4h` start more than **720 days** before `now` becomes the first slot at or after that instant; the 10-day margin covers retries of a run over a long weekend. The first capped fetch of a `(symbol, timeframe)` logs `INFO` and later ones `DEBUG`. `1d` is unlimited.
+- `validate_ticker` rejects malformed and ISIN-shaped text without a request, asks for one month of daily bars and maps the chart metadata of that answer (`symbol`, `instrumentType`, `exchangeName`, `currency`, `longName`, `shortName`) to `TickerInfo`, with OTC markets and unknown codes as `OTHER`, before `ensure_supported`. A metadata symbol that differs from the requested one is `ProviderDataError("symbol_mismatch")`.
+
+#### `4h` resampling
+
+`resample_hourly_to_4h(hourly, now, calendar=...)` (`domain/candle_resampling.py`, pure, with look-ahead tests) emits one row per `4h` slot of the session grid that is closed at `now` and holds at least one hourly row: the open of its first row, the highest high, the lowest low, the close of its last row and the sum of volumes, with a report of the hourly slots it lacks. Candles are built from the bars that exist (D34); gaps never shift labels, so signal keys stay stable.
+
+The last `4h` slot closed at `now` is special (D58): `publishable_4h` withholds it while its closing hourly bar is missing, so `prepare_candles` raises `CandleNotPublishedError(missing)` and #15 retries. Yahoo never publishes the 12:30–13:00 ET half hour of an early-close session as hourly data (`is_unpublished_hour`), so the half-day candle closes at 13:00 with the 09:30–12:30 ET bars when the 11:30 bar is present (D65). Hand-computed rows (UTC):
+
+| `4h` label | Hourly rows | open | high | low | close | volume | Publication |
+|------------|-------------|------|------|-----|-------|--------|-------------|
+| 2024-11-27T14:30Z | 14:30Z, 15:30Z, 17:30Z (16:30Z missing) | 100 | 105 | 98 | 99 | 4500 | built from 3 of 4 bars; a `WARNING` when it is the last candle |
+| 2024-11-27T18:30Z | 18:30Z, 19:30Z, 20:30Z | 99 | 101 | 96 | 100 | 4700 | complete (its last hourly slot lasts 30 minutes) |
+| 2024-11-29T14:30Z | 14:30Z, 15:30Z, 16:30Z (half day) | 100 | 106 | 100 | 104 | 1800 | published: 17:30Z (12:30–13:00 ET) is never published |
+
+On the provider logger: `DEBUG` for a withheld candle, one `DEBUG` summary of earlier candles built from incomplete bars, and one `WARNING` when the returned last candle lacks bars Yahoo publishes.
+
+**Off the event loop.** Everything after the client call — normalization, the dropped-row logs, resampling, the gap logs and `prepare_candles` — runs in its own worker thread (`asyncio.to_thread`), so the loop that also drives the scheduler and the Telegram poller keeps running: the whole `4h` path takes about 30 ms for 3 436 hourly bars on the development machine, and a Raspberry Pi is several times slower. That worker is outside the transport, so it has no attempt timeout, takes no pacing token and holds no in-flight slot, and the errors it raises reach the caller unchanged, consume no attempt and trigger no retry.
+
+#### Transport
+
+`ProviderTransport.call` runs each blocking client call in a worker thread and retries only `ProviderUnavailableError`:
+
+| Setting | Default |
+|---------|---------|
+| Attempts | 3 |
+| Backoff | exponential from 2 s, capped at 30 s, equal jitter (a wait in `[cap/2, cap)`) |
+| After `rate_limited` | at least 15 s; `retry_after` honored; a wait above 30 s is not retried |
+| Timeout per attempt | 20 s (`ProviderUnavailableError(timeout)`) |
+| Pacing | token bucket: 5 immediate attempts, then 1 per second, shared by both methods of one provider |
+| Concurrency | one call in flight; a timed-out worker keeps the slot until yfinance's socket timeouts end it |
+
+#### Errors
+
+| yfinance or HTTP failure | Error (always raised `from None`) |
+|--------------------------|-----------------------------------|
+| "symbol may be delisted", missing time zone, HTTP 404 | `InvalidTickerError(not_found)` |
+| Any other empty answer | `NoDataError` (`validate_ticker`: `not_found`) |
+| yfinance rate limit, HTTP 429 | `ProviderUnavailableError(rate_limited)` |
+| HTTP 5xx | `ProviderUnavailableError(server_error)` |
+| Timeouts of either HTTP backend | `ProviderUnavailableError(timeout)` |
+| Other connection, DNS or TLS failures | `ProviderUnavailableError(connection)` |
+| `YFDataException`, malformed JSON, other HTTP statuses | `ProviderUnavailableError(invalid_response)` |
+| Anything else | `ProviderDataError("unexpected_provider_error")` and one `ERROR` record naming only the exception class and the symbol |
+
+Messages never carry the original exception text: yfinance puts request URLs, with the session crumb in the query string, into its exceptions.
+
+#### yfinance state
+
+`configure_yfinance(cache_dir)`, called by the client, is the only code that changes yfinance's process-wide state. It creates `cache_dir` with mode `0o700` and moves yfinance's SQLite caches there (one is a **pickled** cookie jar, so use a private per-process temporary directory, never the data volume); makes yfinance raise instead of returning empty frames; turns yfinance's own retries off (they would sleep inside the worker thread); and sets the `yfinance` logger to `WARNING`, because its `DEBUG` records print the session crumb and request URLs, which the redaction filter cannot recognize.
+
+#### Tests
+
+- Recordings in `tests/fixtures/yahoo/` keep yfinance's frame structure and an allowlist of chart metadata, with every price, volume, dividend and capital gain generated by `random-walk/1` from a seed (D29). `scripts/record_yahoo_fixture.py` records them: manual, networked, never run by tests or CI.
+- `RecordedYahooClient` replays them at the `YahooClient` port; the client itself is tested with a fake `yfinance.Ticker`.
+- The network guard (`tests/fixtures/network_guard.py`, autouse in `tests/conftest.py`) makes outbound connections, remote name resolution and `curl_cffi` requests raise `NetworkAccessError`, a `BaseException` that no `except Exception` can hide. Loopback connections, `socket.socketpair()` and `asyncio.run` keep working.
+
 ## Indicators
 
 Rules can only use the closed catalog of `domain/indicators/` (`CLAUDE.md` rules 3, 4 and 8). Design, exact definitions and decisions: spec [005](specs/005-indicator-registry.md).
@@ -362,7 +465,7 @@ Parameters are integers except `bbands` `std`. `ema_settle(p) = (7 * (p + 1) + 1
 - `warmup = lookback + 1` is the minimum frame length for a value at the last candle; rules can fire from it (crossovers need one more candle).
 - `stable_warmup = warmup + settle` is the frame length after which a recursive indicator no longer depends on where the history starts, within about 0.1% (the seed weighs about `e^-7`). The window indicators (`sma`, `bbands`, `stoch`, `volume_sma`) have `settle = 0`.
 - Values computed on a fetch window that starts later differ slightly from long-history values until `stable_warmup`. That is not look-ahead, but it affects reproducibility between runs and against backtests. The data layer and the engine (#8, #14) fetch at least the rules' `stable_warmup` candles, or everything available, and log when a provider limit caps the history: #14 passes `max(rule.stable_warmup())` over the ticker's rules as the provider `lookback` (at most 2 255 today, below `MAX_LOOKBACK`). Requiring `stable_warmup` to fire would silence young tickers (`ema` `length=200` would need 904 daily candles).
-- History limits: 730 days of `1h` US equity data is about 3 500 bars and the `4h` resample about 1 000. `stable_warmup` exceeds 1 000 from `ema` `length=222`, `rsi` and `atr` `length=125`, `adx` `length=84`, and `macd` `slow=200` with `signal >= 21`; such rules still fire from `warmup`, but runs may differ by up to about 0.1% as the window moves.
+- History limits: the [Yahoo provider](#yahoo-provider) starts `1h` and `4h` requests at most 720 days back, which leaves about 3 435 `1h` bars and 980 `4h` bars (`1d` is unlimited). `stable_warmup` exceeds 980 from `ema` `length=218`, `adx` `length=82`, and `macd` `slow=200` with `signal >= 17`; `rsi` and `atr` never exceed it within their parameter ranges. Such rules still fire from `warmup`, but runs may differ by up to about 0.1% as the window moves, and the provider logs the capped history.
 - **`obv`:** the level is a cumulative sum from the first candle of the frame, so moving the start shifts `value` by a constant, and `signal` (its simple moving average) by the same constant. Comparing `value` with `signal`, including crossovers, does not depend on the history start; comparing `value` or `signal` with a fixed value, a price or another indicator never becomes reproducible.
 
 ### TA-Lib isolation
@@ -691,7 +794,8 @@ Misuse of the harness (for example fewer than 2 candles or `ks` containing 0) ra
 - `candle_frames(...)` in `tests/fixtures/strategies.py` is a Hypothesis strategy that draws generator parameters (size, scenario, timeframe, seed, start, start price, volatility). The `trading-bot` profile in `tests/conftest.py` runs 50 examples without a deadline and keeps Hypothesis' CI profile (derandomized, no example database) on CI.
 - Use frames longer than the warmup (and `min_size` above it for `candle_frames`); otherwise the check fails as `vacuous`. Property tests must only assert detection of cheats that do not depend on the data: `shift(-1)` is always detectable, but `close / close.max()` is not on a flat series.
 - Never assert golden values from the generator: numpy does not guarantee random streams across versions. Assert invariants and scenario features instead.
-- Recorded real-data fixtures arrive with #10 (`YFinanceProvider`): the repository is public and Yahoo's terms restrict redistribution of its data. They must not live under a directory named `data/`, which `.gitignore` ignores.
+- Yahoo recordings live in `tests/fixtures/yahoo/`, never under a directory named `data/`, which `.gitignore` ignores. They keep Yahoo's structure and timestamps, but every price, volume, dividend and capital gain is synthetic (decision D29): the repository is public and Yahoo's terms restrict redistribution of its data. See [Yahoo provider](#yahoo-provider).
+- Every test runs under the network guard installed by `tests/conftest.py`: a test that tries to reach the network fails with `NetworkAccessError`.
 
 ## Persisted data (draft)
 
@@ -717,6 +821,7 @@ Misuse of the harness (for example fewer than 2 candles or `ks` containing 0) ra
 
 - **TA-Lib instead of pandas-ta.** pandas-ta lost its repository and its PyPI history and changed maintainers (supply chain risk). The `ta-lib` 0.8.0 wheels bundle the TA-Lib C library, including `manylinux` aarch64 for Python 3.12, so the image needs no compiler or system package (the `Dockerfile` smoke check fails the build otherwise). It is imported only by `domain/indicators/talib_kernels.py`, behind the indicator registry, so it can be replaced. TA-Lib global setters must never be called.
 - **`exchange_calendars` for NYSE sessions.** It is correct for every golden case of spec 009, including the 2025-01-09 closure and the holiday observance rules, maintained, Apache-2.0, ships pure-Python wheels and works with the locked pandas and numpy. `pandas_market_calendars` depends on it (a larger supply chain for no gain), and an in-house rule table would move holiday rules and ad hoc closures into our maintenance. It is imported only by `domain/market_calendar/nyse.py`, which converts the schedule once into an immutable `MarketCalendar`, so it can be replaced by rewriting one module. The library's calendar registry is never used: it caches instances and defaults its bounds from the wall clock (the `Dockerfile` smoke check fails the build if the calendar cannot be built).
+- **yfinance behind one adapter module.** yfinance 1.7.0 is the source chosen for v1 (issue #10): actively released, Apache-2.0, and every runtime package it adds has a linux/aarch64 wheel for Python 3.12 (the `Dockerfile` smoke check fails the build if it or its `curl_cffi` backend cannot load). Only `data/yahoo/client.py` imports it, so every exception mapping lives in one place, the provider and its test fakes load without yfinance or `curl_cffi`, and the source can be replaced by rewriting one module. yfinance keeps process-wide state (a session, three SQLite caches, one of them a pickled cookie jar, and a logger that prints the session crumb at `DEBUG`), so `configure_yfinance` moves the caches to a private directory, raises exceptions instead of returning empty frames, turns its retries off and sets its logger to `WARNING`. `4h` candles are resampled from `1h` bars on the session grid instead of taken from Yahoo's undocumented `4h` interval, which has the same half-day hole: Yahoo never publishes the last 30 minutes of an early-close session as hourly data, not even months later, so the half-day `4h` candle closes with the 09:30–12:30 ET bars (spec 011, D65).
 - **Async provider port with an explicit `now`.** The app is one asyncio process (FastAPI, `AsyncIOScheduler`, python-telegram-bot), so `MarketDataProvider` methods are coroutines: yfinance blocks, so #10 runs its calls in `asyncio.to_thread` and waits with `asyncio.sleep` between retries, which lets a run be cancelled at shutdown instead of waiting on a sleeping thread and keeps rate limiting a loop-local primitive without locks. `now` is the injected clock: the provider needs it to plan the window, drop the open candle and know which candle must be last, and one `now` per run keeps retries and simulated-clock tests deterministic. Providers never read the wall clock.
 - **Long polling and not webhooks** for Telegram: the Pi does not expose public endpoints.
 - **HTMX and not an SPA**: a single Python image, no Node toolchain.

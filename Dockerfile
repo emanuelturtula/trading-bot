@@ -29,6 +29,8 @@ RUN ["python", "-c", "import numpy as np, talib, trading_bot.domain.indicators.c
 RUN ["python", "-c", "from datetime import UTC, date, datetime; from trading_bot.domain.market_calendar.nyse import build_nyse_calendar; s = build_nyse_calendar(date(2024, 7, 1), date(2024, 7, 31)).session_bounds(date(2024, 7, 3)); raise SystemExit(0 if s is not None and s.close_time == datetime(2024, 7, 3, 17, 0, tzinfo=UTC) else 1)"]
 # Fail the build if the market data package is missing from the installed wheel (nothing imports it at startup yet).
 RUN ["python", "-c", "import trading_bot.data.errors, trading_bot.data.pipeline, trading_bot.data.provider, trading_bot.data.tickers"]
+# Fail the build if yfinance or its browser-impersonating HTTP backend cannot load on this platform (no network is used).
+RUN ["python", "-c", "from curl_cffi import requests; requests.Session(impersonate='chrome').close(); import yfinance.exceptions, trading_bot.data.yahoo.factory"]
 USER app
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 \

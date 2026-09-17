@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import Callable
 from contextlib import nullcontext
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
 
-from tests.script_loader import load_script
+from tests.script_loader import REPO_ROOT, load_script
+from trading_bot.persistence.engine import database_path
 
 dp = load_script("deploy/deploy.py", "pi_deploy")
 
@@ -256,3 +258,30 @@ def test_old_attempts_are_pruned_but_protected_ones_are_kept(tmp_path: Path) -> 
     remaining = sorted(p.name for p in attempts.iterdir())
     assert len(remaining) == dp.KEEP_ATTEMPTS + 1
     assert "202601000" in remaining
+
+
+# --- The database path the application, the deploy script and compose must agree on ---------
+# (spec 012, T13, AC2, D80)
+
+CONTAINER_DATA_DIR = PurePosixPath("/app/data")
+
+
+def compose_environment_value(key: str) -> str:
+    """Read ``key`` from the ``environment`` block of ``deploy/compose.yml`` as plain text."""
+    compose = (REPO_ROOT / "deploy" / "compose.yml").read_text(encoding="utf-8")
+    match = re.search(rf"^\s+{re.escape(key)}:\s*(\S+)\s*$", compose, re.MULTILINE)
+    assert match is not None, f"{key} is not set in deploy/compose.yml"
+    return match.group(1)
+
+
+def test_compose_sets_the_data_directory_the_application_expects() -> None:
+    assert PurePosixPath(compose_environment_value("TB_DATA_DIR")) == CONTAINER_DATA_DIR
+
+
+def test_the_container_database_path_is_the_one_the_deploy_backs_up() -> None:
+    """A silent rename would make the pre-deploy backup copy nothing (spec 012, D80)."""
+    container_path = PurePosixPath(database_path(Path("/app/data")).as_posix())
+
+    assert container_path == PurePosixPath("/app/data/trading_bot.db")
+    assert container_path == PurePosixPath(dp.DATABASE)
+    assert container_path.parent == PurePosixPath(compose_environment_value("TB_DATA_DIR"))

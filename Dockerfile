@@ -27,6 +27,8 @@ COPY --from=builder --chown=app:app /app/.venv /app/.venv
 RUN ["python", "-c", "import numpy as np, talib, trading_bot.domain.indicators.catalog; raise SystemExit(0 if talib.SMA(np.arange(1.0, 6.0), timeperiod=5)[-1] == 3.0 else 1)"]
 # Fail the build if the NYSE calendar cannot be built on this platform (library and zone data).
 RUN ["python", "-c", "from datetime import UTC, date, datetime; from trading_bot.domain.market_calendar.nyse import build_nyse_calendar; s = build_nyse_calendar(date(2024, 7, 1), date(2024, 7, 31)).session_bounds(date(2024, 7, 3)); raise SystemExit(0 if s is not None and s.close_time == datetime(2024, 7, 3, 17, 0, tzinfo=UTC) else 1)"]
+# Fail the build if the market data package is missing from the installed wheel (nothing imports it at startup yet).
+RUN ["python", "-c", "import trading_bot.data.errors, trading_bot.data.pipeline, trading_bot.data.provider, trading_bot.data.tickers"]
 USER app
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 \

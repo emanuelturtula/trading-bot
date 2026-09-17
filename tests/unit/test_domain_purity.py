@@ -1,12 +1,13 @@
 """Purity guard for ``src/trading_bot/domain`` (spec 004, T15, AC15; spec 005, T12; spec 007, T12;
-spec 009, T12).
+spec 009, T12; spec 010, T14).
 
 An AST scan enforces the import allowlist, the ban on reading the clock and the ban on
 mutable module-level state (everything except ``__all__``). ``talib`` is allowed only in
 ``indicators/talib_kernels.py``, so TA-Lib stays replaceable (spec 005, Design 9), the rule
 evaluator passes with the default allowlist (spec 007, AC15), and ``exchange_calendars`` is
 allowed only in ``market_calendar/nyse.py`` while the calendar model in
-``market_calendar/sessions.py`` needs no allowance (spec 009, AC14). A subprocess
+``market_calendar/sessions.py`` needs no allowance (spec 009, AC14), and neither do
+``candle_normalization.py`` and ``closed_candles.py`` (spec 010, AC18). A subprocess
 check confirms that importing the lightweight modules (``utc``, ``timeframe``, ``signals``,
 ``indicators.errors``, ``indicators.params``, ``market_calendar.sessions``) in a fresh
 interpreter never pulls ``pandas``, ``numpy`` or ``exchange_calendars`` into ``sys.modules``
@@ -180,6 +181,8 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "timeframe.py",
         "candles.py",
         "signals.py",
+        "candle_normalization.py",
+        "closed_candles.py",
         "indicators/__init__.py",
         "indicators/errors.py",
         "indicators/params.py",
@@ -251,6 +254,21 @@ def test_the_market_calendar_model_needs_no_allowance() -> None:
     assert {name for name in imported if not name.startswith("trading_bot.domain.")} <= (
         standard_library
     )
+
+
+@pytest.mark.parametrize("relative", ["candle_normalization.py", "closed_candles.py"])
+def test_the_candle_normalization_modules_need_no_allowance(relative: str) -> None:
+    """Normalization and open-candle removal pass with the default allowlist (spec 010, AC18).
+
+    No per-file allowance, no clock and no module-level mutable state: both take a frame, a
+    timeframe, an instant and the injected calendar, and return a result.
+    """
+    tree = _parse(DOMAIN_DIR / relative)
+
+    assert relative not in _EXTRA_PREFIXES_BY_FILE
+    assert disallowed_imports(tree) == []
+    assert clock_calls(tree) == []
+    assert mutable_module_level_names(tree) == []
 
 
 def test_scanner_flags_exchange_calendars_without_the_nyse_allowance() -> None:

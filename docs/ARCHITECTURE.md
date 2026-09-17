@@ -42,8 +42,8 @@ The user decides whether to trade. **There is no order execution layer** and one
 
 | Layer | Responsibility | Rules |
 |-------|----------------|-------|
-| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the market calendar (`MarketCalendar`: NYSE sessions, candle grid and real closes), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
-| `data/` | `MarketDataProvider` (Protocol) and `YFinanceProvider`: normalizes to UTC OHLCV, discards the open candle, retries with backoff | Never decides signals. Respects Yahoo's limits (intraday max. 60 days; 1h up to 730 days). |
+| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the market calendar (`MarketCalendar`: NYSE sessions, candle grid and real closes), candle normalization and open-candle removal (`normalize_candles`, `drop_open_candle`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
+| `data/` | `MarketDataProvider` (async Protocol), `TickerInfo` and the D27 policy, typed errors, and `prepare_candles`, which every provider uses to normalize, drop bad rows and the open candle, and require the last closed candle; `YFinanceProvider` (#10) with retries and backoff | Never decides signals. Respects Yahoo's limits (intraday max. 60 days; 1h up to 730 days). |
 | `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → dedupe/cooldown → persistence → notification | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`. |
 | `scheduler/` | APScheduler (AsyncIOScheduler). One job per timeframe, fired at candle close + margin, only during market hours | A single instance per process. |
 | `notifications/` | `Notifier` (Protocol) + `TelegramNotifier` | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk. |
@@ -72,7 +72,7 @@ The candle model is a validated `pd.DataFrame`; there is no per-row class. `vali
 - every value is finite, prices are `> 0`, `volume >= 0`, `high >= low`, and `open` and `close` are within `[low, high]`;
 - empty frames are valid. Grid alignment, gaps and whether the last candle is closed are not checked.
 
-Every check is row-local or compares adjacent labels, so every prefix of a valid frame is valid. The validator never coerces: the data provider (#8) converts zones, renames columns, casts volume to `float64` and decides how to repair or drop bad rows, then validates.
+Every check is row-local or compares adjacent labels, so every prefix of a valid frame is valid. The validator never coerces: `normalize_candles` converts provider frames to this contract (UTC `us` index, the five `float64` columns) and drops bad rows before validating, as described in [Market data](#market-data).
 
 ### Nominal candle close
 
@@ -89,7 +89,7 @@ For US equities (regular session 09:30–16:00 ET):
 Obligations for later work:
 
 - **Closedness and scheduling (#8, #9, #15):** never use `nominal_close` to decide whether a candle is closed or when to run. Use the real session closes of #9; with nominal closes the daily candle would count as open until about 05:00 UTC the next day and the last hourly bar would be missed. The real closes come from the [market calendar](#market-calendar): `candle_slot` for a candle's close, `next_candle_close` for when to run and `closed_candles` for the candles closed at `now`.
-- **Label convention (#8, #10):** keys depend on provider labels. Fix the convention (open times; the `1d` label policy) before #13 persists signals. Changing it later requires migrating the stored keys, otherwise signals already notified can be sent again.
+- **Label convention (#8, #10): fixed.** Keys depend on provider labels, so the canonical labels of the [market calendar](#candle-grid-and-labels) (spec 009 D21: open times for `1h` and `4h`, 00:00 New York of the session date for `1d`) are enforced by `normalize_candles` (spec 010). Changing them later requires migrating the stored keys, otherwise signals already notified can be sent again.
 - **Counting candles (#7, #14):** count by row position (`cooldown_bars`, crossovers), never with `(t2 - t1) / duration`, which is wrong across nights, weekends and holidays.
 - **Presentation (#17, #25):** do not show the nominal close as the market close; for `1d` it is midnight of the next day. Show the session date or the calendar close.
 
@@ -188,6 +188,131 @@ The calendar decides closedness and scheduling only. `Evaluation.candle_close_ts
 
 Regular holidays and early closes come from rules that `exchange_calendars` evaluates for any year; ad hoc closures (days of mourning, weather, emergencies) are hard-coded in each library release (4.13.2 includes 2025-01-09). A closure announced after the installed release is treated as a session: the scheduler runs at the expected closes, the provider publishes no new candle, the last candle is already closed and its signal key already exists, so nothing is sent twice (rule 5), although stale-data detection (#26) may report it. An unknown ad hoc early close delays that day's last candles until the regular close. Dependabot bumps of `exchange-calendars` bring new closures, and the per-year golden tables in the tests make any library correction visible.
 
+## Market data
+
+`data/` gives every candle source one async contract and one shared path from a provider response to the frame the engine evaluates. The pure frame operations live in `domain/` (`candle_normalization.py`, `closed_candles.py`), so they pass the purity guard and carry look-ahead tests. Design and decisions: spec [010](specs/010-market-data-provider.md).
+
+### Provider contract
+
+`MarketDataProvider` (`data/provider.py`) is a `typing.Protocol` with two async methods. Implementations (`YFinanceProvider`, #10) are injected in `main.py`, and the engine only sees the Protocol.
+
+- `fetch_candles(ticker, timeframe, lookback, *, now)` validates its arguments with `CandleRequest` before any I/O and returns the last `lookback` candles closed at `now`: the frame passes `validate_candles` with a `datetime64[us, UTC]` index, every label is a canonical slot label whose slot closed at or before `now`, the last label is the last slot closed at `now`, and it has between 1 and `lookback` rows (fewer only when the history is shorter or a provider limit caps it, which the provider logs).
+- `validate_ticker(ticker)` parses the text with `parse_ticker` and returns `ensure_supported(info)` for an instrument the provider knows.
+- `now` is explicit: providers never read the wall clock, so the scheduled `now` of a run keeps retries and simulated clocks deterministic.
+- `lookback` counts closed candles, `1 <= lookback <= MAX_LOOKBACK` (5 000). `candle_window(request, calendar=...)` turns it into the span to fetch: the `first` and `last` of the `lookback` closed slots, with `start = first.open_time` and `end = last.close_time`.
+- Both methods raise only argument errors (`TypeError`/`ValueError`), the [errors](#errors) below and `CalendarRangeError`, a configuration error when the injected calendar does not cover the window. Every provider builds its result with `prepare_candles`.
+
+```text
+provider (#10)                 data/pipeline.py                         domain/ (pure)
+raw frame ──────────────────▶ prepare_candles(raw, request, calendar)
+                                 1 normalize_candles ─────────────────▶ canonical frame + DroppedRow report
+                                 2 last = closed_candles(tf, now, 1)
+                                 3 log the report (WARNING / DEBUG)
+                                 4 drop_open_candle ──────────────────▶ rows closed at now
+                                 5 last row == last.label?  no → CandleNotPublishedError | NoDataError
+                                 6 keep the last `lookback` rows
+engine (#14) ◀── frame: valid, canonical labels, all closed, ends at the last closed candle
+```
+
+### Normalization
+
+`normalize_candles(raw, timeframe, calendar=...)` returns `NormalizedCandles(candles, dropped)`.
+
+- **Canonical frame.** The index is converted to UTC with unit `us`, named `None` and sorted. The five columns are matched case-insensitively after stripping whitespace (`Adj Close`, `Dividends` and other columns are ignored), and integer, float and nullable numeric dtypes are cast to `float64` (`pd.NA` becomes NaN). The same candles in any zone, unit or row order give identical frames, so signal keys do not depend on the provider's shape, and normalizing a canonical frame changes nothing. `raw` is never modified.
+- **Structural errors.** `CandleNormalizationError` (a `ValueError` with `kind` and `column`) reports the first failing check: `index_type`, `naive_index` (a naive index is never localized), `multiindex_columns`, `ambiguous_column`, `missing_column` and `non_numeric_column` (object, string, bool, datetime and category columns). Messages never echo raw column labels.
+- **Dropped rows (decision D32).** Bad rows are dropped, never repaired, and each one is reported once as `DroppedRow(position, label, reason)` with the first matching reason:
+
+| Order | Reason | The row |
+|-------|--------|---------|
+| 1 | `missing_timestamp` | has a `NaT` label |
+| 2 | `outside_calendar` | has a label outside the calendar coverage |
+| 3 | `off_grid` | has a label with sub-microsecond precision |
+| 4 | `not_a_session`, `outside_session`, `off_grid` | has a label the calendar rejects (`candle_slot`), with its kind |
+| 5 | `missing_value` | has NaN in any value |
+| 6 | `infinite_value` | has ±inf in any value |
+| 7 | `non_positive_price` | has a price `<= 0` |
+| 8 | `negative_volume` | has `volume < 0` |
+| 9 | `inconsistent_range` | has `high < low`, or `open` or `close` outside `[low, high]` |
+| 10 | `duplicate` | repeats the label of an earlier surviving row with equal values (the first copy is kept) |
+| 11 | `conflicting_duplicate` | shares its label with surviving copies that differ (every copy is dropped) |
+
+Label reasons come first, so an after-hours bar is `outside_session` even with broken values, and values come before duplicates, so a valid bar survives a provisional NaN copy. Every rule is row-local or compares rows with the same label, so a prefix of the input gives a prefix of the output.
+
+### Open-candle removal
+
+`drop_open_candle(candles, timeframe, now, calendar=...)` keeps the rows labelled at or before the label of the last slot closed at `now` (`close_time <= now`, half-open) with one calendar query and one binary search, and drops **every** later row: with a `now` in the past it returns exactly what was closed then (simulations, backtests). The last returned label must be a slot label, and a rejected label raises the calendar's `CandleLabelError`. On the NYSE grid:
+
+| `now` | `1h`: last kept label → real close | `4h` | `1d` |
+|-------|------------------------------------|------|------|
+| 2024-07-02T20:00Z (exactly the close: kept) | 19:30Z → 20:00Z | 17:30Z → 20:00Z | 07-02T04:00Z → 20:00Z |
+| 2024-07-04T15:00Z (holiday) | 07-03T16:30Z → 17:00Z | 07-03T13:30Z → 17:00Z | 07-03T04:00Z → 17:00Z |
+| 2024-03-11T14:30Z (first `1h` close in EDT) | 13:30Z → 14:30Z | 03-08T18:30Z → 21:00Z | 03-08T05:00Z → 21:00Z |
+
+### Last closed candle and logging
+
+`prepare_candles(raw, request, calendar=...)` requires the last returned row to be the last slot closed at `now` (decision D43). Otherwise it raises `CandleNotPublishedError` with reason `invalid` when a dropped row had that label or `missing` when none did, or `NoDataError` when no closed candle remains and nothing was dropped at that label. The engine therefore never re-evaluates a stale frame by accident. A `CandleNormalizationError` becomes `ProviderDataError` with the same `kind`, raised `from None`.
+
+Dropped rows give one record per reason, in `DropReason` order, on the `trading_bot.data.pipeline` logger: `WARNING` for rows labelled at or before the last closed slot (or `NaT`), which were closed candles sent broken, and `DEBUG` for later rows, which belong to the in-progress candle, and for exact duplicates. A record holds the count, the reason, the ticker, the timeframe and the first and last ISO labels, never values or provider text:
+
+```text
+dropped 2 outside_session candle rows for AAPL 1h (first 2024-07-02T20:00:00+00:00, last 2024-07-03T12:00:00+00:00)
+```
+
+### Errors
+
+Every error is a `MarketDataError(Exception)`, and none is a `ValueError`, so an `except ValueError` meant for programming errors never swallows a provider failure. Callers branch on the class and on the class-level `retryable` flag.
+
+| Class | `retryable` | Raised when |
+|-------|-------------|-------------|
+| `InvalidTickerError` (`reason`) | no | the text is malformed, the provider does not know the ticker, or `ensure_supported` rejects it |
+| `NoDataError` | no | no candle closed by `now` survives normalization and no dropped row has the expected label |
+| `ProviderDataError` (`kind`) | no | the response cannot be normalized, or its metadata is unusable |
+| `CandleNotPublishedError` (`reason`, `expected_label`, `last_label`) | yes | the last slot closed at `now` has no valid row |
+| `ProviderUnavailableError` (`failure`, `retry_after`) | yes | a transport failure, timeout, rate limit, server error or transient malformed response |
+
+- Messages are one line built only from normalized tickers, timeframe codes, enum values and ISO timestamps, for example `missing: the provider has no row for the last closed candle [ticker=AAPL, timeframe=1d, expected_label=2024-07-05T04:00:00+00:00, last_label=2024-07-03T04:00:00+00:00]`.
+- **Chain hygiene.** Errors raised while handling a library or network exception use `raise ... from None`. HTTP exceptions can carry URLs whose query strings hold Yahoo's session crumb, and the log redaction filter does not recognize crumbs.
+- `TickerInfo(symbol, name, asset_type, exchange, currency)` can describe any instrument. `ensure_supported(info)` is the single implementation of decision D27, checked in order: asset type `equity` or `etf`, an exchange other than `Exchange.OTHER` (OTC markets map to `OTHER`), then currency `USD`. `name` is provider text: presentation layers must escape it.
+
+### Unpublished candles
+
+| Owner | Responsibility |
+|-------|----------------|
+| #8 | Detects: `prepare_candles` raises `CandleNotPublishedError` (retryable, with `expected_label`) instead of returning a frame that ends before the last closed slot |
+| #10 | Never retries it internally: transport retries (backoff, jitter, timeout) apply to `ProviderUnavailableError` only |
+| #15 (with #14) | Owns the bounded window: retries those tickers with the **same** scheduled `now`, until a deadline no later than `calendar.next_candle_close(timeframe, now)`, then skips them and logs |
+
+### Testing with the fake provider
+
+`FakeMarketDataProvider` (`tests/fixtures/fake_provider.py`) runs the real `prepare_candles` on stored raw frames, records calls and raises scripted `MarketDataError`s first-in, first-out, so engine tests only see frames production can return. `session_candles` (`tests/fixtures/session_candles.py`) builds canonical frames on the calendar grid and `provider_shaped` gives them the yfinance shape, with synthetic values only. `assert_closed_candles` (`tests/fixtures/provider_contract.py`) checks the `fetch_candles` return contract. Tests run coroutines with `asyncio.run`.
+
+```python
+import asyncio
+
+from tests.fixtures.calendars import nyse_test_calendar, utc
+from tests.fixtures.fake_provider import FakeMarketDataProvider
+from tests.fixtures.session_candles import provider_shaped, session_candles
+from trading_bot.data.errors import ProviderFailure, ProviderUnavailableError
+from trading_bot.domain.timeframe import Timeframe
+
+calendar = nyse_test_calendar()  # built once and injected in production (#16)
+candles = session_candles(calendar, Timeframe.D1, utc("2024-06-03T00:00"), utc("2024-07-10T00:00"))
+provider = FakeMarketDataProvider(calendar=calendar)
+provider.set_candles("SPY", Timeframe.D1, provider_shaped(candles))  # synthetic values
+provider.fail_next(ProviderUnavailableError(ProviderFailure.TIMEOUT), ticker="SPY")
+
+now = utc("2024-07-05T20:00:30")  # just after the close of 2024-07-05
+try:
+    asyncio.run(provider.fetch_candles("SPY", Timeframe.D1, 2, now=now))
+except ProviderUnavailableError as error:
+    assert error.retryable  # the scripted failure comes first
+frame = asyncio.run(provider.fetch_candles("SPY", Timeframe.D1, 2, now=now))
+assert [label.isoformat() for label in frame.index] == [
+    "2024-07-03T04:00:00+00:00",  # 2024-07-04 is a holiday
+    "2024-07-05T04:00:00+00:00",  # the last candle closed at now
+]
+```
+
 ## Indicators
 
 Rules can only use the closed catalog of `domain/indicators/` (`CLAUDE.md` rules 3, 4 and 8). Design, exact definitions and decisions: spec [005](specs/005-indicator-registry.md).
@@ -236,7 +361,7 @@ Parameters are integers except `bbands` `std`. `ema_settle(p) = (7 * (p + 1) + 1
 
 - `warmup = lookback + 1` is the minimum frame length for a value at the last candle; rules can fire from it (crossovers need one more candle).
 - `stable_warmup = warmup + settle` is the frame length after which a recursive indicator no longer depends on where the history starts, within about 0.1% (the seed weighs about `e^-7`). The window indicators (`sma`, `bbands`, `stoch`, `volume_sma`) have `settle = 0`.
-- Values computed on a fetch window that starts later differ slightly from long-history values until `stable_warmup`. That is not look-ahead, but it affects reproducibility between runs and against backtests. The data layer and the engine (#8, #14) fetch at least the rules' `stable_warmup` candles, or everything available, and log when a provider limit caps the history. Requiring `stable_warmup` to fire would silence young tickers (`ema` `length=200` would need 904 daily candles).
+- Values computed on a fetch window that starts later differ slightly from long-history values until `stable_warmup`. That is not look-ahead, but it affects reproducibility between runs and against backtests. The data layer and the engine (#8, #14) fetch at least the rules' `stable_warmup` candles, or everything available, and log when a provider limit caps the history: #14 passes `max(rule.stable_warmup())` over the ticker's rules as the provider `lookback` (at most 2 255 today, below `MAX_LOOKBACK`). Requiring `stable_warmup` to fire would silence young tickers (`ema` `length=200` would need 904 daily candles).
 - History limits: 730 days of `1h` US equity data is about 3 500 bars and the `4h` resample about 1 000. `stable_warmup` exceeds 1 000 from `ema` `length=222`, `rsi` and `atr` `length=125`, `adx` `length=84`, and `macd` `slow=200` with `signal >= 21`; such rules still fire from `warmup`, but runs may differ by up to about 0.1% as the window moves.
 - **`obv`:** the level is a cumulative sum from the first candle of the frame, so moving the start shifts `value` by a constant, and `signal` (its simple moving average) by the same constant. Comparing `value` with `signal`, including crossovers, does not depend on the history start; comparing `value` or `signal` with a fixed value, a price or another indicator never becomes reproducible.
 
@@ -592,6 +717,7 @@ Misuse of the harness (for example fewer than 2 candles or `ks` containing 0) ra
 
 - **TA-Lib instead of pandas-ta.** pandas-ta lost its repository and its PyPI history and changed maintainers (supply chain risk). The `ta-lib` 0.8.0 wheels bundle the TA-Lib C library, including `manylinux` aarch64 for Python 3.12, so the image needs no compiler or system package (the `Dockerfile` smoke check fails the build otherwise). It is imported only by `domain/indicators/talib_kernels.py`, behind the indicator registry, so it can be replaced. TA-Lib global setters must never be called.
 - **`exchange_calendars` for NYSE sessions.** It is correct for every golden case of spec 009, including the 2025-01-09 closure and the holiday observance rules, maintained, Apache-2.0, ships pure-Python wheels and works with the locked pandas and numpy. `pandas_market_calendars` depends on it (a larger supply chain for no gain), and an in-house rule table would move holiday rules and ad hoc closures into our maintenance. It is imported only by `domain/market_calendar/nyse.py`, which converts the schedule once into an immutable `MarketCalendar`, so it can be replaced by rewriting one module. The library's calendar registry is never used: it caches instances and defaults its bounds from the wall clock (the `Dockerfile` smoke check fails the build if the calendar cannot be built).
+- **Async provider port with an explicit `now`.** The app is one asyncio process (FastAPI, `AsyncIOScheduler`, python-telegram-bot), so `MarketDataProvider` methods are coroutines: yfinance blocks, so #10 runs its calls in `asyncio.to_thread` and waits with `asyncio.sleep` between retries, which lets a run be cancelled at shutdown instead of waiting on a sleeping thread and keeps rate limiting a loop-local primitive without locks. `now` is the injected clock: the provider needs it to plan the window, drop the open candle and know which candle must be last, and one `now` per run keeps retries and simulated-clock tests deterministic. Providers never read the wall clock.
 - **Long polling and not webhooks** for Telegram: the Pi does not expose public endpoints.
 - **HTMX and not an SPA**: a single Python image, no Node toolchain.
 - **SQLite**: a single writer process, a Docker volume and a backup before each deploy.

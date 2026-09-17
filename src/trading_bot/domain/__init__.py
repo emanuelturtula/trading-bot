@@ -16,5 +16,7 @@ candle grid and real candle closes for closedness and scheduling; only its ``nys
 imports ``exchange_calendars``. The ``candle_normalization`` and ``closed_candles`` modules turn
 provider frames into closed canonical candles (spec 010): ``normalize_candles`` converts a raw
 frame to the candle contract and reports the rows it drops, and ``drop_open_candle`` keeps only
-the candles closed at an injected ``now``.
+the candles closed at an injected ``now``. The ``candle_resampling`` module builds
+session-anchored ``4h`` candles from hourly candles (spec 011): ``resample_hourly_to_4h`` emits
+the ``4h`` slots closed at ``now`` with a report of their missing hourly bars.
 """

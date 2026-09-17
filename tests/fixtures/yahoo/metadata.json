@@ -1,0 +1,158 @@
+{
+ "format": "yfinance-metadata/1",
+ "recorded_with": {
+  "yfinance": "1.7.0"
+ },
+ "symbols": {
+  "AAPL": {
+   "symbol": "AAPL",
+   "instrumentType": "EQUITY",
+   "exchangeName": "NMS",
+   "fullExchangeName": "NasdaqGS",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": "Apple Inc.",
+   "shortName": "Apple Inc."
+  },
+  "QQQ": {
+   "symbol": "QQQ",
+   "instrumentType": "ETF",
+   "exchangeName": "NGM",
+   "fullExchangeName": "NasdaqGM",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": "Invesco QQQ Trust",
+   "shortName": "Invesco QQQ Trust, Series 1"
+  },
+  "BRK-B": {
+   "symbol": "BRK-B",
+   "instrumentType": "EQUITY",
+   "exchangeName": "NYQ",
+   "fullExchangeName": "NYSE",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": "Berkshire Hathaway Inc.",
+   "shortName": "Berkshire Hathaway Inc. New"
+  },
+  "SPY": {
+   "symbol": "SPY",
+   "instrumentType": "ETF",
+   "exchangeName": "PCX",
+   "fullExchangeName": "NYSEArca",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": "State Street SPDR S&P 500 ETF Trust",
+   "shortName": "State Street SPDR S&P 500 ETF T"
+  },
+  "UEC": {
+   "symbol": "UEC",
+   "instrumentType": "EQUITY",
+   "exchangeName": "ASE",
+   "fullExchangeName": "NYSE American",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": "Uranium Energy Corp.",
+   "shortName": "Uranium Energy Corp."
+  },
+  "ARKB": {
+   "symbol": "ARKB",
+   "instrumentType": "ETF",
+   "exchangeName": "BTS",
+   "fullExchangeName": "Cboe US",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": "ARK 21Shares Bitcoin ETF",
+   "shortName": "ARK 21Shares Bitcoin ETF"
+  },
+  "^GSPC": {
+   "symbol": "^GSPC",
+   "instrumentType": "INDEX",
+   "exchangeName": "SNP",
+   "fullExchangeName": "SNP",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": "S&P 500",
+   "shortName": "S&P 500"
+  },
+  "VFIAX": {
+   "symbol": "VFIAX",
+   "instrumentType": "MUTUALFUND",
+   "exchangeName": "NAS",
+   "fullExchangeName": "Nasdaq",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": "Vanguard 500 Index Admiral",
+   "shortName": "Vanguard 500 Index Fd Admiral S"
+  },
+  "BTC-USD": {
+   "symbol": "BTC-USD",
+   "instrumentType": "CRYPTOCURRENCY",
+   "exchangeName": "CCC",
+   "fullExchangeName": "CCC",
+   "currency": "USD",
+   "exchangeTimezoneName": "UTC",
+   "longName": "Bitcoin USD",
+   "shortName": "Bitcoin USD"
+  },
+  "EURUSD=X": {
+   "symbol": "EURUSD=X",
+   "instrumentType": "CURRENCY",
+   "exchangeName": "CCY",
+   "fullExchangeName": "CCY",
+   "currency": "USD",
+   "exchangeTimezoneName": "Europe/London",
+   "longName": "EUR/USD",
+   "shortName": "EUR/USD"
+  },
+  "ES=F": {
+   "symbol": "ES=F",
+   "instrumentType": "FUTURE",
+   "exchangeName": "CME",
+   "fullExchangeName": "CME",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": null,
+   "shortName": "E-Mini S&P 500 Sep 26"
+  },
+  "RELIANCE.NS": {
+   "symbol": "RELIANCE.NS",
+   "instrumentType": "EQUITY",
+   "exchangeName": "NSI",
+   "fullExchangeName": "NSE",
+   "currency": "INR",
+   "exchangeTimezoneName": "Asia/Kolkata",
+   "longName": "Reliance Industries Limited",
+   "shortName": "RELIANCE INDUSTRIES LTD"
+  },
+  "TCEHY": {
+   "symbol": "TCEHY",
+   "instrumentType": "EQUITY",
+   "exchangeName": "PNK",
+   "fullExchangeName": "OTC Markets OTCPK",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": "Tencent Holdings Limited",
+   "shortName": "Tencent Holding Ltd."
+  },
+  "NSRGY": {
+   "symbol": "NSRGY",
+   "instrumentType": "EQUITY",
+   "exchangeName": "OID",
+   "fullExchangeName": "OTC Markets OTCID",
+   "currency": "USD",
+   "exchangeTimezoneName": "America/New_York",
+   "longName": "Nestlé S.A.",
+   "shortName": "Nestle S.A."
+  },
+  "SHOP.TO": {
+   "symbol": "SHOP.TO",
+   "instrumentType": "EQUITY",
+   "exchangeName": "TOR",
+   "fullExchangeName": "Toronto",
+   "currency": "CAD",
+   "exchangeTimezoneName": "America/Toronto",
+   "longName": "Shopify Inc.",
+   "shortName": "SHOPIFY INC"
+  }
+ }
+}

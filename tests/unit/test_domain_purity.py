@@ -1,5 +1,5 @@
 """Purity guard for ``src/trading_bot/domain`` (spec 004, T15, AC15; spec 005, T12; spec 007, T12;
-spec 009, T12; spec 010, T14).
+spec 009, T12; spec 010, T14; spec 011, T16).
 
 An AST scan enforces the import allowlist, the ban on reading the clock and the ban on
 mutable module-level state (everything except ``__all__``). ``talib`` is allowed only in
@@ -7,7 +7,8 @@ mutable module-level state (everything except ``__all__``). ``talib`` is allowed
 evaluator passes with the default allowlist (spec 007, AC15), and ``exchange_calendars`` is
 allowed only in ``market_calendar/nyse.py`` while the calendar model in
 ``market_calendar/sessions.py`` needs no allowance (spec 009, AC14), and neither do
-``candle_normalization.py`` and ``closed_candles.py`` (spec 010, AC18). A subprocess
+``candle_normalization.py`` and ``closed_candles.py`` (spec 010, AC18), or
+``candle_resampling.py`` (spec 011, AC8). A subprocess
 check confirms that importing the lightweight modules (``utc``, ``timeframe``, ``signals``,
 ``indicators.errors``, ``indicators.params``, ``market_calendar.sessions``) in a fresh
 interpreter never pulls ``pandas``, ``numpy`` or ``exchange_calendars`` into ``sys.modules``
@@ -183,6 +184,7 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "signals.py",
         "candle_normalization.py",
         "closed_candles.py",
+        "candle_resampling.py",
         "indicators/__init__.py",
         "indicators/errors.py",
         "indicators/params.py",
@@ -256,12 +258,15 @@ def test_the_market_calendar_model_needs_no_allowance() -> None:
     )
 
 
-@pytest.mark.parametrize("relative", ["candle_normalization.py", "closed_candles.py"])
+@pytest.mark.parametrize(
+    "relative", ["candle_normalization.py", "closed_candles.py", "candle_resampling.py"]
+)
 def test_the_candle_normalization_modules_need_no_allowance(relative: str) -> None:
-    """Normalization and open-candle removal pass with the default allowlist (spec 010, AC18).
+    """Normalization, open-candle removal and ``4h`` resampling pass with the default allowlist
+    (spec 010, AC18; spec 011, AC8).
 
-    No per-file allowance, no clock and no module-level mutable state: both take a frame, a
-    timeframe, an instant and the injected calendar, and return a result.
+    No per-file allowance, no clock and no module-level mutable state: each takes a frame, an
+    instant and the injected calendar, and returns a result.
     """
     tree = _parse(DOMAIN_DIR / relative)
 

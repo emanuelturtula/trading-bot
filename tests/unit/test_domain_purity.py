@@ -1,12 +1,16 @@
-"""Purity guard for ``src/trading_bot/domain`` (spec 004, T15, AC15; spec 005, T12; spec 007, T12).
+"""Purity guard for ``src/trading_bot/domain`` (spec 004, T15, AC15; spec 005, T12; spec 007, T12;
+spec 009, T12).
 
 An AST scan enforces the import allowlist, the ban on reading the clock and the ban on
 mutable module-level state (everything except ``__all__``). ``talib`` is allowed only in
-``indicators/talib_kernels.py``, so TA-Lib stays replaceable (spec 005, Design 9), and the rule
-evaluator passes with the default allowlist (spec 007, AC15). A subprocess
+``indicators/talib_kernels.py``, so TA-Lib stays replaceable (spec 005, Design 9), the rule
+evaluator passes with the default allowlist (spec 007, AC15), and ``exchange_calendars`` is
+allowed only in ``market_calendar/nyse.py`` while the calendar model in
+``market_calendar/sessions.py`` needs no allowance (spec 009, AC14). A subprocess
 check confirms that importing the lightweight modules (``utc``, ``timeframe``, ``signals``,
-``indicators.errors``, ``indicators.params``) in a fresh interpreter never pulls
-``pandas``/``numpy`` into ``sys.modules`` (CLAUDE.md rule 3).
+``indicators.errors``, ``indicators.params``, ``market_calendar.sessions``) in a fresh
+interpreter never pulls ``pandas``, ``numpy`` or ``exchange_calendars`` into ``sys.modules``
+(CLAUDE.md rule 3).
 
 The scanner itself is exercised against synthetic source snippets first, so a green result
 on the real domain modules is not just "the scanner never triggers".
@@ -30,6 +34,7 @@ import trading_bot.domain
 _ALLOWED_EXACT_MODULES = frozenset(
     {
         "__future__",
+        "bisect",
         "collections.abc",
         "dataclasses",
         "datetime",
@@ -46,10 +51,13 @@ _ALLOWED_PREFIXES = ("numpy", "pandas", "trading_bot.domain")
 # schema (spec 006, AC22), so the rest of the domain keeps both replaceable. ``pydantic_core``
 # only provides the ``ErrorDetails`` type of a ``ValidationError``, and ``json`` is the strict
 # JSON reader of ``parse_rule`` (spec 006, Design 9); both are pure and side-effect free.
+# ``exchange_calendars`` stays behind the NYSE calendar builder (spec 009, D15), so the calendar
+# model and its queries do not depend on the library.
 _EXTRA_PREFIXES_BY_FILE = {
     "indicators/talib_kernels.py": ("talib",),
     "rules/schema.py": ("json", "pydantic", "pydantic_core"),
     "rules/json_schema.py": ("pydantic",),
+    "market_calendar/nyse.py": ("exchange_calendars",),
 }
 _CLOCK_ATTRIBUTES = frozenset({"now", "utcnow", "today"})
 
@@ -184,14 +192,18 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "rules/schema.py",
         "rules/json_schema.py",
         "rules/evaluator.py",
+        "market_calendar/__init__.py",
+        "market_calendar/sessions.py",
+        "market_calendar/nyse.py",
     }
 
 
-def test_talib_and_pydantic_are_allowed_only_in_their_own_modules() -> None:
+def test_talib_pydantic_and_exchange_calendars_are_allowed_only_in_their_own_modules() -> None:
     assert _EXTRA_PREFIXES_BY_FILE == {
         "indicators/talib_kernels.py": ("talib",),
         "rules/schema.py": ("json", "pydantic", "pydantic_core"),
         "rules/json_schema.py": ("pydantic",),
+        "market_calendar/nyse.py": ("exchange_calendars",),
     }
 
 
@@ -215,6 +227,43 @@ def test_the_rule_evaluator_needs_no_allowance() -> None:
     assert mutable_module_level_names(tree) == []
     assert not {"json", "pydantic", "pydantic_core"} & {name.split(".")[0] for name in imported}
     assert "trading_bot.domain.rules.schema" in imported
+
+
+def test_the_market_calendar_model_needs_no_allowance() -> None:
+    """The calendar model imports only the standard library and the domain (spec 009, AC14).
+
+    It must pass with the default allowlist: no ``exchange_calendars``, pandas, numpy or
+    ``zoneinfo`` (the time zone is injected), no clock and no module-level cache.
+    """
+    tree = _parse(DOMAIN_DIR / "market_calendar" / "sessions.py")
+    imported = {
+        name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import | ast.ImportFrom)
+        for name in _imported_module_names(node)
+    }
+    standard_library = {"__future__", "bisect", "dataclasses", "datetime", "enum", "typing"}
+
+    assert "market_calendar/sessions.py" not in _EXTRA_PREFIXES_BY_FILE
+    assert disallowed_imports(tree) == []
+    assert clock_calls(tree) == []
+    assert mutable_module_level_names(tree) == []
+    assert {name for name in imported if not name.startswith("trading_bot.domain.")} <= (
+        standard_library
+    )
+
+
+def test_scanner_flags_exchange_calendars_without_the_nyse_allowance() -> None:
+    tree = ast.parse(
+        "import exchange_calendars\n"
+        "from exchange_calendars.exchange_calendar_xnys import XNYSExchangeCalendar\n"
+    )
+
+    assert disallowed_imports(tree) == [
+        "exchange_calendars",
+        "exchange_calendars.exchange_calendar_xnys",
+    ]
+    assert disallowed_imports(tree, extra_prefixes=("exchange_calendars",)) == []
 
 
 def test_scanner_flags_pydantic_without_the_rule_schema_allowance() -> None:
@@ -242,6 +291,8 @@ def test_scanner_flags_a_relative_import() -> None:
 def test_scanner_accepts_every_form_of_allowed_import() -> None:
     source = (
         "from __future__ import annotations\n"
+        "import bisect\n"
+        "from bisect import bisect_right\n"
         "from collections.abc import Mapping\n"
         "from dataclasses import dataclass\n"
         "from datetime import UTC\n"
@@ -312,15 +363,15 @@ def test_scanner_ignores_mutable_containers_built_inside_functions() -> None:
     assert mutable_module_level_names(tree) == []
 
 
-# --- Fresh-interpreter import: pandas/numpy stay unloaded (T15, AC15) -----------------------
+# --- Fresh-interpreter import: heavy libraries stay unloaded (T15, AC15; spec 009, AC14) ----
+
+_HEAVY_MODULES = ("pandas", "numpy", "exchange_calendars")
 
 
 def _fresh_interpreter_sys_modules(*modules: str) -> dict[str, bool]:
-    """Import ``modules`` in a brand-new interpreter and report whether pandas/numpy loaded."""
+    """Import ``modules`` in a brand-new interpreter and report which heavy libraries loaded."""
     src_dir = str(Path(trading_bot.__file__).resolve().parent.parent)
-    report_line = (
-        "print(json.dumps({'pandas': 'pandas' in sys.modules, 'numpy': 'numpy' in sys.modules}))"
-    )
+    report_line = f"print(json.dumps({{name: name in sys.modules for name in {_HEAVY_MODULES!r}}}))"
     lines = [*(f"import {module}" for module in modules), "import json", "import sys", report_line]
     script = "\n".join(lines)
     env = dict(os.environ)
@@ -351,23 +402,37 @@ def _fresh_interpreter_sys_modules(*modules: str) -> dict[str, bool]:
         "trading_bot.domain.indicators.errors",
         "trading_bot.domain.indicators.params",
         "trading_bot.domain.rules.errors",
+        "trading_bot.domain.market_calendar.sessions",
     ],
 )
-def test_lightweight_domain_modules_do_not_load_pandas_or_numpy(module: str) -> None:
+def test_lightweight_domain_modules_do_not_load_heavy_libraries(module: str) -> None:
     report = _fresh_interpreter_sys_modules(module)
 
-    assert report == {"pandas": False, "numpy": False}
+    assert report == {"pandas": False, "numpy": False, "exchange_calendars": False}
 
 
 @pytest.mark.parametrize(
-    "module", ["trading_bot.domain.candles", "trading_bot.domain.rules.schema"]
+    ("module", "loads_exchange_calendars"),
+    [
+        ("trading_bot.domain.candles", False),
+        ("trading_bot.domain.rules.schema", False),
+        ("trading_bot.domain.market_calendar.nyse", True),
+    ],
 )
-def test_the_fresh_interpreter_check_actually_detects_pandas_and_numpy(module: str) -> None:
-    """Control: these modules do use pandas/numpy, so the checks above are not vacuously green.
+def test_the_fresh_interpreter_check_actually_detects_heavy_libraries(
+    module: str, loads_exchange_calendars: bool
+) -> None:
+    """Control: these modules do load heavy libraries, so the checks above are not vacuous.
 
     ``rules.schema`` imports the indicator catalog, so it loads pandas, numpy and TA-Lib;
-    ``rules.errors`` must not (spec 006, AC22).
+    ``rules.errors`` must not (spec 006, AC22). ``market_calendar.nyse`` imports
+    ``exchange_calendars``, which loads pandas and numpy; ``market_calendar.sessions`` must not
+    (spec 009, AC14).
     """
     report = _fresh_interpreter_sys_modules(module)
 
-    assert report == {"pandas": True, "numpy": True}
+    assert report == {
+        "pandas": True,
+        "numpy": True,
+        "exchange_calendars": loads_exchange_calendars,
+    }

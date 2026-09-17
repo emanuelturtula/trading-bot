@@ -42,7 +42,7 @@ The user decides whether to trade. **There is no order execution layer** and one
 
 | Layer | Responsibility | Rules |
 |-------|----------------|-------|
-| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
+| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the market calendar (`MarketCalendar`: NYSE sessions, candle grid and real closes), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
 | `data/` | `MarketDataProvider` (Protocol) and `YFinanceProvider`: normalizes to UTC OHLCV, discards the open candle, retries with backoff | Never decides signals. Respects Yahoo's limits (intraday max. 60 days; 1h up to 730 days). |
 | `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → dedupe/cooldown → persistence → notification | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`. |
 | `scheduler/` | APScheduler (AsyncIOScheduler). One job per timeframe, fired at candle close + margin, only during market hours | A single instance per process. |
@@ -88,7 +88,7 @@ For US equities (regular session 09:30–16:00 ET):
 
 Obligations for later work:
 
-- **Closedness and scheduling (#8, #9, #15):** never use `nominal_close` to decide whether a candle is closed or when to run. Use the real session closes of #9; with nominal closes the daily candle would count as open until about 05:00 UTC the next day and the last hourly bar would be missed.
+- **Closedness and scheduling (#8, #9, #15):** never use `nominal_close` to decide whether a candle is closed or when to run. Use the real session closes of #9; with nominal closes the daily candle would count as open until about 05:00 UTC the next day and the last hourly bar would be missed. The real closes come from the [market calendar](#market-calendar): `candle_slot` for a candle's close, `next_candle_close` for when to run and `closed_candles` for the candles closed at `now`.
 - **Label convention (#8, #10):** keys depend on provider labels. Fix the convention (open times; the `1d` label policy) before #13 persists signals. Changing it later requires migrating the stored keys, otherwise signals already notified can be sent again.
 - **Counting candles (#7, #14):** count by row position (`cooldown_bars`, crossovers), never with `(t2 - t1) / duration`, which is wrong across nights, weekends and holidays.
 - **Presentation (#17, #25):** do not show the nominal close as the market close; for `1d` it is midnight of the next day. Show the session date or the calendar close.
@@ -121,6 +121,72 @@ signal = Signal(
 )
 assert str(signal.idempotency_key) == "AAPL|1d|42|2024-01-03T05:00:00+00:00"
 ```
+
+## Market calendar
+
+`domain/market_calendar/` answers the time questions the bot asks about the US equity market: whether the market is open at an instant, the regular session of a date (holidays and half days included), the real close of a candle, when the next candle closes and which candles are closed at `now`. The scheduler (#15) uses it to fire, the data layer (#8) to drop the in-progress candle and #10 to build `4h` bars and size lookbacks. Design and decisions: spec [009](specs/009-market-calendar.md).
+
+- `sessions.py` holds the model (`MarketCalendar`, `Session`, `CandleSlot` and the errors) and every query, using the standard library only. `nyse.py` holds `build_nyse_calendar`, the only module that imports `exchange_calendars`, so the source can be replaced by rewriting one module.
+- A `MarketCalendar` is an immutable snapshot of UTC sessions. Its queries take the instant as an argument, so they are pure and simulated clocks pass `now` explicitly. There is no module-level instance: the calendar is built once at startup and injected (#16).
+- v1 uses the single NYSE calendar for every ticker (US-listed stocks and ETFs share NYSE hours and holidays) and regular hours only: 09:30–16:00 ET, 13:00 on half days.
+
+```python
+from datetime import UTC, date, datetime
+
+from trading_bot.domain.market_calendar.nyse import build_nyse_calendar
+from trading_bot.domain.timeframe import Timeframe
+
+calendar = build_nyse_calendar(date(2024, 1, 1), date(2024, 12, 31))  # built once, injected
+
+session = calendar.session_bounds(date(2024, 7, 3))  # None on weekends and holidays
+assert session is not None
+assert session.close_time == datetime(2024, 7, 3, 17, 0, tzinfo=UTC)  # 13:00 ET, a half day
+
+now = datetime(2024, 7, 3, 17, 0, tzinfo=UTC)
+assert not calendar.is_open(now)  # sessions are half-open
+assert calendar.next_candle_close(Timeframe.H1, now) == datetime(2024, 7, 5, 14, 30, tzinfo=UTC)
+
+daily = calendar.candle_slot(Timeframe.D1, datetime(2024, 7, 3, 4, 0, tzinfo=UTC))  # 00:00 ET
+assert daily.close_time <= now  # the daily candle of 2024-07-03 is closed
+assert calendar.closed_candles(Timeframe.D1, now, 1) == (daily,)
+```
+
+### Coverage
+
+Every calendar covers an explicit span of exchange days, from `coverage_start` (00:00 of `first_day` in New York) to `coverage_end` (00:00 of the day after `last_day`). A day or instant outside it, or a question whose answer lies beyond it (no candle closes later, fewer closed candles than requested), raises `CalendarRangeError` (a `ValueError` with `calendar`, `first_day` and `last_day`) instead of guessing "open" or "closed".
+
+`build_nyse_calendar` supports 2000-01-01 to 2099-12-31. The recommended wiring (#16) builds that whole range once at startup (about 0.5 s and 7 MB on the development machine), so no clock is read and there is no horizon to watch. Arguments follow the domain conventions: instants must be timezone-aware (`to_utc`), days are `date` values but never `datetime`, and timeframes are `Timeframe` members.
+
+### Boundaries
+
+Intervals are half-open. A session is `[open_time, close_time)`, a candle is closed when `close_time <= now`, and `next_candle_close(timeframe, now)` is strictly after `now`. At exactly 16:00:00 ET the market is closed and the daily candle is closed, and a scheduler that recomputes from the close it just used always moves forward.
+
+### Candle grid and labels
+
+Intraday candles are anchored at the session open and the last one is cut at the close; there is one `1d` candle per session. Arithmetic is done in UTC from the real open, so a DST change never splits a candle and an ad hoc late open still yields a consistent grid. `candle_slots(timeframe, start, end)` returns the candles whose label is in `[start, end)`.
+
+| Session | `1h` (label → real close, UTC) | `4h` | `1d` |
+|---------|--------------------------------|------|------|
+| 2024-01-02 (regular, EST) | 14:30→15:30, 15:30→16:30, 16:30→17:30, 17:30→18:30, 18:30→19:30, 19:30→20:30, 20:30→21:00 | 14:30→18:30, 18:30→21:00 | 05:00 (open 14:30) → 21:00 |
+| 2024-07-03 (half day, EDT) | 13:30→14:30, 14:30→15:30, 15:30→16:30, 16:30→17:00 | 13:30→17:00 | 04:00 (open 13:30) → 17:00 |
+
+The canonical label is the candle open for `1h` and `4h`, and 00:00 of the session date in New York for `1d` (the yfinance convention). `candle_slot(timeframe, label)` matches labels exactly and raises `CandleLabelError` (a `ValueError`) for any other label inside the calendar, with the first `kind` that applies:
+
+| Kind | Meaning | Example (ET) |
+|------|---------|--------------|
+| `not_a_session` | The label's New York date has no session | a `1h` label at 10:30 on 2024-07-04 |
+| `outside_session` | `1h` and `4h` only: before the open, or at or after the close | a `1h` label at 08:00 (pre-market) or at 16:00 |
+| `off_grid` | Any other label | a `1h` label at 10:00; a `1d` label at 00:00 UTC (20:00 the day before) |
+
+A provider that labels daily bars at 00:00 UTC therefore fails loudly instead of mapping every bar to the previous session. #8 normalizes provider labels to this convention and decides what to do with rejected rows by `kind`.
+
+### Identity stays nominal
+
+The calendar decides closedness and scheduling only. `Evaluation.candle_close_ts` and signal keys keep `timeframe.nominal_close(label)` ([Nominal candle close](#nominal-candle-close)), so a library correction to a half day never changes stored keys. For the `1d` candle of 2024-03-08 the nominal close is `2024-03-09T05:00Z`, while the real close is `2024-03-08T21:00Z`.
+
+### Data horizon
+
+Regular holidays and early closes come from rules that `exchange_calendars` evaluates for any year; ad hoc closures (days of mourning, weather, emergencies) are hard-coded in each library release (4.13.2 includes 2025-01-09). A closure announced after the installed release is treated as a session: the scheduler runs at the expected closes, the provider publishes no new candle, the last candle is already closed and its signal key already exists, so nothing is sent twice (rule 5), although stale-data detection (#26) may report it. An unknown ad hoc early close delays that day's last candles until the regular close. Dependabot bumps of `exchange-calendars` bring new closures, and the per-year golden tables in the tests make any library correction visible.
 
 ## Indicators
 
@@ -525,6 +591,7 @@ Misuse of the harness (for example fewer than 2 candles or `ks` containing 0) ra
 ## Decisions
 
 - **TA-Lib instead of pandas-ta.** pandas-ta lost its repository and its PyPI history and changed maintainers (supply chain risk). The `ta-lib` 0.8.0 wheels bundle the TA-Lib C library, including `manylinux` aarch64 for Python 3.12, so the image needs no compiler or system package (the `Dockerfile` smoke check fails the build otherwise). It is imported only by `domain/indicators/talib_kernels.py`, behind the indicator registry, so it can be replaced. TA-Lib global setters must never be called.
+- **`exchange_calendars` for NYSE sessions.** It is correct for every golden case of spec 009, including the 2025-01-09 closure and the holiday observance rules, maintained, Apache-2.0, ships pure-Python wheels and works with the locked pandas and numpy. `pandas_market_calendars` depends on it (a larger supply chain for no gain), and an in-house rule table would move holiday rules and ad hoc closures into our maintenance. It is imported only by `domain/market_calendar/nyse.py`, which converts the schedule once into an immutable `MarketCalendar`, so it can be replaced by rewriting one module. The library's calendar registry is never used: it caches instances and defaults its bounds from the wall clock (the `Dockerfile` smoke check fails the build if the calendar cannot be built).
 - **Long polling and not webhooks** for Telegram: the Pi does not expose public endpoints.
 - **HTMX and not an SPA**: a single Python image, no Node toolchain.
 - **SQLite**: a single writer process, a Docker volume and a backup before each deploy.

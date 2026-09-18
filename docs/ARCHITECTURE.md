@@ -49,7 +49,7 @@ The user decides whether to trade. **There is no order execution layer** and one
 | `notifications/` | `Notifier` (Protocol) + `TelegramNotifier` | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk. |
 | `telegram_bot/` | Commands `/add /remove /list /rules /status /pause /resume /help` with python-telegram-bot (long polling) | Only chats in `TB_TELEGRAM_ALLOWED_CHAT_IDS`. |
 | `api/`, `dashboard/` | REST `/api/v1/tickers`, `/rules`, `/signals`; Jinja2 + HTMX dashboard (tickers, rule builder, history, charts) | Mandatory auth (password hash + signed session cookie). `/health` is the only public endpoint. |
-| `persistence/` | Synchronous SQLAlchemy 2 + Alembic on SQLite at `TB_DATA_DIR/trading_bot.db`: the engine and its pragmas, the `Database` handle and its sessions, the declarative metadata, the `UtcDateTime` column type and the packaged migrations | Migrations run at startup, before anything else; WAL, `foreign_keys=ON`, a busy timeout and `synchronous=FULL` on every connection; backups before each deploy. |
+| `persistence/` | Synchronous SQLAlchemy 2 + Alembic on SQLite at `TB_DATA_DIR/trading_bot.db`: the engine and its pragmas, the `Database` handle and its sessions, the declarative metadata, the `UtcDateTime` column type, the packaged migrations, the configuration tables and the ticker, rule and assignment repositories behind their `Protocol`s; `cli/` manages that configuration from a command of its own | Migrations run at startup, before anything else; WAL, `foreign_keys=ON`, a busy timeout and `synchronous=FULL` on every connection; backups before each deploy. |
 
 ## Process
 
@@ -545,8 +545,8 @@ operator    := "<" | "<=" | ">" | ">=" | "crosses_above" | "crosses_below"
 - **Nothing is coerced and unknown keys are rejected everywhere:** `"14"`, `14.0` and `true` are not integers, `"30"` is not a number, and `"1D"`, `" 1d "` or `"buy"` are not valid codes.
 - **Semantics.** A condition whose two sides are constants, or whose two operands are equal once normalized, is rejected: it cannot depend on the market. Duplicated, contradictory or unit-mismatched conditions stay valid; the domain does not judge a strategy.
 - `cooldown_bars` is the minimum number of closed candles between two notified signals of the same rule and ticker; `0` means no cooldown (idempotency by `(ticker, timeframe, rule_id, candle_close_ts)` still prevents resending the same candle). It is implemented in #14.
-- `timeframe` is the candle timeframe the rule is evaluated on, a `Timeframe` code with the exact [#4 semantics](#timeframes). It must equal the timeframe of every ticker the rule is assigned to: #12 rejects an assignment whose timeframes differ.
-- A rule is assigned to one or more tickers (#12). A rule document carries no identifier and no ticker list: `rule_id` and `enabled` belong to the database.
+- `timeframe` is the candle timeframe the rule is evaluated on, a `Timeframe` code with the exact [#4 semantics](#timeframes). It must equal the timeframe of every ticker the rule is assigned to: the repository rejects such an assignment and the [schema](#configuration-tables-and-repositories) refuses the row (spec 013, D86).
+- A rule is assigned to one or more tickers through the `ticker_rules` table. A rule document carries no identifier and no ticker list: `rule_id` and `enabled` belong to the database.
 
 | Bound | Value |
 |-------|-------|
@@ -811,7 +811,12 @@ migrations, which ship inside the wheel and are applied at startup. Design and d
   applies `journal_mode=WAL` (the backup reads while the app writes), `foreign_keys=ON` (off by
   default in SQLite and reset on every connection), `busy_timeout=5000` and `synchronous=FULL`
   (a committed signal survives a power cut on the SD card). The factory is the only supported
-  way to build an engine, so no connection can miss them, and `echo` is never enabled.
+  way to build an engine, so no connection can miss them, and `echo` is never enabled. The same
+  listener sets `isolation_level = None` and a `begin` listener emits `BEGIN`, so SQLAlchemy and
+  not pysqlite controls transactions (spec 013, D88): a multi-statement migration is atomic, DDL
+  included, and `SAVEPOINT` works, which is how #13 catches an `IntegrityError` on the signal
+  constraint without losing its unit of work. The pragmas keep applying because the `connect`
+  listener runs before any `BEGIN`, and `PRAGMA journal_mode=WAL` is illegal inside one.
 - **Synchronous SQLAlchemy 2.** One process with one writer (`CLAUDE.md` rule 7) and SQLite work
   is microseconds of local C code, so there is no async engine and no `aiosqlite`: callers that
   live in the event loop wrap their database work in `asyncio.to_thread`, one
@@ -853,7 +858,7 @@ database = open_database(Path("data"))  # engine, pragmas and "alembic upgrade h
 try:
     with database.session() as session:  # commits on a clean exit, rolls back on any error
         assert session.execute(text("PRAGMA foreign_keys")).scalar() == 1
-    assert current_revision(database.engine) == "0001"
+    assert current_revision(database.engine) == "0002"
 finally:
     database.dispose()  # checkpoints the WAL and closes the pool
 ```
@@ -863,11 +868,120 @@ one (`temporary_database(path)` and the `database` fixture, both under `tmp_path
 fixture points `TB_DATA_DIR` at pytest's temporary directory, and the session fails if any test
 leaves a `trading_bot.db*` file in the working tree.
 
-## Persisted data (draft)
+### Configuration tables and repositories
+
+Revision `0002` adds the three tables the bot reads its configuration from. Design and decisions:
+spec [013](specs/013-config-repositories.md).
+
+| Table | Columns | Constraints |
+|-------|---------|-------------|
+| `tickers` | `id`, `symbol`, `timeframe`, `enabled`, `created_at` | `AUTOINCREMENT`, unique `(symbol, timeframe)`, unique `(id, timeframe)`, `CHECK timeframe IN ('1h', '4h', '1d')` |
+| `rules` | `id`, `name`, `signal`, `timeframe`, `definition_json`, `enabled`, `created_at`, `updated_at` | `AUTOINCREMENT`, unique `name`, unique `(id, timeframe)`, `CHECK` on `timeframe` and on `signal IN ('BUY', 'SELL')` |
+| `ticker_rules` | `ticker_id`, `rule_id`, `timeframe`, `created_at` | primary key `(ticker_id, rule_id)`, composite foreign keys `(ticker_id, timeframe)` and `(rule_id, timeframe)` `ON DELETE CASCADE`, index on `rule_id` |
+
+- **The timeframe rule is a schema invariant.** `ticker_rules` carries the timeframe and both
+  foreign keys include it, so the database refuses an assignment whose ends disagree and refuses
+  to change either end's timeframe while it exists. The repository still pre-checks and raises
+  `TimeframeMismatchError` with both codes: an `IntegrityError` is a poor message for a user and
+  it would end the unit of work.
+- **Identifiers are never reused.** Both tables are created with `sqlite_autoincrement=True`,
+  because the signal identity of #13 is built on `(ticker_id, rule_id, ...)`: a reused id would
+  let a new rule inherit the notification history of a deleted one.
+- **The stored document is the canonical one.** `definition_json` holds
+  `json.dumps(dump_rule(rule), ensure_ascii=False, allow_nan=False, separators=(",", ":"))`, and
+  the repository re-parses that text before the row is flushed, so an invalid rule is never
+  persisted and "did this rule change?" stays a string comparison. `name`, `signal` and
+  `timeframe` are derived columns written only by the repository, from the same parsed rule.
+  A stored document that no longer parses raises `StoredRuleError` naming the row: it is never
+  skipped silently, because a rule that stops firing without a word is the worst failure for a
+  signal bot.
+- **Ports, not the ORM.** `TickerRepository`, `RuleRepository` and `AssignmentRepository`
+  (`persistence/repositories/protocols.py`) are synchronous `Protocol`s; the `Sql*` implementations
+  take a `Session`, never commit, roll back or close, and return **frozen records**
+  (`StoredTicker`, `StoredRule`, `Assignment`), so nothing lazy-loads after the session closes and
+  a result can cross back from an `asyncio.to_thread` worker. `StoredRule.rule` is already parsed.
+- **The clock is injected.** `created_at` and `updated_at` are written explicitly from a
+  `Clock` (`persistence/clock.py`, `system_clock` by default): no `server_default`, no
+  `func.now()`, no column default, so tests inject a fixed clock and assert literal instants.
+  A `replace` or `set_enabled` that changes nothing leaves `updated_at` untouched.
+- **Deletes are hard deletes** and the cascade is the database's. A ticker's timeframe is not
+  updatable — `(symbol, timeframe)` is its identity — and a rule's timeframe may change only while
+  it has no assignment.
+
+```python
+from pathlib import Path
+
+from trading_bot.domain.rules.schema import parse_rule
+from trading_bot.domain.timeframe import Timeframe
+from trading_bot.persistence.database import open_database
+from trading_bot.persistence.repositories.assignments import SqlAssignmentRepository
+from trading_bot.persistence.repositories.rules import SqlRuleRepository
+from trading_bot.persistence.repositories.tickers import SqlTickerRepository
+
+database = open_database(Path("data"))
+try:
+    with database.session() as session:  # one unit of work; the repositories never commit
+        ticker = SqlTickerRepository(session).add(" aapl ", Timeframe.D1)  # AAPL, enabled
+        rule = SqlRuleRepository(session).add(parse_rule(document))  # stored disabled
+        SqlAssignmentRepository(session).assign(ticker.id, rule.id)  # same timeframe required
+
+    with database.session() as session:  # a later unit of work sees frozen records only
+        assert SqlAssignmentRepository(session).rules_for_ticker(ticker.id, enabled_only=True) == ()
+finally:
+    database.dispose()
+```
+
+### Configuration CLI
+
+`trading_bot/cli/` manages that configuration from the Raspberry Pi before Telegram and the
+dashboard exist: `python -m trading_bot.cli`, run with `docker exec` (see
+[Deploy](DEPLOYMENT.md#operations)). It is a process of its own, wired into nothing, built on
+`argparse` and the repositories above.
+
+```text
+tickers      list | add | remove | enable | disable
+rules        list | remove | enable | disable
+assignments  list | add | remove
+config       export | import
+```
+
+- **It never migrates** (spec 013, D95). `connect_database` opens an already-migrated database
+  and refuses anything else, so a stray container can never upgrade production and the operator
+  gets an actionable message instead of a `no such table` from three layers down.
+- **Exit codes:** `0` success, including a no-op and a clean dry run; `1` the request was rejected
+  and nothing was written; `2` usage (argparse); `3` the environment is unusable (data directory,
+  database, schema revision or output file).
+- **One transaction per command,** and every mutating subcommand accepts `--dry-run`: it does the
+  whole unit of work — unique constraints, composite foreign keys and the re-parse guard included
+  — and then rolls it back, so the database, `sqlite_sequence` included, is byte-for-byte
+  unchanged. Those reports use the `would …` form and carry no identifier.
+- **`config import|export` is the one bulk format:** an envelope with `version: 1` and the
+  optional sections `tickers`, `rules` and `assignments`, addressed by natural key, with no
+  database identifier anywhere. A rule item is `{"enabled": <bool>, "rule": <document>}`, because
+  the schema rejects unknown keys inside a rule. An **absent** section is left alone, so a
+  rules-only file is valid input.
+- **Import is all-or-nothing and merges, never deletes.** The whole file is validated and resolved
+  before the first write — every rule through `parse_rule`, every assignment against the file and
+  the database — and applied in one session, tickers → rules → assignments;
+  `--on-conflict skip|replace|fail` (default `skip`) decides what happens to a ticker or rule that
+  already exists. There is no `--prune`: restoring an exact state is the job of the binary backup
+  the deploy takes. Re-importing the same file writes nothing.
+- **There is no `rules add`:** a rule is a JSON document, `parse_rule` is its single entry point,
+  and `docs/examples/rules/` ships three ready-to-import examples, all disabled.
+- Output is plain text on the injected stream, one line per item plus a summary; errors go to
+  stderr as `error: <message>`. No secret, no rule document and no resolved database path is ever
+  printed.
+
+## Persisted data
+
+Applied by revision `0002` (details in [Configuration tables and repositories](#configuration-tables-and-repositories)):
 
 - `tickers(id, symbol, timeframe, enabled, created_at)`
 - `rules(id, name, signal, timeframe, definition_json, enabled, created_at, updated_at)`
-- `ticker_rules(ticker_id, rule_id)`
+- `ticker_rules(ticker_id, rule_id, timeframe, created_at)`
+
+Still a draft, planned for #13:
+
 - `signals(id, ticker_id, rule_id, timeframe, candle_close_ts, price, indicator_values_json, notified_at)` with unique `(ticker_id, rule_id, timeframe, candle_close_ts)`
 - `bot_state(key, value)`: global pause, last heartbeat
 

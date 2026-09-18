@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "enabled": false,
+      "rule": {
+        "name": "MACD bearish crossover",
+        "signal": "SELL",
+        "timeframe": "1d",
+        "conditions": {
+          "all": [
+            {
+              "left": {
+                "indicator": "macd",
+                "params": {
+                  "fast": 12,
+                  "slow": 26,
+                  "signal": 9
+                },
+                "output": "macd"
+              },
+              "op": "crosses_below",
+              "right": {
+                "indicator": "macd",
+                "params": {
+                  "fast": 12,
+                  "slow": 26,
+                  "signal": 9
+                },
+                "output": "signal"
+              }
+            },
+            {
+              "left": {
+                "price": "close"
+              },
+              "op": "<",
+              "right": {
+                "indicator": "ema",
+                "params": {
+                  "length": 50
+                },
+                "output": "value"
+              }
+            }
+          ]
+        },
+        "cooldown_bars": 5
+      }
+    }
+  ]
+}

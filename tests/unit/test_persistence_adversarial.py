@@ -17,23 +17,32 @@ outcome tied to one platform.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import os
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, event, text
-from sqlalchemy.exc import DatabaseError, OperationalError
+from sqlalchemy.exc import DatabaseError, IntegrityError, OperationalError, PendingRollbackError
 
+from tests.fixtures.database import temporary_database
+from tests.fixtures.repositories import database_snapshot, repositories, run_cli, sample_rule
+from tests.fixtures.rules import NAME_OF_80_CHARACTERS
 from trading_bot.config import Settings
+from trading_bot.domain.timeframe import Timeframe
 from trading_bot.main import create_app
 from trading_bot.persistence import database as database_module
 from trading_bot.persistence.database import Database, open_database
 from trading_bot.persistence.engine import create_database_engine, database_path
 from trading_bot.persistence.migrator import current_revision, head_revision
+from trading_bot.persistence.models import TickerRow
+from trading_bot.persistence.records import Assignment, StoredRule, StoredTicker
 
 
 @contextmanager
@@ -185,8 +194,10 @@ def test_a_wal_reader_sees_committed_rows_but_not_an_open_writers_uncommitted_on
             connection.exec_driver_sql("CREATE TABLE seen (id INTEGER)")
             connection.exec_driver_sql("INSERT INTO seen VALUES (1)")
 
+        # SQLAlchemy owns the transaction since spec 013 D88, so the writer takes it through
+        # ``begin()``: the write lock is acquired by the INSERT, as ``BEGIN IMMEDIATE`` did.
         writer = writer_engine.connect()
-        writer.exec_driver_sql("BEGIN IMMEDIATE")
+        transaction = writer.begin()
         writer.exec_driver_sql("INSERT INTO seen VALUES (2)")  # not committed yet
         try:
             with reader_engine.connect() as reader:
@@ -195,7 +206,7 @@ def test_a_wal_reader_sees_committed_rows_but_not_an_open_writers_uncommitted_on
                 rows = reader.exec_driver_sql("SELECT id FROM seen ORDER BY id").scalars().all()
             assert rows == [1]
         finally:
-            writer.exec_driver_sql("COMMIT")
+            transaction.commit()
             writer.close()
 
         with reader_engine.connect() as reader:
@@ -303,15 +314,18 @@ def test_session_can_be_re_entered_and_each_call_is_an_independent_unit_of_work(
 ) -> None:
     database = open_database(tmp_path, busy_timeout_ms=200)
     try:
-        with database.session() as outer:
-            outer.execute(text("CREATE TABLE nested (id INTEGER)"))
+        # The table is created in a unit of work of its own: since spec 013 D88 the DDL is
+        # transactional, so another connection only sees it once that block has committed.
+        with database.session() as setup:
+            setup.execute(text("CREATE TABLE nested (id INTEGER)"))
 
+        with database.session() as outer:
             with database.session() as inner:
                 assert inner is not outer
                 inner.execute(text("INSERT INTO nested VALUES (1)"))
                 # inner commits when this block exits, independently of the outer session
 
-            # The outer session, still open, observes the inner session's committed insert.
+            # The outer session, which has read nothing yet, sees the inner session's insert.
             count = outer.execute(text("SELECT COUNT(*) FROM nested")).scalar()
             assert count == 1
     finally:
@@ -344,3 +358,198 @@ def test_database_control_a_plain_mutable_dataclass_accepts_the_same_assignment(
 
     assert mutable.value == 2
     assert dataclasses.is_dataclass(Database)
+
+
+# --- The new records reject attribute assignment (spec 013, T15, AC9) ------------------------
+
+
+def test_the_configuration_records_reject_attribute_assignment(database: Database) -> None:
+    """``StoredTicker``, ``StoredRule`` and ``Assignment`` are frozen (spec 013, Design 6.1)."""
+    with database.session() as session:
+        handles = repositories(session)
+        ticker = handles.tickers.add("AAPL", Timeframe.D1)
+        rule = handles.rules.add(sample_rule())
+        assignment = handles.assignments.assign(ticker.id, rule.id)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ticker.enabled = False  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        rule.enabled = True  # type: ignore[misc]
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        assignment.ticker_id = 999  # type: ignore[misc]
+
+    assert dataclasses.is_dataclass(StoredTicker)
+    assert dataclasses.is_dataclass(StoredRule)
+    assert dataclasses.is_dataclass(Assignment)
+
+
+# --- A session needs a rollback after a flush-level IntegrityError (spec 013, T15) ------------
+
+
+def test_a_session_needs_a_rollback_after_a_flush_level_integrity_error_before_reuse(
+    database: Database,
+) -> None:
+    """Unlike the repositories' own typed errors (AC15, which pre-check with a ``SELECT`` before
+    ever writing, so the session stays usable), a genuine ``session.flush()`` failure poisons
+    the whole unit of work: SQLAlchemy refuses any further use until ``rollback()`` is called.
+    This is the failure mode hand-off item 3 for #13 asks to guard with
+    ``session.begin_nested()`` around the signals unique constraint, and the contrast is what
+    makes AC15's "the session stays usable" guarantee meaningful in the first place.
+    """
+    with database.session() as session:
+        repositories(session).tickers.add("AAPL", Timeframe.D1)
+
+    with database.session() as session:
+        duplicate = TickerRow(
+            symbol="AAPL", timeframe=Timeframe.D1, enabled=True, created_at=datetime.now(UTC)
+        )
+        session.add(duplicate)
+        with pytest.raises(IntegrityError):
+            session.flush()
+
+        with pytest.raises(PendingRollbackError):
+            repositories(session).tickers.add("MSFT", Timeframe.D1)
+
+        session.rollback()
+        recovered = repositories(session).tickers.add("MSFT", Timeframe.D1)  # usable again
+        assert recovered.symbol == "MSFT"
+
+
+# --- Rule names at and past the boundary, and across Unicode forms (spec 013, T15, D85) -------
+
+
+def test_a_rule_name_of_exactly_eighty_characters_is_not_truncated_by_storage(
+    database: Database,
+) -> None:
+    assert len(NAME_OF_80_CHARACTERS) == 80
+    with database.session() as session:
+        stored = repositories(session).rules.add(sample_rule(NAME_OF_80_CHARACTERS))
+
+    with database.session() as session:
+        reloaded = repositories(session).rules.get_by_name(NAME_OF_80_CHARACTERS)
+
+    assert stored.name == NAME_OF_80_CHARACTERS
+    assert reloaded is not None
+    assert reloaded.id == stored.id
+
+
+def test_names_differing_only_in_unicode_normalization_form_are_two_rules(
+    database: Database,
+) -> None:
+    """Decision D85's accepted risk: normalizing would rewrite the name the user sent."""
+    # Built from ``chr()`` rather than a literal accented character, so the difference
+    # between the composed and the decomposed form is explicit in source instead of sitting
+    # silently in two bytes that render identically: U+0065 U+0301 ("e" plus a combining
+    # acute accent) is canonically equivalent to, but not equal to, the single U+00E9.
+    nfd_name = "cafe" + chr(0x301) + " rule"  # decomposed: "e" then a combining accent
+    nfc_name = unicodedata.normalize("NFC", nfd_name)  # composed: one U+00E9 codepoint
+    assert nfc_name != nfd_name
+    assert unicodedata.normalize("NFC", nfd_name) == nfc_name  # same text, different code
+
+    with database.session() as session:
+        handles = repositories(session)
+        handles.rules.add(sample_rule(nfc_name))
+        handles.rules.add(sample_rule(nfd_name))
+
+    with database.session() as session:
+        assert {rule.name for rule in repositories(session).rules.list_all()} == {
+            nfc_name,
+            nfd_name,
+        }
+
+
+# --- A rule name that needs shell quoting (spec 013, T15) -------------------------------------
+
+
+def test_a_rule_name_that_needs_shell_quoting_is_echoed_with_repr_and_stays_addressable(
+    tmp_path: Path,
+) -> None:
+    """The name is echoed with ``repr()``, never interpolated raw, and can still address the
+    rule in a later command: the CLI never shells out, so the punctuation is inert either way,
+    but the echoed form must still be the literal ``repr()`` spec 013 Design 9.5 promises.
+    """
+    data_dir = tmp_path / "volume"
+    with temporary_database(data_dir):
+        pass
+    tricky_name = 'Bob\'s "breakout" rule; echo pwned'
+    document = {
+        "version": 1,
+        "rules": [
+            {
+                "enabled": False,
+                "rule": {
+                    "name": tricky_name,
+                    "signal": "BUY",
+                    "timeframe": "1d",
+                    "conditions": {
+                        "all": [{"left": {"price": "close"}, "op": ">", "right": {"value": 1}}]
+                    },
+                },
+            }
+        ],
+    }
+    source = tmp_path / "configuration.json"
+    source.write_text(
+        json.dumps(document, ensure_ascii=False) + "\n", encoding="utf-8", newline="\n"
+    )
+
+    imported = run_cli(["config", "import", str(source)], data_dir=data_dir)
+
+    assert imported.code == 0
+    assert imported.lines[0] == f"created rule {tricky_name!r} (id 1, 1d, BUY, disabled)"
+
+    enabled = run_cli(["rules", "enable", tricky_name], data_dir=data_dir)
+
+    assert enabled.code == 0
+    assert enabled.lines == [f"enabled rule {tricky_name!r} (id 1, 1d, BUY)"]
+
+
+# --- NaN in a configuration document (spec 013, T15) -------------------------------------------
+
+
+def test_a_nan_value_in_a_configuration_document_is_rejected_and_writes_nothing(
+    tmp_path: Path,
+) -> None:
+    """``json.loads`` accepts the non-standard ``NaN`` token; ``parse_rule`` must still refuse
+    it (the field is declared ``allow_inf_nan=False``), whether the document arrives as text or
+    as an already-decoded mapping.
+    """
+    data_dir = tmp_path / "volume"
+    with temporary_database(data_dir):
+        pass
+    document = {
+        "version": 1,
+        "rules": [
+            {
+                "enabled": False,
+                "rule": {
+                    "name": "NaN probe",
+                    "signal": "BUY",
+                    "timeframe": "1d",
+                    "conditions": {
+                        "all": [
+                            {
+                                "left": {"price": "close"},
+                                "op": ">",
+                                "right": {"value": float("nan")},
+                            }
+                        ]
+                    },
+                },
+            }
+        ],
+    }
+    text_with_nan = json.dumps(document)
+    assert "NaN" in text_with_nan  # control: the token really is in the input
+    source = tmp_path / "configuration.json"
+    source.write_text(text_with_nan, encoding="utf-8", newline="\n")
+    before = database_snapshot(data_dir)
+
+    result = run_cli(["config", "import", str(source)], data_dir=data_dir)
+
+    assert result.code == 1
+    assert result.out == ""
+    assert result.err == (
+        "error: rules[0].rule: conditions.all[0].right.value: Input should be a finite number\n"
+    )
+    assert database_snapshot(data_dir) == before

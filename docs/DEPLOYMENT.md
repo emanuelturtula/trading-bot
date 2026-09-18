@@ -162,6 +162,47 @@ uv run pre-commit install
 - Database: the SQLite file lives in the `data` volume at `/app/data/trading_bot.db`, exactly the path the deploy backs up; the schema is migrated at startup, so a container that serves `/health` has already been migrated.
 - Restoring the database: the backup taken before each deploy is kept in `attempts/<id>/database.sqlite3`, and from the second deploy onwards `current.json` records the `backup` it took (the first deploy reports none, because there was no database yet).
 
+### Managing the configuration
+
+The tickers, the rules and their assignments live in that database and are managed with
+`python -m trading_bot.cli` inside the running container (spec
+[013](specs/013-config-repositories.md)). The examples use `-` for standard input and output, so
+no file has to be copied into the container.
+
+```sh
+# Load a configuration file from the workstation, checking it first
+docker compose --project-name trading-bot-prod exec -T app \
+  python -m trading_bot.cli config import --dry-run - < config.json
+docker compose --project-name trading-bot-prod exec -T app \
+  python -m trading_bot.cli config import - < config.json
+
+# Day-to-day management
+docker compose --project-name trading-bot-prod exec app \
+  python -m trading_bot.cli tickers add AAPL --timeframe 1d
+docker compose --project-name trading-bot-prod exec app \
+  python -m trading_bot.cli assignments add AAPL "RSI oversold in uptrend"
+docker compose --project-name trading-bot-prod exec app \
+  python -m trading_bot.cli rules enable "RSI oversold in uptrend"
+
+# Readable backup of the whole configuration
+docker compose --project-name trading-bot-prod exec app \
+  python -m trading_bot.cli config export -
+```
+
+- The export is a **readable companion** to the binary backup taken before each deploy, not a
+  replacement for it: restoring an exact state is the backup's job.
+- `config import` **merges and never deletes**. An item the file does not mention is left alone,
+  so removing a rule from an exported file does not remove it from the database; `rules remove`
+  does. There is no `--prune`.
+- Every mutating command accepts `--dry-run`, which does the whole unit of work and rolls it back.
+  Exit codes: `0` success, `1` the request was rejected and nothing was written, `2` usage, `3`
+  the environment is unusable, including a database that is not at the expected schema revision.
+- The command line never migrates the database: the application does that at startup, so run a
+  deploy first if it refuses with exit code `3`.
+- A configuration change takes effect on the **next** run of the engine, not immediately, and the
+  application prints no confirmation of its own.
+- Ready-to-import example rules, all disabled, live in `docs/examples/rules/`.
+
 ### Merging pull requests
 
 Only with explicit user approval, and only as a squash merge (see [section 5](#5-repository-protection)):

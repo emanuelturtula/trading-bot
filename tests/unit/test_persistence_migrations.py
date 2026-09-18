@@ -27,12 +27,16 @@ from trading_bot.persistence.migrator import (
 MIGRATOR_LOGGER = "trading_bot.persistence.migrator"
 REVISION_ID = re.compile(r"^[0-9]{4}$")
 BASELINE = "0001"
+HEAD = "0002"
+CONFIGURATION_TABLES = ["rules", "ticker_rules", "tickers"]
 
 
 def table_names(engine: Engine) -> list[str]:
+    """The tables SQLite holds, without the internal ones (``sqlite_sequence``)."""
     with engine.connect() as connection:
         rows = connection.exec_driver_sql(
-            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+            " AND name NOT LIKE 'sqlite~_%' ESCAPE '~' ORDER BY name"
         )
         return [str(name) for name in rows.scalars().all()]
 
@@ -61,14 +65,14 @@ def test_the_configuration_needs_no_ini_file_and_no_working_directory(
 
     script = ScriptDirectory.from_config(alembic_config())
 
-    assert script.get_heads() == [BASELINE]
+    assert script.get_heads() == [HEAD]
 
 
 def test_every_revision_identifier_is_four_digits_and_the_chain_is_linear() -> None:
     script = ScriptDirectory.from_config(alembic_config())
     revisions = list(script.walk_revisions())
 
-    assert [revision.revision for revision in revisions] == [BASELINE]
+    assert [revision.revision for revision in revisions] == [HEAD, BASELINE]
     for revision in revisions:
         assert REVISION_ID.match(revision.revision), revision.revision
         assert revision.down_revision is None or REVISION_ID.match(str(revision.down_revision))
@@ -76,8 +80,8 @@ def test_every_revision_identifier_is_four_digits_and_the_chain_is_linear() -> N
     assert script.get_revision(BASELINE).down_revision is None
 
 
-def test_the_head_revision_is_the_baseline() -> None:
-    assert head_revision() == BASELINE
+def test_the_head_revision_is_the_latest_one() -> None:
+    assert head_revision() == HEAD
 
 
 def test_two_heads_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,7 +112,23 @@ def test_the_configuration_carries_no_database_url() -> None:
 # --- T7: upgrade and downgrade (AC11) ------------------------------------------------------
 
 
-def test_the_first_upgrade_creates_only_the_version_table(
+def test_the_baseline_creates_only_the_version_table(tmp_path: Path) -> None:
+    """The baseline still creates nothing of its own: the first tables arrive with ``0002``."""
+    engine = fresh_engine(tmp_path)
+    config = alembic_config()
+    try:
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, BASELINE)
+
+        assert current_revision(engine) == BASELINE
+        assert stored_revisions(engine) == [BASELINE]
+        assert table_names(engine) == ["alembic_version"]
+    finally:
+        engine.dispose()
+
+
+def test_the_first_upgrade_reaches_the_head_revision(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     engine = fresh_engine(tmp_path)
@@ -116,11 +136,11 @@ def test_the_first_upgrade_creates_only_the_version_table(
         with caplog.at_level(logging.INFO, logger=MIGRATOR_LOGGER):
             revision = run_migrations(engine)
 
-        assert revision == BASELINE
-        assert current_revision(engine) == BASELINE
-        assert stored_revisions(engine) == [BASELINE]
-        assert table_names(engine) == ["alembic_version"]
-        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0001"]
+        assert revision == HEAD
+        assert current_revision(engine) == HEAD
+        assert stored_revisions(engine) == [HEAD]
+        assert table_names(engine) == ["alembic_version", *CONFIGURATION_TABLES]
+        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0002"]
     finally:
         engine.dispose()
 
@@ -134,10 +154,10 @@ def test_a_second_upgrade_is_a_no_op(tmp_path: Path, caplog: pytest.LogCaptureFi
         with caplog.at_level(logging.INFO, logger=MIGRATOR_LOGGER):
             revision = run_migrations(engine)
 
-        assert revision == BASELINE
-        assert stored_revisions(engine) == [BASELINE]
-        assert table_names(engine) == ["alembic_version"]
-        assert migrator_messages(caplog) == ["database schema already at revision 0001"]
+        assert revision == HEAD
+        assert stored_revisions(engine) == [HEAD]
+        assert table_names(engine) == ["alembic_version", *CONFIGURATION_TABLES]
+        assert migrator_messages(caplog) == ["database schema already at revision 0002"]
     finally:
         engine.dispose()
 
@@ -156,8 +176,8 @@ def test_downgrade_to_base_and_back_to_head(tmp_path: Path) -> None:
         assert stored_revisions(engine) == []
         assert current_revision(engine) is None
 
-        assert run_migrations(engine) == BASELINE
-        assert stored_revisions(engine) == [BASELINE]
+        assert run_migrations(engine) == HEAD
+        assert stored_revisions(engine) == [HEAD]
     finally:
         engine.dispose()
 
@@ -183,11 +203,11 @@ def test_offline_migrations_are_refused(tmp_path: Path) -> None:
 
 
 def test_the_passed_connection_carries_the_whole_migration(tmp_path: Path) -> None:
-    """The caller owns the transaction, so rolling it back undoes the stamped revision.
+    """The caller owns the transaction, so rolling it back undoes the whole migration.
 
-    The ``alembic_version`` table itself survives: pysqlite only opens a transaction before a
-    DML statement, so the first ``CREATE TABLE`` of a connection runs in autocommit. What the
-    caller's transaction does carry is every row written after it, the revision included.
+    Since spec 013 D88 handed transaction control to SQLAlchemy, that covers the DDL too: not
+    even ``alembic_version`` survives the rollback, so a migration that fails halfway leaves
+    the database exactly as it was.
     """
     engine = fresh_engine(tmp_path)
     config = alembic_config()
@@ -199,8 +219,8 @@ def test_the_passed_connection_carries_the_whole_migration(tmp_path: Path) -> No
             inside = connection.exec_driver_sql("SELECT version_num FROM alembic_version").scalar()
             transaction.rollback()
 
-        assert inside == BASELINE
-        assert stored_revisions(engine) == []
+        assert inside == HEAD
+        assert table_names(engine) == []
         assert current_revision(engine) is None
     finally:
         engine.dispose()
@@ -238,7 +258,7 @@ def test_without_a_connection_the_environment_falls_back_to_the_settings(
 
     engine = create_database_engine(database_path(data_dir), busy_timeout_ms=200)
     try:
-        assert stored_revisions(engine) == [BASELINE]
+        assert stored_revisions(engine) == [HEAD]
     finally:
         engine.dispose()
 
@@ -254,7 +274,7 @@ def test_an_unknown_stored_revision_fails_loudly(tmp_path: Path) -> None:
         with pytest.raises(CommandError, match="9999"):
             run_migrations(engine)
 
-        assert table_names(engine) == ["alembic_version"]
+        assert table_names(engine) == ["alembic_version", *CONFIGURATION_TABLES]
         assert stored_revisions(engine) == ["9999"]
     finally:
         engine.dispose()

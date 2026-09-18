@@ -146,7 +146,7 @@ def test_a_full_startup_and_shutdown_leaks_nothing_into_the_logs(
         assert DATABASE_FILENAME not in message
         assert "sqlite+pysqlite" not in message
         assert "sqlite://" not in message
-    assert migrator_messages(caplog) == ["database schema upgraded from empty to 0001"]
+    assert migrator_messages(caplog) == ["database schema upgraded from empty to 0002"]
 
 
 def test_a_failed_migration_aborts_the_startup(
@@ -188,8 +188,8 @@ def test_two_consecutive_startups_on_the_same_directory(
     assert second_revision == head_revision()
     assert rows == [head_revision()]
     assert migrator_messages(caplog) == [
-        "database schema upgraded from empty to 0001",
-        "database schema already at revision 0001",
+        "database schema upgraded from empty to 0002",
+        "database schema already at revision 0002",
     ]
 
 
@@ -205,7 +205,7 @@ def test_a_startup_over_an_already_migrated_volume(
         rows = stored_revisions(app.state.database.engine)
 
     assert rows == [head_revision()]
-    assert migrator_messages(caplog) == ["database schema already at revision 0001"]
+    assert migrator_messages(caplog) == ["database schema already at revision 0002"]
 
 
 def test_a_database_migrated_by_a_newer_image_aborts_the_startup(tmp_path: Path) -> None:

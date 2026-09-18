@@ -1,16 +1,17 @@
 """The SQLite engine, its pragmas and the session factory (spec 012, Design 4.1, 4.2).
 
 ``create_database_engine`` is the only supported way to build an engine: it registers the
-``connect`` listener that applies the pragmas, so no caller can end up with a connection
-without them. Foreign keys and the busy timeout are per connection and reset on every new
-one, and the pool opens new connections whenever it needs them.
+``connect`` listener that applies the pragmas and hands transaction control to SQLAlchemy
+(spec 013, D88), so no caller can end up with a connection without them. Foreign keys and the
+busy timeout are per connection and reset on every new one, and the pool opens new connections
+whenever it needs them.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from sqlalchemy import URL, Engine, create_engine, event
+from sqlalchemy import URL, Connection, Engine, create_engine, event
 from sqlalchemy.engine.interfaces import DBAPIConnection
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import ConnectionPoolEntry
@@ -43,6 +44,12 @@ def create_database_engine(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS
 
     @event.listens_for(engine, "connect")
     def _set_pragmas(connection: DBAPIConnection, _entry: ConnectionPoolEntry) -> None:
+        # pysqlite opens a transaction only before the first DML statement, so DDL would run
+        # in autocommit and a migration that fails halfway would leave part of its schema
+        # behind. Handing transaction control to SQLAlchemy also makes SAVEPOINT work (#13).
+        # The pragmas run here, before any BEGIN: PRAGMA journal_mode=WAL is illegal inside a
+        # transaction, so this order is load-bearing (spec 013, D88).
+        connection.isolation_level = None
         cursor = connection.cursor()
         try:
             cursor.execute("PRAGMA journal_mode=WAL")  # readers never block the writer
@@ -51,6 +58,10 @@ def create_database_engine(path: Path, *, busy_timeout_ms: int = BUSY_TIMEOUT_MS
             cursor.execute("PRAGMA synchronous=FULL")  # survive a power cut on the SD card
         finally:
             cursor.close()
+
+    @event.listens_for(engine, "begin")
+    def _begin(connection: Connection) -> None:
+        connection.exec_driver_sql("BEGIN")
 
     return engine
 

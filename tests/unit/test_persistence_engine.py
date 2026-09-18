@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from trading_bot.persistence import database as database_module
+from trading_bot.persistence import migrator as migrator_module
 from trading_bot.persistence.database import Database, open_database
 from trading_bot.persistence.engine import (
     BUSY_TIMEOUT_MS,
@@ -324,7 +325,9 @@ def test_open_database_disposes_the_engine_when_the_migration_fails(
         raise RuntimeError("migration failed")
 
     monkeypatch.setattr(database_module, "create_database_engine", spy_create_engine)
-    monkeypatch.setattr(database_module, "run_migrations", failing_migration)
+    # ``database.py`` imports the migrator inside the function, so that importing the handle
+    # drags no Alembic into the Telegram and API layers (spec 013, AC28): patch it at its home.
+    monkeypatch.setattr(migrator_module, "run_migrations", failing_migration)
 
     with pytest.raises(RuntimeError, match="migration failed"):
         open_database(tmp_path, busy_timeout_ms=200)

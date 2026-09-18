@@ -47,14 +47,11 @@ def run_migrations(engine: Engine) -> str:
     """Upgrade the database to the head revision and return it.
 
     The upgrade runs on one connection of ``engine`` inside ``engine.begin()``, and Alembic
-    shares that transaction instead of opening its own. **The transaction does not cover every
-    statement**: pysqlite only opens a transaction before the first DML statement, so DDL
-    executed before it, such as the ``CREATE TABLE alembic_version`` of a first migration, runs
-    in autocommit and survives a rollback. Everything from that first DML statement onwards,
-    the revision stamp included, is transactional. A migration that fails halfway can therefore
-    leave the DDL it had already applied; the recovery path is the pre-deploy backup. Spec 012
-    §7.2 and hand-off 13 hold the ruling: #12 either adopts the ``isolation_level = None`` plus
-    explicit ``BEGIN`` recipe, with tests, or records a decision explaining why not.
+    shares that transaction instead of opening its own. **That transaction covers the whole
+    upgrade, the DDL and the revision stamp included**, because ``create_database_engine`` hands
+    transaction control to SQLAlchemy (spec 013, D88): a migration that fails halfway leaves the
+    database exactly as it was, ``alembic_version`` included, so a retry starts from a clean
+    state instead of stopping on an object a previous attempt had already created.
 
     An unknown stored revision raises ``CommandError``: an older image refuses a database
     migrated by a newer one instead of writing against it.

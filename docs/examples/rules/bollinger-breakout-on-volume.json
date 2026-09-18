@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "enabled": false,
+      "rule": {
+        "name": "Bollinger breakout on volume",
+        "signal": "BUY",
+        "timeframe": "1d",
+        "conditions": {
+          "all": [
+            {
+              "left": {
+                "price": "close"
+              },
+              "op": "crosses_above",
+              "right": {
+                "indicator": "bbands",
+                "params": {
+                  "length": 20,
+                  "std": 2.0
+                },
+                "output": "upper"
+              }
+            },
+            {
+              "left": {
+                "price": "volume"
+              },
+              "op": ">",
+              "right": {
+                "indicator": "volume_sma",
+                "params": {
+                  "length": 20
+                },
+                "output": "value"
+              }
+            }
+          ]
+        },
+        "cooldown_bars": 3
+      }
+    }
+  ]
+}

@@ -80,7 +80,10 @@ addopts = ["--strict-markers", "--strict-config", "-ra"]
 pythonpath = ["src", "."]
 
 [tool.coverage.run]
-source = ["trading_bot"]
+# The package name plus the directory Alembic loads its scripts from: coverage matches a
+# package name against the module name, and the revisions are loaded outside the package
+# (spec 013, D89), so without the second entry they appear in no report line.
+source = ["trading_bot", "src/trading_bot/persistence/migrations"]
 branch = true
 
 [tool.coverage.report]

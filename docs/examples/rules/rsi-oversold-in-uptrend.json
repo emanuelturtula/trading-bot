@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "enabled": false,
+      "rule": {
+        "name": "RSI oversold in uptrend",
+        "signal": "BUY",
+        "timeframe": "1d",
+        "conditions": {
+          "all": [
+            {
+              "left": {
+                "indicator": "rsi",
+                "params": {
+                  "length": 14
+                },
+                "output": "value"
+              },
+              "op": "crosses_below",
+              "right": {
+                "value": 30.0
+              }
+            },
+            {
+              "left": {
+                "price": "close"
+              },
+              "op": ">",
+              "right": {
+                "indicator": "sma",
+                "params": {
+                  "length": 200
+                },
+                "output": "value"
+              }
+            }
+          ]
+        },
+        "cooldown_bars": 5
+      }
+    }
+  ]
+}

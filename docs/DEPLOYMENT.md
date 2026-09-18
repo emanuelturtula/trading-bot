@@ -159,7 +159,8 @@ uv run pre-commit install
 - Logs: `docker compose --project-name trading-bot-prod logs -f app`.
 - Last deploy: `~/trading-bot-deploy/prod/current.json`; history in `attempts/`.
 - Manual rollback: re-running the workflow of the previous commit is not allowed (run ordering protection). Revert with a PR (`git revert`) and merge.
-- Restoring the database: the backup taken before each deploy is kept in `attempts/<id>/database.sqlite3`.
+- Database: the SQLite file lives in the `data` volume at `/app/data/trading_bot.db`, exactly the path the deploy backs up; the schema is migrated at startup, so a container that serves `/health` has already been migrated.
+- Restoring the database: the backup taken before each deploy is kept in `attempts/<id>/database.sqlite3`, and from the second deploy onwards `current.json` records the `backup` it took (the first deploy reports none, because there was no database yet).
 
 ### Merging pull requests
 

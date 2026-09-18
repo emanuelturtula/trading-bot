@@ -7,12 +7,14 @@ description = "Technical-analysis signal bot that notifies buy/sell signals via 
 requires-python = ">=3.12,<3.13"
 license = "MIT"
 dependencies = [
+    "alembic>=1.13",
     "exchange-calendars>=4.13.2",
     "fastapi>=0.115",
     "numpy>=2.5.3",
     "pandas>=3.0.5",
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
+    "sqlalchemy>=2.0",
     "ta-lib>=0.8.0",
     "uvicorn>=0.30",
     "yfinance>=1.7.0",

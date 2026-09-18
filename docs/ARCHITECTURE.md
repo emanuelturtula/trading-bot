@@ -49,7 +49,7 @@ The user decides whether to trade. **There is no order execution layer** and one
 | `notifications/` | `Notifier` (Protocol) + `TelegramNotifier` | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk. |
 | `telegram_bot/` | Commands `/add /remove /list /rules /status /pause /resume /help` with python-telegram-bot (long polling) | Only chats in `TB_TELEGRAM_ALLOWED_CHAT_IDS`. |
 | `api/`, `dashboard/` | REST `/api/v1/tickers`, `/rules`, `/signals`; Jinja2 + HTMX dashboard (tickers, rule builder, history, charts) | Mandatory auth (password hash + signed session cookie). `/health` is the only public endpoint. |
-| `persistence/` | SQLAlchemy 2 + Alembic on SQLite in `/app/data` | Versioned migrations; backups before each deploy. |
+| `persistence/` | Synchronous SQLAlchemy 2 + Alembic on SQLite at `TB_DATA_DIR/trading_bot.db`: the engine and its pragmas, the `Database` handle and its sessions, the declarative metadata, the `UtcDateTime` column type and the packaged migrations | Migrations run at startup, before anything else; WAL, `foreign_keys=ON`, a busy timeout and `synchronous=FULL` on every connection; backups before each deploy. |
 
 ## Process
 
@@ -797,6 +797,72 @@ Misuse of the harness (for example fewer than 2 candles or `ks` containing 0) ra
 - Yahoo recordings live in `tests/fixtures/yahoo/`, never under a directory named `data/`, which `.gitignore` ignores. They keep Yahoo's structure and timestamps, but every price, volume, dividend and capital gain is synthetic (decision D29): the repository is public and Yahoo's terms restrict redistribution of its data. See [Yahoo provider](#yahoo-provider).
 - Every test runs under the network guard installed by `tests/conftest.py`: a test that tries to reach the network fails with `NetworkAccessError`.
 
+## Persistence
+
+`persistence/` owns the database: one SQLite file, one engine per process and the Alembic
+migrations, which ship inside the wheel and are applied at startup. Design and decisions: spec
+[012](specs/012-sqlite-persistence.md).
+
+- **One file, one name.** The database is `TB_DATA_DIR/trading_bot.db`, that is
+  `/app/data/trading_bot.db` in the container, on the named `data` volume. Only the directory is
+  configurable: the file name is the constant `DATABASE_FILENAME`, so the pre-deploy backup of
+  `deploy/deploy.py` can never end up looking at a path the app does not use.
+- **Pragmas on every connection.** `create_database_engine` registers a `connect` listener that
+  applies `journal_mode=WAL` (the backup reads while the app writes), `foreign_keys=ON` (off by
+  default in SQLite and reset on every connection), `busy_timeout=5000` and `synchronous=FULL`
+  (a committed signal survives a power cut on the SD card). The factory is the only supported
+  way to build an engine, so no connection can miss them, and `echo` is never enabled.
+- **Synchronous SQLAlchemy 2.** One process with one writer (`CLAUDE.md` rule 7) and SQLite work
+  is microseconds of local C code, so there is no async engine and no `aiosqlite`: callers that
+  live in the event loop wrap their database work in `asyncio.to_thread`, one
+  `Database.session()` per unit of work, and never share a `Session` across threads or across an
+  `await`.
+- **`Database`** is the handle the rest of the app is injected with: a frozen `engine` plus a
+  `sessionmaker(expire_on_commit=False)`, so a loaded object stays readable after the commit.
+  `open_database(data_dir)` creates the engine, applies the migrations and returns it;
+  `Database.session()` commits on a clean exit, rolls back on any `BaseException` (the
+  `CancelledError` of a shutdown included) and always closes; `dispose()` closes the pool, which
+  checkpoints and removes the `-wal` and `-shm` files.
+- **UTC columns and names.** Every timestamp column is a `UtcDateTime` (`persistence/types.py`),
+  which binds through `to_utc` and returns aware UTC values; a plain `DateTime` would silently
+  give back a naive value and is rejected in review. Values are stored with six fractional
+  digits, so `ORDER BY` matches chronological order. Constraint names come from the
+  `NAMING_CONVENTION` of `persistence/base.py`, so every index, unique constraint and foreign key
+  has a deterministic name a later migration can drop.
+- **Migrations at startup.** The FastAPI lifespan calls `open_database` before anything else and
+  one `INFO` record names the applied revision. There is no flag to skip it: a failure
+  propagates, the container never becomes healthy and the deploy rolls back. `/health` is
+  unchanged and never touches the database.
+- **Adding a revision.** `uv run alembic revision --autogenerate --rev-id <next four digits> -m
+  "<message>"`; the root `alembic.ini` is for that CLI only, since the app builds its Alembic
+  configuration in code and the image copies `src/` alone. Define every model in
+  `persistence/models.py` or import it there, keep a single head with the previous revision as
+  `down_revision`, write a real `downgrade`, use `op.batch_alter_table` for any `ALTER`, and test
+  `upgrade head` **and** `downgrade base` on a temporary database. The template imports `op` and
+  `sa`; drop whichever the revision does not use, or `ruff` fails the gate.
+
+```python
+from pathlib import Path
+
+from sqlalchemy import text
+
+from trading_bot.persistence.database import open_database
+from trading_bot.persistence.migrator import current_revision
+
+database = open_database(Path("data"))  # engine, pragmas and "alembic upgrade head"
+try:
+    with database.session() as session:  # commits on a clean exit, rolls back on any error
+        assert session.execute(text("PRAGMA foreign_keys")).scalar() == 1
+    assert current_revision(database.engine) == "0001"
+finally:
+    database.dispose()  # checkpoints the WAL and closes the pool
+```
+
+Tests never touch a real database: `tests/fixtures/database.py` gives them a migrated throwaway
+one (`temporary_database(path)` and the `database` fixture, both under `tmp_path`), an autouse
+fixture points `TB_DATA_DIR` at pytest's temporary directory, and the session fails if any test
+leaves a `trading_bot.db*` file in the working tree.
+
 ## Persisted data (draft)
 
 - `tickers(id, symbol, timeframe, enabled, created_at)`
@@ -812,6 +878,7 @@ Misuse of the harness (for example fewer than 2 candles or `ks` containing 0) ra
 | `TB_ENVIRONMENT` | `dev` / `beta` / `prod` (set by compose on the Pi) |
 | `TB_VERSION` | Version injected into the image |
 | `TB_LOG_LEVEL` | Log level |
+| `TB_DATA_DIR` | Directory of the SQLite database and other runtime data (`/app/data` in the container) |
 | `TB_TELEGRAM_BOT_TOKEN` | Secret. A different bot per environment |
 | `TB_TELEGRAM_ALLOWED_CHAT_IDS` | Authorized chats (comma-separated) |
 | `TB_DASHBOARD_PASSWORD_HASH` | Secret. Hash of the dashboard password |
@@ -825,5 +892,5 @@ Misuse of the harness (for example fewer than 2 candles or `ks` containing 0) ra
 - **Async provider port with an explicit `now`.** The app is one asyncio process (FastAPI, `AsyncIOScheduler`, python-telegram-bot), so `MarketDataProvider` methods are coroutines: yfinance blocks, so #10 runs its calls in `asyncio.to_thread` and waits with `asyncio.sleep` between retries, which lets a run be cancelled at shutdown instead of waiting on a sleeping thread and keeps rate limiting a loop-local primitive without locks. `now` is the injected clock: the provider needs it to plan the window, drop the open candle and know which candle must be last, and one `now` per run keeps retries and simulated-clock tests deterministic. Providers never read the wall clock.
 - **Long polling and not webhooks** for Telegram: the Pi does not expose public endpoints.
 - **HTMX and not an SPA**: a single Python image, no Node toolchain.
-- **SQLite**: a single writer process, a Docker volume and a backup before each deploy.
+- **SQLite with synchronous SQLAlchemy 2 and Alembic**: a single writer process (rule 7), a Docker volume and a backup before each deploy. The engine factory applies WAL, `foreign_keys=ON`, a 5 s busy timeout and `synchronous=FULL` on every connection, because the last three are per connection and a power cut on the SD card would otherwise lose committed signals, which would then be notified twice. Async SQLAlchemy and `aiosqlite` were rejected: one writer and microseconds of local C code leave nothing to overlap, so callers in the event loop use `asyncio.to_thread`. Timestamps go through `UtcDateTime` instead of epoch integers, which sort just as well but make the deploy backup and any manual query unreadable. Migrations run first in the FastAPI lifespan and there is no flag to skip them: a failure aborts startup, so no container can ever serve on an old schema.
 - **Backtesting** (vectorbt + walk-forward) in a later phase, with care for overfitting (Deflated Sharpe Ratio).

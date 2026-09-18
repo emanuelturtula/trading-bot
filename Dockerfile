@@ -31,6 +31,8 @@ RUN ["python", "-c", "from datetime import UTC, date, datetime; from trading_bot
 RUN ["python", "-c", "import trading_bot.data.errors, trading_bot.data.pipeline, trading_bot.data.provider, trading_bot.data.tickers"]
 # Fail the build if yfinance or its browser-impersonating HTTP backend cannot load on this platform (no network is used).
 RUN ["python", "-c", "from curl_cffi import requests; requests.Session(impersonate='chrome').close(); import yfinance.exceptions, trading_bot.data.yahoo.factory"]
+# Fail the build if the migrations are missing from the installed wheel or cannot be applied (throwaway database under /tmp, never /app/data).
+RUN ["python", "-c", "import shutil, tempfile; from pathlib import Path; from trading_bot.persistence.database import open_database; from trading_bot.persistence.migrator import current_revision, head_revision; d = tempfile.mkdtemp(); db = open_database(Path(d)); c = db.engine.connect(); mode = c.exec_driver_sql('PRAGMA journal_mode').scalar(); c.close(); ok = current_revision(db.engine) == head_revision() and mode == 'wal'; db.dispose(); shutil.rmtree(d, ignore_errors=True); raise SystemExit(0 if ok else 1)"]
 USER app
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 \

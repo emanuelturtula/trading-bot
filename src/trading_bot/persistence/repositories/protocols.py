@@ -1,4 +1,4 @@
-"""The three configuration ports (spec 013, Design 7, D69, D91).
+"""The five repository ports (spec 013, Design 7; spec 014, Design 7, 9; D69, D91).
 
 Synchronous ``Protocol``s, mirroring ``MarketDataProvider``: the port is a ``Protocol`` and the
 implementation is injected. Implementations take a ``Session`` rather than the ``Database``, so
@@ -6,18 +6,39 @@ implementation is injected. Implementations take a ``Session`` rather than the `
 boundary belongs, and one block can use all three repositories atomically.
 
 A consumer running inside the event loop wraps its whole unit of work in ``asyncio.to_thread``
-and never shares a ``Session`` across threads or across an ``await``.
+and never shares a ``Session`` across threads or across an ``await``, and never opens two
+sessions at once in one thread (spec 014, D110).
+
+The two signal-side implementations load no rule schema (decision D120); this module does,
+because ``RuleRepository`` speaks in parsed rules, and every consumer of the ports loads it
+anyway.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Protocol
 
 from trading_bot.domain.rules.schema import Rule
+from trading_bot.domain.signals import Signal
 from trading_bot.domain.timeframe import Timeframe
 from trading_bot.persistence.records import Assignment, StoredRule, StoredTicker
+from trading_bot.persistence.signal_records import (
+    DEFAULT_PAGE_SIZE,
+    RecordOutcome,
+    SignalCursor,
+    SignalPage,
+    StoredSignal,
+)
+from trading_bot.persistence.state import BotState, LastRun
 
-__all__ = ["AssignmentRepository", "RuleRepository", "TickerRepository"]
+__all__ = [
+    "AssignmentRepository",
+    "BotStateRepository",
+    "RuleRepository",
+    "SignalRepository",
+    "TickerRepository",
+]
 
 
 class TickerRepository(Protocol):
@@ -95,4 +116,69 @@ class AssignmentRepository(Protocol):
         self, rule_id: int, *, enabled_only: bool = False
     ) -> tuple[StoredTicker, ...]:
         """The tickers the rule is assigned to, ordered by ``(symbol, timeframe)``."""
+        ...
+
+
+class SignalRepository(Protocol):
+    """The signal history, whose identity is the key of CLAUDE.md rule 5."""
+
+    def record(self, signal: Signal) -> RecordOutcome:
+        """Store the signal, or return the one already stored under its key (decision D112).
+
+        ``is_new`` is ``True`` for exactly one call per key and only counts once the caller's
+        session commits: commit first, then notify, and only on ``is_new=True`` (D115).
+        """
+        ...
+
+    def get(self, signal_id: int) -> StoredSignal | None: ...
+
+    def mark_notified(self, signal_id: int) -> StoredSignal:
+        """Stamp the delivery instant once; a second call keeps the first one."""
+        ...
+
+    def latest(
+        self, ticker_id: int, rule_id: int, *, notified_only: bool = False
+    ) -> StoredSignal | None:
+        """The pair's signal with the greatest candle close, which a cooldown counts from."""
+        ...
+
+    def history(
+        self,
+        *,
+        ticker_id: int | None = None,
+        rule_id: int | None = None,
+        timeframe: Timeframe | None = None,
+        notified: bool | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = DEFAULT_PAGE_SIZE,
+        before: SignalCursor | None = None,
+    ) -> SignalPage:
+        """One keyset page, newest first; ``[since, until)`` bounds the candle close."""
+        ...
+
+    def count(self, *, ticker_id: int | None = None, rule_id: int | None = None) -> int: ...
+
+
+class BotStateRepository(Protocol):
+    """The runtime state of the bot: the pause, the heartbeat and the last run per timeframe."""
+
+    def load(self) -> BotState:
+        """Every stored fact at once; a missing row means "never"."""
+        ...
+
+    def pause(self) -> datetime:
+        """Pause the bot and return the instant it was paused; pausing twice keeps the first."""
+        ...
+
+    def resume(self) -> bool:
+        """Remove the pause; ``False`` when the bot was not paused."""
+        ...
+
+    def record_heartbeat(self) -> datetime:
+        """Store the clock's instant as the latest sign of life; last write wins."""
+        ...
+
+    def record_run(self, timeframe: Timeframe, scheduled_at: datetime) -> LastRun:
+        """Record a completed run, monotonically: an earlier or repeated report writes nothing."""
         ...

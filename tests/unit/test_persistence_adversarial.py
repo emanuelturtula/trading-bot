@@ -1,4 +1,4 @@
-"""Adversarial cases for the persistence layer (spec 012, T15, AC4-AC8, AC16).
+"""Adversarial cases for the persistence layer (spec 012, T15, AC4-AC8, AC16; spec 014, T17).
 
 Every case here is a situation a well-behaved caller never creates on purpose, but that the
 engine factory, the migrator or the lifespan must still fail loudly (never silently) or handle
@@ -7,7 +7,15 @@ between two writers, a WAL reader racing an open write transaction, pathological
 ``TB_DATA_DIR`` values and misuse of the public API surface (``open_database`` called twice,
 ``session()`` re-entered, ``Database`` mutated).
 
-No wall-clock or elapsed-time assertions: the busy-timeout case asserts the error class only.
+The cases below spec 014's own section add the tester's mutation checks for that spec: a session
+bound to a plain, deferred-``BEGIN`` engine (what every session did before decision D110) can
+lose a race ``Database.session()`` never loses; a signal row inserted without ``begin_nested()``
+poisons its session exactly the way spec 013's tickers case already pins for a configuration row
+(decision D112); two sessions held open at once in one thread (D110's own sharp edge) fail fast
+instead of hanging; a normalized ticker, a wide indicator payload and a cursor drawn under a
+different filter all round-trip or reposition cleanly, never raising.
+
+No wall-clock or elapsed-time assertions: the busy-timeout cases assert the error class only.
 No platform-dependent expectations: Windows does not enforce POSIX directory permissions and
 rejects control characters in path components that Linux accepts, so those two cases either
 skip on non-POSIX or accept both a clean success and a clean ``OSError``, never a specific
@@ -23,26 +31,36 @@ import os
 import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, event, text
 from sqlalchemy.exc import DatabaseError, IntegrityError, OperationalError, PendingRollbackError
+from sqlalchemy.orm import sessionmaker
 
 from tests.fixtures.database import temporary_database
-from tests.fixtures.repositories import database_snapshot, repositories, run_cli, sample_rule
+from tests.fixtures.repositories import (
+    SAMPLE_CLOSE,
+    database_snapshot,
+    repositories,
+    run_cli,
+    sample_rule,
+    sample_signal,
+)
 from tests.fixtures.rules import NAME_OF_80_CHARACTERS
 from trading_bot.config import Settings
+from trading_bot.domain.signals import Side, Signal
 from trading_bot.domain.timeframe import Timeframe
 from trading_bot.main import create_app
 from trading_bot.persistence import database as database_module
 from trading_bot.persistence.database import Database, open_database
 from trading_bot.persistence.engine import create_database_engine, database_path
 from trading_bot.persistence.migrator import current_revision, head_revision
-from trading_bot.persistence.models import TickerRow
+from trading_bot.persistence.models import SignalRow, TickerRow
 from trading_bot.persistence.records import Assignment, StoredRule, StoredTicker
+from trading_bot.persistence.repositories.signals import SqlSignalRepository, dump_indicator_values
 
 
 @contextmanager
@@ -553,3 +571,209 @@ def test_a_nan_value_in_a_configuration_document_is_rejected_and_writes_nothing(
         "error: rules[0].rule: conditions.all[0].right.value: Input should be a finite number\n"
     )
     assert database_snapshot(data_dir) == before
+
+
+# --- spec 014, T17: two sessions in one thread, D110's own sharp edge -----------------------
+
+
+def test_two_sessions_open_at_once_in_one_thread_fail_with_database_is_locked(
+    tmp_path: Path,
+) -> None:
+    """The rule "one session per unit of work" already forbids this; D110 (spec 014) turns it
+    from a silent 5 s wait into an immediate, typed failure, and this pins that it is
+    recognizable. Only the error class is asserted, never how long the second session waited
+    (testing rules).
+    """
+    with (
+        temporary_database(tmp_path / "volume", busy_timeout_ms=50) as database,
+        database.session() as outer,
+    ):
+        outer.execute(text("SELECT 1"))  # the first statement: outer now holds the lock
+
+        with (
+            pytest.raises(OperationalError, match="database is locked"),
+            database.session() as inner,
+        ):
+            inner.execute(text("SELECT 1"))  # inner's own BEGIN IMMEDIATE waits, then fails
+
+
+# --- spec 014, T17: a mutation check for D110 (BEGIN IMMEDIATE) through the repository -------
+
+
+def test_without_begin_immediate_a_read_then_record_session_can_lose_its_own_claim(
+    database: Database,
+) -> None:
+    """A session bound directly to the plain engine keeps a deferred ``BEGIN`` — what every
+    session did before decision D110. Its read fixes a snapshot; another unit of work commits a
+    row for the same key; the deferred session's own write can no longer be rescued by the busy
+    timeout (``SQLITE_BUSY_SNAPSHOT``), which is exactly the failure D110 removes from every real
+    ``Database.session()``. Complements T3's raw-SQL characterization (AC9) at the repository's
+    own boundary: ``latest`` then ``record``, the shape #14's cooldown read has.
+    """
+    with database.session() as session:
+        handles = repositories(session)
+        ticker = handles.tickers.add("AAPL", Timeframe.D1)
+        rule = handles.rules.add(sample_rule())
+    signal = sample_signal(ticker, rule)
+
+    deferred_session = sessionmaker(bind=database.engine, expire_on_commit=False)()
+    try:
+        deferred_session.execute(text("SELECT 1"))  # opens a deferred BEGIN: a read only
+        SqlSignalRepository(deferred_session).latest(ticker.id, rule.id)
+
+        with database.session() as session:  # a real unit of work commits in between
+            winner = SqlSignalRepository(session).record(signal)
+        assert winner.is_new is True
+
+        with pytest.raises(OperationalError):
+            SqlSignalRepository(deferred_session).record(signal)
+    finally:
+        deferred_session.rollback()
+        deferred_session.close()
+
+    with database.session() as session:
+        assert SqlSignalRepository(session).count() == 1
+
+
+# --- spec 014, T17: a mutation check for begin_nested() (decision D112) ----------------------
+
+
+def test_a_duplicate_signal_row_without_a_savepoint_poisons_the_session(
+    database: Database,
+) -> None:
+    """Contrasts with ``SqlSignalRepository.record``, which wraps its insert in
+    ``session.begin_nested()`` (D112) precisely so a duplicate key never reaches the caller as a
+    poisoned session. Mirrors
+    ``test_a_session_needs_a_rollback_after_a_flush_level_integrity_error_before_reuse`` above,
+    which pins the same failure mode for a configuration row; this is the signals side of it.
+    """
+    with database.session() as session:
+        handles = repositories(session)
+        ticker = handles.tickers.add("AAPL", Timeframe.D1)
+        rule = handles.rules.add(sample_rule())
+    signal = sample_signal(ticker, rule)
+    with database.session() as session:
+        SqlSignalRepository(session).record(signal)
+
+    with database.session() as session:
+        duplicate = SignalRow(
+            ticker_id=ticker.id,
+            rule_id=rule.id,
+            timeframe=ticker.timeframe,
+            candle_close_ts=signal.candle_close_ts,
+            side=signal.side,
+            close_price=signal.close_price,
+            indicator_values_json=dump_indicator_values(signal.indicator_values),
+            created_at=datetime.now(UTC),
+            notified_at=None,
+        )
+        session.add(duplicate)  # no begin_nested(): the mutation under test
+        with pytest.raises(IntegrityError):
+            session.flush()
+
+        later = sample_signal(
+            ticker, rule, candle_close_ts=signal.candle_close_ts + timedelta(days=1)
+        )
+        with pytest.raises(PendingRollbackError):
+            SqlSignalRepository(session).record(later)
+
+        session.rollback()
+        recovered = SqlSignalRepository(session).record(later)  # usable again
+        assert recovered.is_new is True
+
+
+# --- spec 014, T17: a normalized symbol, a wide payload and a cross-filter cursor ------------
+
+
+def test_a_lowercase_symbol_with_surrounding_whitespace_normalizes_and_round_trips(
+    database: Database,
+) -> None:
+    """The domain normalizes ``Signal.ticker`` at construction (spec 004), before ``record`` ever
+    resolves it by ``(symbol, timeframe)``: messy operator input never reaches the repository.
+    """
+    with database.session() as session:
+        handles = repositories(session)
+        ticker = handles.tickers.add("AAPL", Timeframe.D1)
+        rule = handles.rules.add(sample_rule())
+    signal = Signal(
+        ticker="  aapl  ",
+        timeframe=Timeframe.D1,
+        rule_id=str(rule.id),
+        side=Side.BUY,
+        candle_close_ts=SAMPLE_CLOSE,
+        close_price=100.0,
+    )
+    assert signal.ticker == "AAPL"  # normalized already, before it ever reaches storage
+
+    with database.session() as session:
+        stored_id = SqlSignalRepository(session).record(signal).stored.id
+    with database.session() as session:
+        reloaded = SqlSignalRepository(session).get(stored_id)
+
+    assert reloaded is not None
+    assert reloaded.ticker_id == ticker.id
+    assert reloaded.signal.ticker == "AAPL"
+
+
+def test_forty_indicator_values_including_an_exact_zero_round_trip_in_order(
+    database: Database,
+) -> None:
+    """20 conditions x 2 operands: the size a maximal rule's evaluation could produce."""
+    with database.session() as session:
+        handles = repositories(session)
+        ticker = handles.tickers.add("AAPL", Timeframe.D1)
+        rule = handles.rules.add(sample_rule())
+    values = {f"indicator_{index}.value": index + 0.5 for index in range(40)}
+    values["indicator_0.value"] = 0.0  # an exact zero, distinct from -0.0 (pinned elsewhere)
+
+    with database.session() as session:
+        stored = (
+            SqlSignalRepository(session)
+            .record(sample_signal(ticker, rule, indicator_values=values))
+            .stored
+        )
+
+    assert list(stored.signal.indicator_values) == list(values)
+    assert dict(stored.signal.indicator_values) == values
+
+
+def test_a_cursor_drawn_under_a_different_filter_is_a_position_not_an_error(
+    database: Database,
+) -> None:
+    """A ``SignalCursor`` is a plain position in ``(candle_close_ts, id)`` order (D116): reusing
+    one drawn under a different filter set is never rejected, it simply continues from that
+    position in whatever the new filters select.
+    """
+    with database.session() as session:
+        handles = repositories(session)
+        aapl = handles.tickers.add("AAPL", Timeframe.D1)
+        msft = handles.tickers.add("MSFT", Timeframe.D1)
+        rule = handles.rules.add(sample_rule())
+    with database.session() as session:
+        repository = SqlSignalRepository(session)
+        for ticker, days in ((aapl, 0), (aapl, 1), (msft, 2), (msft, 3)):
+            repository.record(
+                sample_signal(ticker, rule, candle_close_ts=SAMPLE_CLOSE + timedelta(days=days))
+            )
+
+    with database.session() as session:
+        aapl_only = SqlSignalRepository(session).history(ticker_id=aapl.id, limit=1)
+    assert aapl_only.next_cursor is not None
+
+    with database.session() as session:
+        # The cursor was drawn filtering on AAPL only; reused here with no filter at all.
+        everything_after = SqlSignalRepository(session).history(before=aapl_only.next_cursor)
+
+    assert everything_after.items != ()  # a position, accepted and used, never an error
+
+
+def test_a_record_outcome_rejects_attribute_assignment(database: Database) -> None:
+    with database.session() as session:
+        handles = repositories(session)
+        ticker = handles.tickers.add("AAPL", Timeframe.D1)
+        rule = handles.rules.add(sample_rule())
+    with database.session() as session:
+        outcome = SqlSignalRepository(session).record(sample_signal(ticker, rule))
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        outcome.is_new = True  # type: ignore[misc]

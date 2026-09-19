@@ -1,9 +1,9 @@
-"""The ORM models of the application (spec 012, Design 5; spec 013, Design 3).
+"""The ORM models of the application (spec 012, Design 5; spec 013, Design 3; spec 014, 3).
 
-This feature ships the three configuration tables; signals and ``bot_state`` arrive with #13.
-**Every model must be defined here or imported by this module**, because ``migrations/env.py``
-reads ``Base.metadata`` through it and ``--autogenerate`` only compares what is imported.
-Timestamp columns always use ``UtcDateTime`` (``types.py``).
+The three configuration tables, the signal history and the bot state. **Every model must be
+defined here or imported by this module**, because ``migrations/env.py`` reads
+``Base.metadata`` through it and ``--autogenerate`` only compares what is imported. Timestamp
+columns always use ``UtcDateTime`` (``types.py``).
 
 The ``Row`` suffix keeps ``RuleRow`` from shadowing the domain's ``Rule`` in every module that
 handles both. The models declare no relationship: repositories return frozen records
@@ -14,20 +14,30 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, ForeignKeyConstraint, String, Text, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Float,
+    ForeignKeyConstraint,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from trading_bot.domain.signals import Side
 from trading_bot.domain.timeframe import Timeframe
 from trading_bot.persistence.base import Base
-from trading_bot.persistence.types import SideType, TimeframeType, UtcDateTime
+from trading_bot.persistence.state import StateKey
+from trading_bot.persistence.types import SideType, StateKeyType, TimeframeType, UtcDateTime
 
-__all__ = ["Base", "RuleRow", "TickerRow", "TickerRuleRow"]
+__all__ = ["Base", "BotStateRow", "RuleRow", "SignalRow", "TickerRow", "TickerRuleRow"]
 
 # Built from the enumerations, so adding a member changes the rendered DDL and fails the
 # golden-DDL assertion until a migration is written (spec 013, Design 3).
 _TIMEFRAME_CODES = ", ".join(f"'{member.value}'" for member in Timeframe)
 _SIDE_CODES = ", ".join(f"'{member.value}'" for member in Side)
+_STATE_KEYS = ", ".join(f"'{member.value}'" for member in StateKey)
 
 
 class TickerRow(Base):
@@ -101,3 +111,57 @@ class TickerRuleRow(Base):
     rule_id: Mapped[int] = mapped_column(primary_key=True, index=True)
     timeframe: Mapped[Timeframe] = mapped_column(TimeframeType)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class SignalRow(Base):
+    """A recorded signal: its identity, what a notification shows and its delivery state.
+
+    The unique key is the signal identity of CLAUDE.md rule 5, so no thread, process, retry or
+    restart can store one twice (spec 014, D111, D112). The ticker key carries the timeframe,
+    whose value never changes for a ticker (D97); the rule key does not, so a rule without
+    assignments may change timeframe and its history keeps the one it was recorded with
+    (D113). Deleting a ticker or a rule deletes its signals through the cascade.
+    """
+
+    __tablename__ = "signals"
+    __table_args__ = (
+        UniqueConstraint("ticker_id", "rule_id", "timeframe", "candle_close_ts"),
+        ForeignKeyConstraint(
+            ["ticker_id", "timeframe"], ["tickers.id", "tickers.timeframe"], ondelete="CASCADE"
+        ),
+        ForeignKeyConstraint(["rule_id"], ["rules.id"], ondelete="CASCADE"),
+        CheckConstraint(f"timeframe IN ({_TIMEFRAME_CODES})", name="timeframe"),
+        CheckConstraint(f"side IN ({_SIDE_CODES})", name="side"),
+        CheckConstraint("close_price > 0", name="close_price"),
+        # The rule history and the rule cascade; the unique key already serves the ticker's.
+        Index(None, "rule_id", "candle_close_ts"),
+        # Signal ids appear in cursors and references: a reused id would repoint them.
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ticker_id: Mapped[int]
+    rule_id: Mapped[int]
+    timeframe: Mapped[Timeframe] = mapped_column(TimeframeType)
+    # The nominal close exactly as the evaluation gives it, never recomputed (D114); the
+    # index serves the unfiltered newest-first page.
+    candle_close_ts: Mapped[datetime] = mapped_column(UtcDateTime, index=True)
+    side: Mapped[Side] = mapped_column(SideType)
+    close_price: Mapped[float] = mapped_column(Float)
+    indicator_values_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    notified_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+
+
+class BotStateRow(Base):
+    """One fact of the bot state: a ``StateKey`` and the UTC instant it holds (D118).
+
+    A missing row means "never", so the table needs no seed data.
+    """
+
+    __tablename__ = "bot_state"
+    __table_args__ = (CheckConstraint(f"key IN ({_STATE_KEYS})", name="key"),)
+
+    key: Mapped[StateKey] = mapped_column(StateKeyType, primary_key=True)
+    value: Mapped[datetime] = mapped_column(UtcDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime)

@@ -1,4 +1,5 @@
-"""Secrets, paths and rule documents across a full CLI session (spec 013, T14, AC25, AC26).
+"""Secrets, paths and rule documents across a full CLI session (spec 013, T14, AC25, AC26;
+spec 014, T16, AC27).
 
 Every secret is a value built at runtime (CLAUDE.md rule 2), never a token-shaped literal. The
 session exercises every one of the fourteen subcommands, including several rejection paths, so
@@ -6,6 +7,10 @@ a message built for an error case is checked exactly as hard as one built for a 
 (a distinctive data directory name and a distinctive numeric field of the rule document) are
 asserted present in the *input* first, so their absence from every captured line has real teeth
 instead of trivially holding because nothing carried them in the first place.
+
+The tests below this point extend the session to spec 014's sixteen subcommands, with a recorded
+signal and a paused, beating bot state in the database: neither an indicator value, a corrupt
+stored payload, a secret, the data directory nor an absolute path may reach any captured line.
 """
 
 from __future__ import annotations
@@ -17,10 +22,13 @@ from pathlib import Path
 import pytest
 
 from tests.fixtures.database import temporary_database
-from tests.fixtures.repositories import CliResult, run_cli
+from tests.fixtures.repositories import CliResult, repositories, run_cli, sample_rule, sample_signal
 from trading_bot.cli import main as cli_main
+from trading_bot.domain.timeframe import Timeframe
 from trading_bot.logging_setup import RedactingFilter
 from trading_bot.persistence.engine import DATABASE_FILENAME
+from trading_bot.persistence.repositories.bot_state import SqlBotStateRepository
+from trading_bot.persistence.repositories.signals import SqlSignalRepository
 
 MARKER_COOLDOWN = 137  # only the rule document carries this; no report line ever shows it
 DATA_DIR_MARKER = "cli-secrets-check-3fae21"  # distinctive enough that a stray match is real
@@ -197,3 +205,101 @@ def test_the_session_creates_exactly_the_database_file_and_the_given_export_file
     created = {path.name for path in data_dir.iterdir()}
     assert created <= {DATABASE_FILENAME, f"{DATABASE_FILENAME}-wal", f"{DATABASE_FILENAME}-shm"}
     assert DATABASE_FILENAME in created
+
+
+# --- T16 (tester): sixteen subcommands, with signals and bot state present (spec 014, AC27) -
+
+# Only the indicator-values text carries this: it must never reach a captured line, because
+# spec 014 Design 10.3 deliberately keeps ``signals list`` to a bounded line with no values.
+INDICATOR_MARKER = "leak-marker-in-indicator-values-7f3ac1"
+# Stands in for whatever a manual ``sqlite3`` session could have written into a stored row;
+# decision D93/D119 says it must never reach a message or a traceback.
+CORRUPT_MARKER = "corrupt-payload-marker-9d2b6e"
+
+
+def seed_signal_and_state(
+    data_dir: Path, *, symbol: str = "AAPL", rule_name: str = RULE_NAME
+) -> int:
+    """One recorded signal, its indicator values carrying a marker, and a paused, beating state.
+
+    ``symbol`` and ``rule_name`` default to what the corrupt-payload test below uses in
+    isolation; the sixteen-subcommand test picks a ticker and a rule name of its own so the two
+    never collide with ``configuration_file``'s AAPL ticker and ``RULE_NAME`` rule. Returns the
+    signal's id, so a later raw-SQL corruption can target it precisely.
+    """
+    with temporary_database(data_dir) as database:
+        with database.session() as session:
+            handles = repositories(session)
+            ticker = handles.tickers.add(symbol, Timeframe.D1)
+            rule = handles.rules.add(sample_rule(rule_name))
+            handles.assignments.assign(ticker.id, rule.id)
+        with database.session() as session:
+            signal = sample_signal(ticker, rule, indicator_values={INDICATOR_MARKER: 1.5})
+            stored_id = SqlSignalRepository(session).record(signal).stored.id
+            state = SqlBotStateRepository(session)
+            state.pause()
+            state.record_heartbeat()
+    return stored_id
+
+
+def test_sixteen_subcommands_with_signals_and_bot_state_leak_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec 013's own fourteen subcommands (``run_full_session``, unmodified), plus ``signals
+    list`` and ``state show``, over a database that already holds a recorded signal and a
+    paused, beating bot state for a ticker and a rule the fourteen-subcommand flow never touches
+    (``GOOG`` / a rule name of its own), so the flow's own AAPL/MSFT lifecycle cannot remove them
+    partway through and silently make the added commands run over an empty history instead.
+    """
+    secrets = apply_secrets(monkeypatch)
+    data_dir = tmp_path / DATA_DIR_MARKER
+    seed_signal_and_state(data_dir, symbol="GOOG", rule_name="History rule for T16")
+    source = configuration_file(tmp_path)
+    before = {key for key in os.environ if key.startswith("TB_")}
+
+    results = [
+        *run_full_session(source, data_dir, tmp_path),
+        run_cli(["signals", "list"], data_dir=data_dir),
+        run_cli(["signals", "list", "--ticker", "GOOG"], data_dir=data_dir),
+        run_cli(["signals", "list", "--rule", "History rule for T16"], data_dir=data_dir),
+        run_cli(["signals", "list", "--ticker", "UNKNOWN"], data_dir=data_dir),  # rejected
+        run_cli(["signals", "list", "--rule", "no such rule"], data_dir=data_dir),  # rejected
+        run_cli(["state", "show"], data_dir=data_dir),
+    ]
+
+    after = {key for key in os.environ if key.startswith("TB_")}
+    assert after == before  # AC27, extended: still no new TB_* variable
+    codes = {result.code for result in results}
+    assert {0, 1, 2} <= codes  # a real mix, not a vacuous session (mirrors the fourteen-only one)
+    combined = "\n".join(result.out + result.err for result in results)
+    for value in secrets.values():
+        assert value not in combined
+    assert DATA_DIR_MARKER not in combined
+    assert INDICATOR_MARKER not in combined  # the values never print, filters included
+    # Control: the marker really is stored, so its absence above is a real assertion.
+    with temporary_database(data_dir) as database, database.session() as session:
+        stored = SqlSignalRepository(session).get(1)
+    assert stored is not None
+    assert INDICATOR_MARKER in stored.signal.indicator_values
+
+
+def test_a_corrupt_signal_makes_signals_list_fail_without_leaking_the_stored_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decision D93/D119: a stored payload that no longer loads fails loudly, never leaking."""
+    apply_secrets(monkeypatch)
+    data_dir = tmp_path / "volume"
+    signal_id = seed_signal_and_state(data_dir)
+    with temporary_database(data_dir) as database, database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "UPDATE signals SET indicator_values_json = ? WHERE id = ?",
+            (f'{{"leaked": "{CORRUPT_MARKER}"}}', signal_id),
+        )
+
+    result = run_cli(["signals", "list"], data_dir=data_dir)
+
+    assert result.code == 1
+    assert result.out == ""
+    assert result.err == f"error: the stored signal {signal_id} is not valid: indicator_values\n"
+    assert CORRUPT_MARKER not in result.err
+    assert "leaked" not in result.err

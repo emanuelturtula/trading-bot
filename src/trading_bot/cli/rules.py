@@ -1,4 +1,4 @@
-"""The rule subcommands (spec 013, §9.5; AC34, AC36, AC37).
+"""The rule subcommands (spec 013, §9.5; spec 014, §10.2; AC34, AC36, AC37, AC23).
 
 There is deliberately no ``rules add``: a rule is a JSON document with nested conditions, not
 something to type as command-line arguments, and ``parse_rule`` must stay the single entry
@@ -16,6 +16,7 @@ from trading_bot.cli.main import (
     Context,
     RejectedError,
     SubParsers,
+    dependents,
     dry_run_option,
     plural,
     quoted,
@@ -24,6 +25,7 @@ from trading_bot.cli.main import (
 from trading_bot.persistence.records import StoredRule
 from trading_bot.persistence.repositories.assignments import SqlAssignmentRepository
 from trading_bot.persistence.repositories.rules import SqlRuleRepository
+from trading_bot.persistence.repositories.signals import SqlSignalRepository
 
 __all__ = ["add_parser"]
 
@@ -38,7 +40,9 @@ def add_parser(groups: SubParsers) -> None:
     removing = commands.add_parser("remove", help="remove a rule by name")
     removing.add_argument("name", help="the unique rule name, usually quoted")
     removing.add_argument(
-        "--force", action="store_true", help="remove it together with its assignments"
+        "--force",
+        action="store_true",
+        help="remove it together with its assignments and its signals",
     )
     dry_run_option(removing)
     removing.set_defaults(handler=remove_rule)
@@ -81,15 +85,18 @@ def remove_rule(context: Context, args: argparse.Namespace) -> int:
     with unit_of_work(context) as session:
         rules = SqlRuleRepository(session, clock=context.clock)
         assignments = SqlAssignmentRepository(session, clock=context.clock)
+        signals = SqlSignalRepository(session, clock=context.clock)
         stored = _required(rules, args)
-        assigned = len(assignments.tickers_for_rule(stored.id))
-        if assigned and not args.force:
+        # Counted before the delete; removing them is the database's cascade (D113).
+        going = dependents(
+            len(assignments.tickers_for_rule(stored.id)), signals.count(rule_id=stored.id)
+        )
+        if going and not args.force:
             raise RejectedError(
-                f"rule {quoted(stored.name)} has {plural(assigned, 'assignment')};"
-                " pass --force to remove them with it"
+                f"rule {quoted(stored.name)} has {going}; pass --force to remove them with it"
             )
         rules.delete(stored.id)
-        detail = f" with {plural(assigned, 'assignment')}" if assigned else ""
+        detail = f" with {going}" if going else ""
         context.report(Action.REMOVE, subject(stored, show_id=False, with_details=False) + detail)
     return context.finish()
 

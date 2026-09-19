@@ -1,4 +1,4 @@
-"""The configuration command line: parser, dispatch and the shared helpers (spec 013, §9).
+"""The command line: parser, dispatch and the shared helpers (spec 013, §9; spec 014, §10).
 
 ``argparse`` from the standard library, so the image needs no extra dependency and no console
 script: ``python -m trading_bot.cli`` works inside the container. Commands write through an
@@ -6,9 +6,10 @@ injected ``TextIO``, never ``print``, which keeps every message assertable with 
 and ruff's ``T20`` enabled.
 
 The command line **never migrates** (decision D95): it opens an already-migrated database with
-``connect_database`` and refuses anything else with exit code ``3``. Every mutating subcommand
-opens exactly one ``Database.session()``; ``--dry-run`` does the whole unit of work and then
-raises a private sentinel so that session rolls back (decision D107).
+``connect_database`` and refuses anything else with exit code ``3``. Every subcommand opens
+exactly one ``Database.session()``; ``--dry-run`` does the whole unit of work and then raises a
+private sentinel so that session rolls back (decision D107). ``signals list`` and ``state show``
+are read-only and have no ``--dry-run`` (spec 014, §10.1).
 """
 
 from __future__ import annotations
@@ -127,14 +128,21 @@ def unit_of_work(context: Context) -> Iterator[Session]:
         return
 
 
-def timeframe_option(parser: argparse.ArgumentParser) -> None:
-    """``--timeframe``, defaulting to the project's default timeframe (spec 004)."""
+def timeframe_option(
+    parser: argparse.ArgumentParser, *, default: Timeframe | None = Timeframe.D1
+) -> None:
+    """``--timeframe``, defaulting to the project's default timeframe (spec 004, D109).
+
+    A **filter** passes ``default=None``, which means "every timeframe"; a command that
+    addresses one row keeps the ``1d`` default.
+    """
+    named = default.value if default is not None else "every timeframe"
     parser.add_argument(
         "--timeframe",
         type=Timeframe.parse,
         choices=list(Timeframe),
-        default=Timeframe.D1,
-        help="candle timeframe (default: 1d)",
+        default=default,
+        help=f"candle timeframe (default: {named})",
     )
 
 
@@ -161,15 +169,32 @@ def plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
+def dependents(assignments: int, signals: int) -> str:
+    """``2 assignments and 14 signals``, omitting a zero count, or ``""`` when both are zero.
+
+    Shared by ``tickers remove`` and ``rules remove``, which name what the database cascade
+    would delete with the row (spec 014, §10.2, D122).
+    """
+    counted = [
+        plural(count, noun)
+        for count, noun in ((assignments, "assignment"), (signals, "signal"))
+        if count
+    ]
+    return " and ".join(counted)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The whole grammar of spec 013 §9.1, built without touching the environment."""
     # Imported here so the command modules can import this one: the cycle is broken at the
     # only point where it would close, and by the time this runs the module is complete.
-    from trading_bot.cli import assignments, config, rules, tickers
+    from trading_bot.cli import assignments, config, rules, signals, state, tickers
 
     parser = argparse.ArgumentParser(
         prog="python -m trading_bot.cli",
-        description="Manage the tickers, rules and assignments of the trading bot.",
+        description=(
+            "Manage the tickers, rules and assignments of the trading bot,"
+            " and read the signals it recorded and its state."
+        ),
         epilog="The bot only notifies signals: it never places orders.",
     )
     parser.add_argument(
@@ -183,6 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
     rules.add_parser(groups)
     assignments.add_parser(groups)
     config.add_parser(groups)
+    signals.add_parser(groups)
+    state.add_parser(groups)
     return parser
 
 

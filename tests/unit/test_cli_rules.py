@@ -1,4 +1,4 @@
-"""The rule subcommands (spec 013, T18, AC21, AC34, AC36, AC37).
+"""The rule subcommands (spec 013, T18, AC21, AC34, AC36, AC37; spec 014, T11, AC23).
 
 A rule is addressed by its unique name, echoed ``repr()``-escaped, and the rule **document** is
 never printed: ``config export`` is the way to read it.
@@ -6,13 +6,20 @@ never printed: ``config export`` is the way to read it.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from sqlalchemy import text
 
 from tests.fixtures.database import temporary_database
-from tests.fixtures.repositories import database_snapshot, repositories, run_cli, sample_rule
+from tests.fixtures.repositories import (
+    database_snapshot,
+    repositories,
+    run_cli,
+    sample_rule,
+    sample_signal,
+)
 from tests.fixtures.rules import NAME_WITH_ACCENTS
 from trading_bot.domain.timeframe import Timeframe
 from trading_bot.persistence.database import Database
@@ -265,3 +272,89 @@ def test_a_dry_run_of_a_rejected_removal_exits_one(tmp_path: Path) -> None:
 
     assert result.code == 1
     assert database_snapshot(data_dir) == before
+
+
+# --- removal with a signal history (spec 014, T11, AC23) ----------------------------------
+
+SIGNAL_CLOSE = datetime(2024, 1, 3, 5, 0, tzinfo=UTC)
+
+
+def with_signals(tmp_path: Path) -> Path:
+    """The seeded database plus two signals of 'Daily breakout' and one of 'Unassigned rule'."""
+    data_dir = seeded(tmp_path)
+    with temporary_database(data_dir) as database, database.session() as session:
+        tools = repositories(session)
+        ticker = tools.tickers.get_by_symbol("AAPL", Timeframe.D1)
+        assigned = tools.rules.get_by_name("Daily breakout")
+        unassigned = tools.rules.get_by_name("Unassigned rule")
+        assert ticker is not None
+        assert assigned is not None
+        assert unassigned is not None
+        for index in range(2):
+            tools.signals.record(
+                sample_signal(
+                    ticker, assigned, candle_close_ts=SIGNAL_CLOSE + timedelta(days=index)
+                )
+            )
+        tools.signals.record(sample_signal(ticker, unassigned))
+    return data_dir
+
+
+def test_remove_refuses_a_rule_with_assignments_and_signals(tmp_path: Path) -> None:
+    data_dir = with_signals(tmp_path)
+
+    result = run_cli(["rules", "remove", "Daily breakout"], data_dir=data_dir)
+
+    assert result.code == 1
+    assert result.errors == [
+        "error: rule 'Daily breakout' has 1 assignment and 2 signals;"
+        " pass --force to remove them with it"
+    ]
+
+
+def test_remove_refuses_a_rule_that_only_has_signals(tmp_path: Path) -> None:
+    data_dir = with_signals(tmp_path)
+
+    result = run_cli(["rules", "remove", "Unassigned rule"], data_dir=data_dir)
+
+    assert result.code == 1
+    assert result.errors == [
+        "error: rule 'Unassigned rule' has 1 signal; pass --force to remove them with it"
+    ]
+
+
+def test_remove_with_force_reports_the_assignments_and_the_signals(tmp_path: Path) -> None:
+    data_dir = with_signals(tmp_path)
+
+    result = run_cli(["rules", "remove", "Daily breakout", "--force"], data_dir=data_dir)
+
+    assert result.code == 0
+    assert result.lines == ["removed rule 'Daily breakout' with 1 assignment and 2 signals"]
+    assert len(run_cli(["signals", "list"], data_dir=data_dir).lines) == 1
+
+
+def test_a_dry_run_of_a_removal_reports_the_signals_and_writes_nothing(tmp_path: Path) -> None:
+    data_dir = with_signals(tmp_path)
+    before = database_snapshot(data_dir)
+
+    result = run_cli(
+        ["rules", "remove", "Unassigned rule", "--force", "--dry-run"], data_dir=data_dir
+    )
+
+    assert result.code == 0
+    assert result.lines == [
+        "dry run: would remove rule 'Unassigned rule' with 1 signal",
+        "dry run: nothing was written",
+    ]
+    assert database_snapshot(data_dir) == before
+
+
+def test_a_rule_with_neither_assignments_nor_signals_is_removed_without_force(
+    tmp_path: Path,
+) -> None:
+    data_dir = with_signals(tmp_path)
+
+    result = run_cli(["rules", "remove", "Enabled rule"], data_dir=data_dir)
+
+    assert result.code == 0
+    assert result.lines == ["removed rule 'Enabled rule'"]

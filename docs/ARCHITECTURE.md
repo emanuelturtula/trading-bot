@@ -44,9 +44,9 @@ The user decides whether to trade. **There is no order execution layer** and one
 |-------|----------------|-------|
 | `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the market calendar (`MarketCalendar`: NYSE sessions, candle grid and real closes), candle normalization and open-candle removal (`normalize_candles`, `drop_open_candle`), `4h` candles resampled from hourly candles (`resample_hourly_to_4h`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
 | `data/` | `MarketDataProvider` (async Protocol), `TickerInfo` and the D27 policy, typed errors, and `prepare_candles`, which every provider uses to normalize, drop bad rows and the open candle, and require the last closed candle; `YFinanceProvider` in `data/yahoo/`, with `4h` candles built from `1h` bars; `ProviderTransport` (retries with backoff and jitter, timeouts, pacing) | Never decides signals. Respects Yahoo's limits: `1h` requests start at most 720 days back; `1d` is unlimited. |
-| `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → dedupe/cooldown → persistence → notification | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`. |
+| `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → cooldown/dedupe → persistence → notification, over one configuration snapshot per run, and returns a `RunReport` | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`; the cooldown counts candle positions, never a duration; a failing ticker never stops the rest; no clock is read. |
 | `scheduler/` | APScheduler (AsyncIOScheduler). One job per timeframe, fired at candle close + margin, only during market hours | A single instance per process. |
-| `notifications/` | `Notifier` (Protocol) + `TelegramNotifier` | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk. |
+| `notifications/` | `Notifier` (Protocol), `SignalNotification` and `NotificationError`, shipped with the engine (#14); `TelegramNotifier` implements them (#17, #18) | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk; `notification.candles` is read-only. |
 | `telegram_bot/` | Commands `/add /remove /list /rules /status /pause /resume /help` with python-telegram-bot (long polling) | Only chats in `TB_TELEGRAM_ALLOWED_CHAT_IDS`. |
 | `api/`, `dashboard/` | REST `/api/v1/tickers`, `/rules`, `/signals`; Jinja2 + HTMX dashboard (tickers, rule builder, history, charts) | Mandatory auth (password hash + signed session cookie). `/health` is the only public endpoint. |
 | `persistence/` | Synchronous SQLAlchemy 2 + Alembic on SQLite at `TB_DATA_DIR/trading_bot.db`: the engine and its pragmas, the `Database` handle and its sessions, the declarative metadata, the `UtcDateTime` column type, the packaged migrations, the configuration tables, the signal history and the bot state, behind the five repository `Protocol`s; `cli/` manages the configuration and reads the history from a command of its own | Migrations run at startup, before anything else; WAL, `foreign_keys=ON`, a busy timeout and `synchronous=FULL` on every connection; sessions begin `BEGIN IMMEDIATE`; the signal key is a unique constraint; backups before each deploy. |
@@ -464,7 +464,7 @@ Parameters are integers except `bbands` `std`. `ema_settle(p) = (7 * (p + 1) + 1
 
 - `warmup = lookback + 1` is the minimum frame length for a value at the last candle; rules can fire from it (crossovers need one more candle).
 - `stable_warmup = warmup + settle` is the frame length after which a recursive indicator no longer depends on where the history starts, within about 0.1% (the seed weighs about `e^-7`). The window indicators (`sma`, `bbands`, `stoch`, `volume_sma`) have `settle = 0`.
-- Values computed on a fetch window that starts later differ slightly from long-history values until `stable_warmup`. That is not look-ahead, but it affects reproducibility between runs and against backtests. The data layer and the engine (#8, #14) fetch at least the rules' `stable_warmup` candles, or everything available, and log when a provider limit caps the history: #14 passes `max(rule.stable_warmup())` over the ticker's rules as the provider `lookback` (at most 2 255 today, below `MAX_LOOKBACK`). Requiring `stable_warmup` to fire would silence young tickers (`ema` `length=200` would need 904 daily candles).
+- Values computed on a fetch window that starts later differ slightly from long-history values until `stable_warmup`. That is not look-ahead, but it affects reproducibility between runs and against backtests. The data layer and the engine (#8, #14) fetch at least the rules' `stable_warmup` candles, or everything available, and log when a provider limit caps the history: the engine's [lookback planning](#the-configuration-snapshot) takes the maximum of `rule.stable_warmup()` and `rule.cooldown_bars + 1` over the ticker's rules (at most 2 255 today, below `MAX_LOOKBACK`). Requiring `stable_warmup` to fire would silence young tickers (`ema` `length=200` would need 904 daily candles).
 - History limits: the [Yahoo provider](#yahoo-provider) starts `1h` and `4h` requests at most 720 days back, which leaves about 3 435 `1h` bars and 980 `4h` bars (`1d` is unlimited). `stable_warmup` exceeds 980 from `ema` `length=218`, `adx` `length=82`, and `macd` `slow=200` with `signal >= 17`; `rsi` and `atr` never exceed it within their parameter ranges. Such rules still fire from `warmup`, but runs may differ by up to about 0.1% as the window moves, and the provider logs the capped history.
 - **`obv`:** the level is a cumulative sum from the first candle of the frame, so moving the start shifts `value` by a constant, and `signal` (its simple moving average) by the same constant. Comparing `value` with `signal`, including crossovers, does not depend on the history start; comparing `value` or `signal` with a fixed value, a price or another indicator never becomes reproducible.
 
@@ -544,7 +544,7 @@ operator    := "<" | "<=" | ">" | ">=" | "crosses_above" | "crosses_below"
 - **Optional keys are absent, not null.** `params`, `output` and `cooldown_bars` are omitted when unset; an explicit `null` is rejected.
 - **Nothing is coerced and unknown keys are rejected everywhere:** `"14"`, `14.0` and `true` are not integers, `"30"` is not a number, and `"1D"`, `" 1d "` or `"buy"` are not valid codes.
 - **Semantics.** A condition whose two sides are constants, or whose two operands are equal once normalized, is rejected: it cannot depend on the market. Duplicated, contradictory or unit-mismatched conditions stay valid; the domain does not judge a strategy.
-- `cooldown_bars` is the minimum number of closed candles between two notified signals of the same rule and ticker; `0` means no cooldown (idempotency by `(ticker, timeframe, rule_id, candle_close_ts)` still prevents resending the same candle). It is implemented in #14.
+- `cooldown_bars` is the minimum number of closed candles between two notified signals of the same rule and ticker; `0` means no cooldown (idempotency by `(ticker, timeframe, rule_id, candle_close_ts)` still prevents resending the same candle). The [signal engine](#cooldown) counts those candles by position in the evaluated frame.
 - `timeframe` is the candle timeframe the rule is evaluated on, a `Timeframe` code with the exact [#4 semantics](#timeframes). It must equal the timeframe of every ticker the rule is assigned to: the repository rejects such an assignment and the [schema](#configuration-tables-and-repositories) refuses the row (spec 013, D86).
 - A rule is assigned to one or more tickers through the `ticker_rules` table. A rule document carries no identifier and no ticker list: `rule_id` and `enabled` belong to the database.
 
@@ -669,12 +669,137 @@ Keys are `indicator(param=value, ...).output` (decision D14): parameters in decl
 
 ### What the engine adds
 
-The evaluator answers "do the conditions hold at this candle?" and nothing else. The engine (#14):
+The evaluator answers "do the conditions hold at this candle?" and nothing else. Turning a triggered evaluation into a `Signal`, spacing signals with `cooldown_bars`, deduplicating by `Signal.idempotency_key` and sending anything belong to the [signal engine](#signal-engine), which is where those rules are described.
 
-- evaluates only rules whose `timeframe` equals the ticker's, on frames whose open candle was dropped (#8) and that hold at least `rule.stable_warmup()` candles when available, never on an empty frame;
-- builds `Signal(ticker=..., timeframe=rule.timeframe, rule_id=..., side=rule.signal, candle_close_ts=evaluation.candle_close_ts, close_price=evaluation.close_price, indicator_values=evaluation.indicator_values)` when `triggered` is true;
-- deduplicates by `Signal.idempotency_key` (`CLAUDE.md` rule 5) before notifying: the arbiter is `SignalRepository.record` (spec [014](specs/014-signal-idempotency.md)), whose unique constraint makes a duplicate impossible, and only the call that got `is_new=True` on a **committed** unit of work notifies;
-- applies `cooldown_bars` by row position over the evaluated frame, against the last notified signal of the same ticker and rule, never with `(t2 - t1) / duration`.
+## Signal engine
+
+`engine/` is the orchestration M1–M3 was built for: for a timeframe and a scheduled candle close it fetches the closed candles of every enabled ticker, evaluates its enabled rules, suppresses what the cooldown and the signal history say must not be sent again, records what fires and notifies it exactly once. Design and decisions: spec [015](specs/015-signal-engine.md).
+
+```python
+from datetime import datetime
+
+from trading_bot.domain.timeframe import Timeframe
+from trading_bot.engine.signal_engine import SignalEngine
+from trading_bot.engine.sql_unit_of_work import sql_unit_of_work
+
+
+async def run_once(now: datetime) -> None:  # now: the scheduled candle close (#15)
+    engine = SignalEngine(  # built once at startup and reused for every run (#16)
+        provider=provider,
+        unit_of_work=sql_unit_of_work(database),
+        notifier=notifier,
+    )
+    report = await engine.run(Timeframe.D1, now)
+    assert report.summary.startswith(f"1d run at {report.now.isoformat()}: ")
+
+    # The scheduler retries the unpublished candles with the **same** now, never a fresh one.
+    retried = await engine.run(Timeframe.D1, now, tickers=report.retryable_tickers)
+    assert retried.notified >= 0
+```
+
+### The run
+
+```text
+#15 ──▶ await engine.run(timeframe, now, tickers=None)
+
+  to_thread: one unit of work        the pause, the enabled tickers and their enabled rules
+      paused? ──▶ RunReport(paused=True, tickers=()), nothing else happens
+
+  for each planned ticker, one at a time:
+      await provider.fetch_candles(symbol, timeframe, lookback, now=now)
+          MarketDataError ──▶ classify, log, TickerOutcome(FAILED), next ticker
+      to_thread: evaluate(rule, frame) for each rule of the ticker
+
+      for each triggered evaluation:
+          to_thread: one unit of work: latest ──▶ cooldown decision ──▶ record ──▶ commit
+          is_new?  await notifier.notify(...)   with no session open
+                   to_thread: one unit of work: mark_notified(id)
+
+  return RunReport(...)  ──▶ #15: record_run, retry report.retryable_tickers with the same now
+```
+
+- **`run(timeframe, now, *, tickers=None)`** is the only entry point. `now` is the **scheduled candle close**, not the firing time: it reaches the provider unchanged, so "the last candle closed at `now`" is the candle the run is about. `tickers` restricts the run to a subset of the enabled symbols, which is how #15 retries an unpublished candle with the **same** `now`. Arguments are checked before any I/O, and a `str` passed as `tickers` is a `TypeError`, not thirty one-letter symbols.
+- **The engine reads no clock.** Every stored instant comes from the repositories' injected clock, and `report.now` is the argument. A guard test proves that no module of `engine/` or `notifications/` calls one.
+- **A run evaluates the last closed candle only.** Candles that closed while the bot was down, paused or failing are never evaluated later: a bot that comes back after a two-day outage would otherwise send advice that is no longer actionable (decision D128).
+- **Tickers, their rules and their signals are processed one at a time.** The provider transport already allows one call in flight and paces attempts, SQLite has one writer and the target is a Raspberry Pi, so a run is deterministic and its cost is dominated by the fetches.
+- **The global pause stops everything:** no request, no evaluation, no recording and no notification, one `INFO` record and `RunReport(paused=True, tickers=())`. Nothing stale is sent after `/resume`.
+- One `SignalEngine` is built at startup and reused; it holds no state between runs. Two overlapping runs of one timeframe are prevented by the scheduler (`max_instances=1`), not by the engine.
+
+### The configuration snapshot
+
+The pause, the enabled tickers of the timeframe and their enabled rules are read in **exactly one** unit of work at the start of the run, into frozen `TickerPlan` records, and the rest of the run never reads configuration again: a change made while a run is in flight takes effect at the **next** run, so a rule enabled halfway cannot be evaluated for some tickers and not others. A disabled ticker, a disabled rule, a ticker of another timeframe and a ticker with no enabled rule produce no fetch and no outcome.
+
+`plan_lookback(rules)` is `min(MAX_LOOKBACK, max(max(rule.stable_warmup(), rule.cooldown_bars + 1) for rule in rules))`, so one fetch serves every rule of the ticker with the history the [warmup](#warmup-and-reproducibility) requires. The `cooldown_bars + 1` term is the engine's: the cooldown counts positions in the evaluated frame, so a shorter frame could not tell "the previous signal is inside the cooldown" from "it is older than the frame".
+
+### Cooldown
+
+`cooldown_bars` is "the minimum number of closed candles between two notified signals of the same rule and ticker", so those candles must lie **strictly between** them. They are counted as **rows of the evaluated frame**, never as `(t2 - t1) / duration`, which is wrong across nights, weekends and holidays. With `previous_label = previous.candle_close_ts - timeframe.duration` (an exact subtraction) and `bars = |{label in the frame : previous_label < label <= evaluated label}|`:
+
+| Case | Decision | What the run does |
+|------|----------|-------------------|
+| the pair never fired | `ALLOWED` | record and, if new, notify |
+| `previous_label` **after** the evaluated label | `SUPERSEDED` | nothing is written or sent: a later signal of the pair exists |
+| `previous_label` **equal** to it | `ALLOWED` | `record` decides: `is_new=False`, and nothing is sent |
+| `bars > cooldown_bars` | `ALLOWED` | record and, if new, notify |
+| `bars <= cooldown_bars` | `BLOCKED` | nothing is written or sent |
+
+- `cooldown_bars = 0` never blocks; idempotency alone still prevents resending the same candle.
+- The count starts from the last **recorded** signal, delivered or not: counting only delivered ones would turn a single delivery failure into a burst on every following candle.
+- The equal-label case is deliberately left to `record`, so `CLAUDE.md` rule 5 keeps exactly one arbiter.
+- A frame shorter than `cooldown_bars + 1` errs towards `BLOCKED`: fewer notifications, never extra ones.
+- On the NYSE `1d` grid, a signal on the candle labelled 2024-07-01 blocks 2024-07-02 with `cooldown_bars=1` and allows 2024-07-03; 2024-07-05 is **three** candles later although it is four calendar days later, because 2024-07-04 is a holiday. `cooldown_decisions` carries the mandatory [look-ahead test](#look-ahead-testing).
+
+### The write and send order
+
+Per triggered evaluation, and in this order only (spec [014](specs/014-signal-idempotency.md)):
+
+1. one unit of work reads `latest` for the cooldown and calls `record`, and **commits**: the durable insert is the claim, and its unique constraint is the single arbiter of `CLAUDE.md` rule 5;
+2. only an outcome with `is_new=True` on that committed unit of work is notified, with **no** session open and outside any worker thread holding one;
+3. `mark_notified` runs in a unit of work of its own, after the notifier returns.
+
+It is the only order in which a crash cannot resend. Every unit of work runs in a worker thread of its own (`asyncio.to_thread`) through one helper that takes a plain function of the repositories, so "one session per unit of work, never two at once in a thread, never one across an `await`" holds by construction. Delivery is **at-most-once**: a signal the notifier refused stays recorded with `notified_at` `NULL`, the run continues, and **no later run re-sends it**. What a `Notifier` implementation retries is the delivery attempt behind its single `notify` call, never the decision to send.
+
+### Errors
+
+Three rings. A **ticker** failure is logged and reported, and the run continues with the next ticker; a **signal** failure is logged and reported, and the run continues with the next signal; everything else propagates out of `run` after one `ERROR` record, and no report is returned.
+
+| Raised by | Error | Ring | Outcome | Level | Retryable |
+|-----------|-------|------|---------|-------|-----------|
+| `fetch_candles` | `InvalidTickerError` | ticker | `INVALID_TICKER` | `WARNING` | no |
+| `fetch_candles` | `NoDataError` | ticker | `NO_DATA` | `WARNING` | no |
+| `fetch_candles` | `ProviderDataError` | ticker | `PROVIDER_DATA` | `ERROR` | no |
+| `fetch_candles` | `CandleNotPublishedError` | ticker | `NOT_PUBLISHED` | `INFO` | **yes** (#15 retries with the same `now`) |
+| `fetch_candles` | `ProviderUnavailableError` | ticker | `UNAVAILABLE` | `WARNING` | **yes** |
+| fetch or evaluation | any other `Exception` | ticker | `UNEXPECTED` | `ERROR` | no |
+| `record` | `UntrackedTickerError`, `UnknownRuleError`, `TimeframeMismatchError` | signal | `REJECTED` | `WARNING` | — |
+| `notify` | `NotificationError` or any other `Exception` | signal | `UNDELIVERED` | `ERROR` | — |
+| `mark_notified` | `UnknownSignalError` | signal | stays `NOTIFIED` | `WARNING` | — |
+| anywhere | `StoredRuleError`, `StoredSignalError`, `CalendarRangeError` | run | propagates | `ERROR` | — |
+| anywhere | any other `PersistenceError`, `SQLAlchemyError`, `BaseException` | run | propagates | — | — |
+
+- `retryable` is the class-level flag of the [market data error](#errors), never re-derived, and the engine defines no exception class of its own: it classifies, it does not wrap.
+- A corrupt stored rule or signal is not a ticker problem: it makes the bot's reasoning unsound, so it stops the whole run until an operator fixes it. That is the documented price of never skipping a stored row silently.
+- `BaseException`, `asyncio.CancelledError` included, is never caught, so a shutdown cancels a run instead of being swallowed.
+- **No record of `engine/` or `notifications/` passes `exc_info` or `stack_info`,** and a guard test enforces it: `RedactingFilter` rewrites `record.msg` only, so a traceback rendered by the formatter is **not** redacted and could carry a bot token out of a notifier exception. A failure is logged with the exception **class** name, plus the error's own message only for `MarketDataError`, whose messages are restricted to codes, symbols, timeframe codes and ISO instants. Fixing the filter itself is issue #50; nothing in the engine depends on that fix.
+
+### The report
+
+`run` returns a `RunReport`, a frozen tree of values, and logs its one-line `summary` at `INFO`:
+
+```text
+1d run at 2024-07-05T20:00:00+00:00: 12 tickers, 47 rules, 3 signals (2 notified, 1 duplicate), 1 failed (1 retryable)
+```
+
+- One `TickerOutcome` per planned ticker, in plan order, with its `TickerStatus`, its `FailureKind` when it failed, how many rules were evaluated and one `SignalOutcome` per triggered evaluation.
+- A `SignalOutcome` carries the `SignalKey`, the rule's row id, the stored row id when there is one and a `SignalDisposition`: `notified`, `undelivered`, `duplicate`, `cooldown`, `superseded` or `rejected`.
+- `retryable_tickers` holds exactly the symbols whose failure was retryable, which is what #15 re-runs with the same `now`; `signals` flattens every signal outcome in plan order, and `notified` and `failures` are the other derived views.
+- **Nothing new is persisted.** The consumers are #15 and the logs; alerting (F7, #26 and #27) reads the report and decides then whether it needs history.
+
+### The notifier port
+
+`Notifier` (`notifications/notifier.py`) is an async `Protocol` with one method, `notify(notification: SignalNotification) -> None`, injected in `main.py` like every other port. `SignalNotification` carries the committed `StoredSignal` (key, side, close price, indicator values, the rule's current name and the row id), the parsed `Rule` for the chart's indicators, and the **closed candles the decision was made on**, so a message and its chart need no second provider request and no second database read.
+
+The frame is shared, not copied: copying it per signal would duplicate up to 2 255 rows for every rule that fires, so an implementation must treat `notification.candles` as read-only and copy before drawing. It must also keep tokens, chat ids and provider text out of the exceptions it raises, because the engine logs the exception class only, and raise `NotificationError` when it finally gives up.
 
 ## Look-ahead testing
 

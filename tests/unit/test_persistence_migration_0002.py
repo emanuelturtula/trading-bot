@@ -26,8 +26,10 @@ from trading_bot.persistence.migrator import (
 from trading_bot.persistence.models import Base
 
 BASELINE = "0001"
-HEAD = "0002"
+REVISION = "0002"
+HEAD = "0003"  # spec 014 added ``signals`` and ``bot_state`` on top of this revision
 TABLES = ("rules", "ticker_rules", "tickers")
+HEAD_TABLES = ("bot_state", "rules", "signals", "ticker_rules", "tickers")
 
 # The pragmas every connection must still report once SQLAlchemy owns the transaction (D88).
 EXPECTED_PRAGMAS = {
@@ -267,11 +269,14 @@ def test_a_savepoint_rolls_back_independently_of_its_outer_transaction(tmp_path:
 
 def test_upgrade_reaches_0002_and_creates_the_three_tables(tmp_path: Path) -> None:
     engine = fresh_engine(tmp_path)
+    config = alembic_config()
     try:
-        assert run_migrations(engine) == HEAD
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, REVISION)
 
-        assert current_revision(engine) == HEAD
-        assert stored_revisions(engine) == [HEAD]
+        assert current_revision(engine) == REVISION
+        assert stored_revisions(engine) == [REVISION]
         assert table_names(engine) == ["alembic_version", *TABLES]
         assert has_sequence_table(engine) is True
     finally:
@@ -295,7 +300,7 @@ def test_downgrade_to_base_drops_the_three_tables_and_empties_the_version_table(
         assert current_revision(engine) is None
 
         assert run_migrations(engine) == HEAD
-        assert table_names(engine) == ["alembic_version", *TABLES]
+        assert table_names(engine) == ["alembic_version", *HEAD_TABLES]
     finally:
         engine.dispose()
 
@@ -304,7 +309,9 @@ def test_a_downgrade_of_one_step_returns_to_the_baseline(tmp_path: Path) -> None
     engine = fresh_engine(tmp_path)
     config = alembic_config()
     try:
-        run_migrations(engine)
+        with engine.begin() as connection:
+            config.attributes["connection"] = connection
+            command.upgrade(config, REVISION)
 
         with engine.begin() as connection:
             config.attributes["connection"] = connection
@@ -316,14 +323,15 @@ def test_a_downgrade_of_one_step_returns_to_the_baseline(tmp_path: Path) -> None
         engine.dispose()
 
 
-def test_the_head_is_0002_and_it_follows_the_baseline() -> None:
+def test_0002_follows_the_baseline_and_0003_follows_it() -> None:
     from alembic.script import ScriptDirectory
 
     script = ScriptDirectory.from_config(alembic_config())
 
     assert script.get_heads() == [HEAD]
     assert head_revision() == HEAD
-    assert script.get_revision(HEAD).down_revision == BASELINE
+    assert script.get_revision(REVISION).down_revision == BASELINE
+    assert script.get_revision(HEAD).down_revision == REVISION
 
 
 def test_the_migrated_schema_holds_exactly_the_declared_tables(tmp_path: Path) -> None:
@@ -332,7 +340,7 @@ def test_the_migrated_schema_holds_exactly_the_declared_tables(tmp_path: Path) -
     try:
         run_migrations(engine)
 
-        assert sorted(Base.metadata.tables) == sorted(TABLES)
-        assert table_names(engine) == ["alembic_version", *TABLES]
+        assert sorted(Base.metadata.tables) == sorted(HEAD_TABLES)
+        assert table_names(engine) == ["alembic_version", *HEAD_TABLES]
     finally:
         engine.dispose()

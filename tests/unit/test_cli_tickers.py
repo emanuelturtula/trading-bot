@@ -1,11 +1,12 @@
-"""The ticker subcommands (spec 013, T17, AC21, AC33, AC36, AC37).
+"""The ticker subcommands (spec 013, T17, AC21, AC33, AC36, AC37; spec 014, T11, AC23).
 
 Every expected line is a literal, never recomputed with the code under test, and every dry run
-is checked against a full dump of the three tables plus ``sqlite_sequence``.
+is checked against a full dump of the five tables plus ``sqlite_sequence``.
 """
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -16,9 +17,12 @@ from tests.fixtures.repositories import (
     repositories,
     run_cli,
     sample_rule,
+    sample_signal,
 )
 from trading_bot.domain.timeframe import Timeframe
 from trading_bot.persistence.database import Database
+
+SIGNAL_CLOSE = datetime(2024, 1, 3, 5, 0, tzinfo=UTC)
 
 DRY_RUNS = [
     ["tickers", "add", "MSFT"],
@@ -298,3 +302,106 @@ def test_a_dry_run_does_not_burn_an_identifier(tmp_path: Path) -> None:
 
     assert stored is not None
     assert stored.id == 3
+
+
+# --- removal with a signal history (spec 014, T11, AC23) ----------------------------------
+
+
+def with_signals(tmp_path: Path, count: int = 2) -> Path:
+    """The seeded database plus ``count`` signals on AAPL 1d, and one on NVDA 1d."""
+    data_dir = seeded(tmp_path)
+    with temporary_database(data_dir) as database, database.session() as session:
+        tools = repositories(session)
+        aapl = tools.tickers.get_by_symbol("AAPL", Timeframe.D1)
+        nvda = tools.tickers.get_by_symbol("NVDA", Timeframe.D1)
+        rule = tools.rules.get_by_name("Daily breakout")
+        assert aapl is not None
+        assert nvda is not None
+        assert rule is not None
+        for index in range(count):
+            tools.signals.record(
+                sample_signal(aapl, rule, candle_close_ts=SIGNAL_CLOSE + timedelta(days=index))
+            )
+        tools.signals.record(sample_signal(nvda, rule))
+    return data_dir
+
+
+def test_remove_refuses_a_ticker_with_assignments_and_signals(tmp_path: Path) -> None:
+    data_dir = with_signals(tmp_path)
+
+    result = run_cli(["tickers", "remove", "AAPL"], data_dir=data_dir)
+
+    assert result.code == 1
+    assert result.errors == [
+        "error: ticker AAPL 1d has 1 assignment and 2 signals; pass --force to remove them with it"
+    ]
+
+
+def test_remove_refuses_a_ticker_that_only_has_signals(tmp_path: Path) -> None:
+    """Without counting signals, a year of history would vanish without ``--force``."""
+    data_dir = with_signals(tmp_path)
+
+    result = run_cli(["tickers", "remove", "NVDA"], data_dir=data_dir)
+
+    assert result.code == 1
+    assert result.errors == [
+        "error: ticker NVDA 1d has 1 signal; pass --force to remove them with it"
+    ]
+
+
+def test_remove_with_force_reports_the_assignments_and_the_signals(tmp_path: Path) -> None:
+    data_dir = with_signals(tmp_path)
+
+    result = run_cli(["tickers", "remove", "AAPL", "--force"], data_dir=data_dir)
+
+    assert result.code == 0
+    assert result.lines == ["removed ticker AAPL 1d with 1 assignment and 2 signals"]
+    assert run_cli(["signals", "list"], data_dir=data_dir).lines == [
+        "NVDA|1d|1|2024-01-03T05:00:00+00:00 BUY 'Daily breakout' close 187.5"
+        " (id 3, recorded 2026-01-02T03:04:07+00:00, not notified)"
+    ]
+
+
+def test_remove_with_force_reports_a_history_without_assignments(tmp_path: Path) -> None:
+    data_dir = with_signals(tmp_path)
+
+    result = run_cli(["tickers", "remove", "NVDA", "--force"], data_dir=data_dir)
+
+    assert result.code == 0
+    assert result.lines == ["removed ticker NVDA 1d with 1 signal"]
+
+
+def test_a_dry_run_of_a_removal_reports_the_signals_and_writes_nothing(tmp_path: Path) -> None:
+    data_dir = with_signals(tmp_path)
+    before = database_snapshot(data_dir)
+
+    result = run_cli(["tickers", "remove", "AAPL", "--force", "--dry-run"], data_dir=data_dir)
+
+    assert result.code == 0
+    assert result.lines == [
+        "dry run: would remove ticker AAPL 1d with 1 assignment and 2 signals",
+        "dry run: nothing was written",
+    ]
+    assert database_snapshot(data_dir) == before
+
+
+def test_a_refused_removal_leaves_the_signals_untouched(tmp_path: Path) -> None:
+    data_dir = with_signals(tmp_path)
+    before = database_snapshot(data_dir)
+
+    result = run_cli(["tickers", "remove", "AAPL"], data_dir=data_dir)
+
+    assert result.code == 1
+    assert database_snapshot(data_dir) == before
+
+
+def test_a_ticker_with_neither_assignments_nor_signals_is_removed_without_force(
+    tmp_path: Path,
+) -> None:
+    data_dir = with_signals(tmp_path)
+    run_cli(["tickers", "add", "MSFT"], data_dir=data_dir)
+
+    result = run_cli(["tickers", "remove", "MSFT"], data_dir=data_dir)
+
+    assert result.code == 0
+    assert result.lines == ["removed ticker MSFT 1d"]

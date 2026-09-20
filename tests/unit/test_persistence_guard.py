@@ -1,4 +1,4 @@
-"""Isolation guard for ``src/trading_bot/persistence`` (spec 012 T14 AC24; spec 013 T16 AC28).
+"""Isolation guard for ``src/trading_bot/persistence`` (spec 012 T14; 013 T16; 014 T13 AC28).
 
 An AST scan enforces the import allowlist: the standard library, ``sqlalchemy``, ``alembic``,
 ``trading_bot.domain.utc`` and the package itself, plus the **per-file** allowances of spec 013
@@ -10,9 +10,10 @@ dependency in and the package stays reusable by the Telegram and API layers.
 The per-file allowances are what keep that true while one module parses rules: measured,
 ``trading_bot.domain.signals`` and ``trading_bot.domain.timeframe`` pull nothing heavy, while
 ``trading_bot.domain.rules.schema`` pulls pydantic, pandas, numpy and TA-Lib through the
-indicator catalog (decision D99). Subprocess checks confirm both directions in a fresh
-interpreter, and the scanner is exercised against synthetic snippets first, so a green result
-is not vacuous.
+indicator catalog (decisions D99, D120). The signal records, the bot state and their two
+repositories name only the light modules, so the engine records a signal without the analysis
+stack. Subprocess checks confirm both directions in a fresh interpreter, and the scanner is
+exercised against synthetic snippets first, so a green result is not vacuous.
 
 ``domain/`` never imports ``persistence``: the purity guard of ``test_domain_purity.py``
 covers the domain allowlist, and one test here pins the direction of the dependency.
@@ -46,12 +47,16 @@ _EXTRA_PREFIXES_BY_FILE = {
     "migrations/env.py": ("trading_bot.config",),
     "models.py": _DOMAIN_VALUES,
     "types.py": _DOMAIN_VALUES,
+    "state.py": _DOMAIN_VALUES,
+    "signal_records.py": _DOMAIN_VALUES,
     "errors.py": _DOMAIN_RULE_ERRORS,
     "records.py": _DOMAIN_RULE_SCHEMA,
     "repositories/protocols.py": _DOMAIN_RULE_SCHEMA,
     "repositories/tickers.py": _DOMAIN_RULE_SCHEMA,
     "repositories/rules.py": _DOMAIN_RULE_SCHEMA,
     "repositories/assignments.py": _DOMAIN_RULE_SCHEMA,
+    "repositories/signals.py": _DOMAIN_VALUES,
+    "repositories/bot_state.py": _DOMAIN_VALUES,
 }
 _FORBIDDEN_EVERYWHERE = (
     "pandas",
@@ -151,14 +156,19 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "migrator.py",
         "models.py",
         "records.py",
+        "signal_records.py",
+        "state.py",
         "types.py",
         "migrations/env.py",
         "migrations/versions/0001_baseline.py",
         "migrations/versions/0002_configuration_tables.py",
+        "migrations/versions/0003_signals_and_bot_state.py",
         "repositories/__init__.py",
         "repositories/assignments.py",
+        "repositories/bot_state.py",
         "repositories/protocols.py",
         "repositories/rules.py",
+        "repositories/signals.py",
         "repositories/tickers.py",
     }
 
@@ -230,6 +240,7 @@ def test_a_revision_is_self_contained_and_imports_no_application_type() -> None:
     assert [path.name for path in revisions] == [
         "0001_baseline.py",
         "0002_configuration_tables.py",
+        "0003_signals_and_bot_state.py",
     ]
     for path in revisions:
         imported = {
@@ -345,6 +356,11 @@ def _fresh_interpreter_sys_modules(module: str) -> dict[str, bool]:
         "trading_bot.persistence.models",
         "trading_bot.persistence.types",
         "trading_bot.persistence.database",
+        # Spec 014 AC28: the engine records a signal without the analysis stack (D120).
+        "trading_bot.persistence.signal_records",
+        "trading_bot.persistence.state",
+        "trading_bot.persistence.repositories.signals",
+        "trading_bot.persistence.repositories.bot_state",
     ],
 )
 def test_the_lightweight_persistence_modules_load_no_heavy_library(module: str) -> None:

@@ -27,8 +27,8 @@ from trading_bot.persistence.migrator import (
 MIGRATOR_LOGGER = "trading_bot.persistence.migrator"
 REVISION_ID = re.compile(r"^[0-9]{4}$")
 BASELINE = "0001"
-HEAD = "0002"
-CONFIGURATION_TABLES = ["rules", "ticker_rules", "tickers"]
+HEAD = "0003"
+HEAD_TABLES = ["bot_state", "rules", "signals", "ticker_rules", "tickers"]
 
 
 def table_names(engine: Engine) -> list[str]:
@@ -72,7 +72,7 @@ def test_every_revision_identifier_is_four_digits_and_the_chain_is_linear() -> N
     script = ScriptDirectory.from_config(alembic_config())
     revisions = list(script.walk_revisions())
 
-    assert [revision.revision for revision in revisions] == [HEAD, BASELINE]
+    assert [revision.revision for revision in revisions] == [HEAD, "0002", BASELINE]
     for revision in revisions:
         assert REVISION_ID.match(revision.revision), revision.revision
         assert revision.down_revision is None or REVISION_ID.match(str(revision.down_revision))
@@ -139,8 +139,8 @@ def test_the_first_upgrade_reaches_the_head_revision(
         assert revision == HEAD
         assert current_revision(engine) == HEAD
         assert stored_revisions(engine) == [HEAD]
-        assert table_names(engine) == ["alembic_version", *CONFIGURATION_TABLES]
-        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0002"]
+        assert table_names(engine) == ["alembic_version", *HEAD_TABLES]
+        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0003"]
     finally:
         engine.dispose()
 
@@ -156,8 +156,8 @@ def test_a_second_upgrade_is_a_no_op(tmp_path: Path, caplog: pytest.LogCaptureFi
 
         assert revision == HEAD
         assert stored_revisions(engine) == [HEAD]
-        assert table_names(engine) == ["alembic_version", *CONFIGURATION_TABLES]
-        assert migrator_messages(caplog) == ["database schema already at revision 0002"]
+        assert table_names(engine) == ["alembic_version", *HEAD_TABLES]
+        assert migrator_messages(caplog) == ["database schema already at revision 0003"]
     finally:
         engine.dispose()
 
@@ -274,7 +274,7 @@ def test_an_unknown_stored_revision_fails_loudly(tmp_path: Path) -> None:
         with pytest.raises(CommandError, match="9999"):
             run_migrations(engine)
 
-        assert table_names(engine) == ["alembic_version", *CONFIGURATION_TABLES]
+        assert table_names(engine) == ["alembic_version", *HEAD_TABLES]
         assert stored_revisions(engine) == ["9999"]
     finally:
         engine.dispose()

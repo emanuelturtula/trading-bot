@@ -1163,34 +1163,47 @@ Verification evidence (the tester reports each; the tech-lead re-checks in revie
    not be able to resurrect a notification (see the identifier-reuse note). The CLI already has
    `tickers remove` and `rules remove` behind `--force` (D108), so #13 must also decide what their
    report says about the signals that go with the row, and extend the `--force` message if history
-   is deleted.
+   is deleted. **Resolved in spec 014 (D113, D122): `(ticker_id, timeframe)` and `rule_id`, both
+   `ON DELETE CASCADE`; `tickers remove` and `rules remove` refuse while either assignments or
+   signals exist and name both counts.**
 2. **Do not remove `sqlite_autoincrement=True`** from `tickers` or `rules`: the signal key depends
    on ids never being reused. Spec 004 §9 maps `rule_id` to `str(rules.id)`; confirm that mapping
-   in #13, because changing it later re-notifies every stored signal.
+   in #13, because changing it later re-notifies every stored signal. **Resolved in spec 014
+   (D113, D114): kept on both tables and added to `signals`; the mapping is confirmed.**
 3. The unique constraint `(ticker_id, rule_id, timeframe, candle_close_ts)` follows the naming
    convention of spec 012 §5. Catch its `IntegrityError` inside a `session.begin_nested()`
    savepoint: D88 makes savepoints work, and without one the failed flush would end the whole unit
-   of work.
+   of work. **Resolved in spec 014 (D112): that is what `record` does, and D110 makes the loser of
+   a race wait for the lock instead of failing.**
 4. Revision `0003` with `down_revision = "0002"`, a real `downgrade`, a single head and tests in
    both directions. The transactional-DDL recipe is already in place, and the coverage `source`
    entry of D89 already covers new revisions, so an untested branch in `0003` shows as missing
-   lines.
+   lines. **Resolved in spec 014 (Design 11): `0003` is self-contained and tested in both
+   directions; `downgrade 0002` keeps every configuration row.**
 5. Reuse `persistence/clock.py` (D92), `persistence/records.py`, `persistence/errors.py` (extend
    `PersistenceError`) and the repository shape of D91: a `Session`, no commit, frozen records.
    Store `candle_close_ts` exactly as `Evaluation.candle_close_ts` gives it (spec 012 hand-off 3).
+   **Resolved in spec 014 (Design 6, 7; D114): all reused, and the close is stored verbatim; the
+   signal records live in two modules of their own so `models.py` stays light (D120).**
 6. `bot_state` is a key/value table; its timestamps use `UtcDateTime` and its writes use the
    injected clock. Keep the keys an explicit, closed vocabulary rather than free text.
+   **Resolved in spec 014 (D118): one row per `StateKey`, every value a UTC instant, and the
+   vocabulary is a `CHECK` built from the enumeration, so the database refuses an unknown key.**
 7. #14 must not swallow `StoredRuleError` (D93): a rule that no longer parses is an operational
-   failure to surface, not a rule to skip.
+   failure to surface, not a rule to skip. **Carried into spec 014 (hand-off to #14, item 4) and
+   extended to `StoredSignalError`, which a corrupt signal row raises (D119).**
 8. Consumers in the event loop wrap every unit of work in `asyncio.to_thread` (D69) and never share
-   a `Session` across threads or across an `await`.
+   a `Session` across threads or across an `await`. **Carried into spec 014 (Design 2, hand-off to
+   #14), which adds one rule: never two sessions open at once in one thread (D110).**
 9. The CLI is a `python -m trading_bot.cli` package with one module per group (§1). If #13 adds an
    operational command (for example replaying or purging signals), it goes in a new module beside
    them, keeps the exit-code table of §9.2, `--dry-run` (D107) and the report vocabulary of §9.8,
-   and never migrates the database (D95).
+   and never migrates the database (D95). **Resolved in spec 014 (D122, Design 10): `signals list`
+   and `state show` are read-only, so they take no `--dry-run`, and the exit codes are unchanged.**
 10. `config import|export` is the one bulk format (D102). A new section in the envelope is an
     additive change that keeps `version: 1`; a change to an existing section's shape is what the
-    version field is for.
+    version field is for. **Resolved in spec 014 (D122): the envelope is unchanged — the signal
+    history and the bot state are not configuration, so the binary pre-deploy backup covers them.**
 
 ## User decisions
 

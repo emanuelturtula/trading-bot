@@ -1,4 +1,4 @@
-"""Errors of the persistence layer (spec 013, Design 6.2).
+"""Errors of the persistence layer (spec 013, Design 6.2; spec 014, Design 6.3).
 
 ``PersistenceError`` is **not** a ``ValueError``, for the same reason as ``MarketDataError``
 (spec 010): an ``except ValueError`` meant for programming errors must not swallow a storage
@@ -8,13 +8,14 @@ as ``ValueError`` or ``TypeError``.
 Every message is one English line built from ids, normalized symbols, timeframe codes and a
 ``repr()``-escaped, truncated rule name. A rule **document** never appears in a message:
 ``StoredRuleError`` carries the kinds and paths of spec 006, which are already bounded and safe
-to log. ``SchemaMismatchError`` names the two revisions only, never a path.
+to log, and ``StoredSignalError`` carries an id and a kind, never the stored text or a value.
+``SchemaMismatchError`` names the two revisions only, never a path.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
-from typing import Final
+from typing import Final, Literal
 
 from trading_bot.domain.rules.errors import RuleProblem
 from trading_bot.domain.timeframe import Timeframe
@@ -26,10 +27,18 @@ __all__ = [
     "PersistenceError",
     "SchemaMismatchError",
     "StoredRuleError",
+    "StoredSignalError",
+    "StoredSignalKind",
     "TimeframeMismatchError",
     "UnknownRuleError",
+    "UnknownSignalError",
     "UnknownTickerError",
+    "UntrackedTickerError",
 ]
+
+# Why a stored signal no longer loads: its payload text is not a JSON object of finite numbers,
+# or the domain ``Signal`` refused the row's values.
+type StoredSignalKind = Literal["indicator_values", "payload"]
 
 _ECHO_LIMIT: Final = 40  # characters of a rule name echoed in a message
 _ECHO_WIDTH: Final = 80  # columns of that echo once rendered with repr()
@@ -137,6 +146,36 @@ class StoredRuleError(PersistenceError):
         super().__init__(f"{subject} is not valid: {named}")
         self.rule_id = rule_id
         self.problems = collected
+
+
+class UntrackedTickerError(PersistenceError):
+    """No ticker is tracked with that symbol and timeframe, so no signal may name it."""
+
+    def __init__(self, symbol: str, timeframe: Timeframe) -> None:
+        super().__init__(f"ticker {symbol} {timeframe.value} is not tracked")
+        self.symbol = symbol
+        self.timeframe = timeframe
+
+
+class UnknownSignalError(PersistenceError):
+    """No signal carries that identifier."""
+
+    def __init__(self, signal_id: int) -> None:
+        super().__init__(f"no signal with id {signal_id}")
+        self.signal_id = signal_id
+
+
+class StoredSignalError(PersistenceError):
+    """A stored signal is not valid; it is never skipped silently (decisions D93, D119).
+
+    The message carries the id and the kind only: the stored text could be anything a manual
+    ``sqlite3`` session wrote, so it must reach neither a log record nor a traceback.
+    """
+
+    def __init__(self, signal_id: int, kind: StoredSignalKind) -> None:
+        super().__init__(f"the stored signal {signal_id} is not valid: {kind}")
+        self.signal_id = signal_id
+        self.kind = kind
 
 
 class SchemaMismatchError(PersistenceError):

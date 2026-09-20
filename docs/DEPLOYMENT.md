@@ -187,6 +187,12 @@ docker compose --project-name trading-bot-prod exec app \
 # Readable backup of the whole configuration
 docker compose --project-name trading-bot-prod exec app \
   python -m trading_bot.cli config export -
+
+# What the engine recorded, newest first, and the bot state
+docker compose --project-name trading-bot-prod exec app \
+  python -m trading_bot.cli signals list --ticker AAPL --limit 10
+docker compose --project-name trading-bot-prod exec app \
+  python -m trading_bot.cli state show
 ```
 
 - The export is a **readable companion** to the binary backup taken before each deploy, not a
@@ -194,6 +200,13 @@ docker compose --project-name trading-bot-prod exec app \
 - `config import` **merges and never deletes**. An item the file does not mention is left alone,
   so removing a rule from an exported file does not remove it from the database; `rules remove`
   does. There is no `--prune`.
+- `signals list` and `state show` are read-only: they print the recorded signals (newest
+  first, at most `--limit`, default 20) and the pause, the last heartbeat and the last run of
+  each timeframe. They write nothing, and the signal history is not part of `config export`; the
+  binary pre-deploy backup is what covers it.
+- `tickers remove --force` and `rules remove --force` also delete the **signal history** of that
+  row. Without `--force` the command refuses and names how many assignments and signals would
+  go, and `--dry-run` shows the same report without writing.
 - Every mutating command accepts `--dry-run`, which does the whole unit of work and rolls it back.
   Exit codes: `0` success, `1` the request was rejected and nothing was written, `2` usage, `3`
   the environment is unusable, including a database that is not at the expected schema revision.

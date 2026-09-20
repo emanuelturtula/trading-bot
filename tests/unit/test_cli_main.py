@@ -33,7 +33,7 @@ from trading_bot.persistence.repositories.tickers import SqlTickerRepository
 
 SRC = str(Path(trading_bot.__file__).resolve().parent.parent)
 BASELINE = "0001"
-HEAD = "0002"
+HEAD = "0003"
 
 SUBCOMMANDS = [
     ("tickers", "list"),
@@ -50,6 +50,8 @@ SUBCOMMANDS = [
     ("assignments", "remove"),
     ("config", "export"),
     ("config", "import"),
+    ("signals", "list"),
+    ("state", "show"),
 ]
 
 MUTATING = [
@@ -214,9 +216,17 @@ def test_every_subcommand_has_help_without_a_database(
     assert f"{group} {name}" in result.out
 
 
-def test_the_grammar_holds_exactly_fourteen_subcommands() -> None:
-    """Decision D101: five tickers, four rules, three assignments and the config pair."""
-    assert len(SUBCOMMANDS) == 14
+def test_the_grammar_holds_exactly_sixteen_subcommands() -> None:
+    """D101 and D122: fourteen, plus the two read-only commands of spec 014."""
+    assert len(SUBCOMMANDS) == 16
+    assert sorted({group for group, _ in SUBCOMMANDS}) == [
+        "assignments",
+        "config",
+        "rules",
+        "signals",
+        "state",
+        "tickers",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -249,7 +259,7 @@ def test_a_missing_database_exits_three_and_creates_nothing(tmp_path: Path) -> N
 
     assert result.code == 3
     assert result.err == (
-        "error: the database schema is at revision none, but revision 0002 is required;"
+        "error: the database schema is at revision none, but revision 0003 is required;"
         " start the application first\n"
     )
     assert not data_dir.exists()
@@ -272,7 +282,7 @@ def test_an_unmigrated_database_exits_three_and_leaves_the_revision_untouched(
 
     assert result.code == 3
     assert "0001" in result.err
-    assert "0002" in result.err
+    assert "0003" in result.err
 
     engine = create_database_engine(database_path(data_dir), busy_timeout_ms=200)
     try:

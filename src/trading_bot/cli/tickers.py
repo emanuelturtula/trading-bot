@@ -1,8 +1,8 @@
-"""The ticker subcommands (spec 013, §9.5; AC33, AC36, AC37).
+"""The ticker subcommands (spec 013, §9.5; spec 014, §10.2; AC33, AC36, AC37, AC23).
 
-A symbol is normalized by the domain, ``--timeframe`` defaults to ``1d``, and removing a ticker
-that has assignments needs ``--force``: the schema cascade is right, but a command that
-silently removes rows the operator did not name is not (decision D108).
+A symbol is normalized by the domain, ``--timeframe`` defaults to ``1d``, and removing a
+ticker that has assignments **or signals** needs ``--force``: the schema cascade is right,
+but a command that silently removes rows the operator did not name is not (D108, D122).
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from trading_bot.cli.main import (
     Context,
     RejectedError,
     SubParsers,
+    dependents,
     dry_run_option,
     plural,
     timeframe_option,
@@ -25,6 +26,7 @@ from trading_bot.domain.timeframe import Timeframe
 from trading_bot.persistence.errors import DuplicateTickerError
 from trading_bot.persistence.records import StoredTicker
 from trading_bot.persistence.repositories.assignments import SqlAssignmentRepository
+from trading_bot.persistence.repositories.signals import SqlSignalRepository
 from trading_bot.persistence.repositories.tickers import SqlTickerRepository
 
 __all__ = ["add_parser"]
@@ -48,7 +50,9 @@ def add_parser(groups: SubParsers) -> None:
     removing.add_argument("symbol")
     timeframe_option(removing)
     removing.add_argument(
-        "--force", action="store_true", help="remove it together with its assignments"
+        "--force",
+        action="store_true",
+        help="remove it together with its assignments and its signals",
     )
     dry_run_option(removing)
     removing.set_defaults(handler=remove_ticker)
@@ -98,15 +102,19 @@ def remove_ticker(context: Context, args: argparse.Namespace) -> int:
     with unit_of_work(context) as session:
         tickers = SqlTickerRepository(session, clock=context.clock)
         assignments = SqlAssignmentRepository(session, clock=context.clock)
+        signals = SqlSignalRepository(session, clock=context.clock)
         stored = _required(tickers, args)
-        assigned = len(assignments.rules_for_ticker(stored.id))
-        if assigned and not args.force:
+        # Counted before the delete; removing them is the database's cascade (D113).
+        going = dependents(
+            len(assignments.rules_for_ticker(stored.id)), signals.count(ticker_id=stored.id)
+        )
+        if going and not args.force:
             raise RejectedError(
-                f"{subject(stored.symbol, stored.timeframe)} has {plural(assigned, 'assignment')};"
+                f"{subject(stored.symbol, stored.timeframe)} has {going};"
                 " pass --force to remove them with it"
             )
         tickers.delete(stored.id)
-        detail = f" with {plural(assigned, 'assignment')}" if assigned else ""
+        detail = f" with {going}" if going else ""
         context.report(Action.REMOVE, subject(stored.symbol, stored.timeframe) + detail)
     return context.finish()
 

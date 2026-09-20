@@ -1,4 +1,4 @@
-"""Column types shared by every model (spec 012, Design 6; spec 013, Design 4)."""
+"""Column types shared by every model (spec 012, Design 6; spec 013, Design 4; spec 014, 4)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from sqlalchemy.types import TypeDecorator
 from trading_bot.domain.signals import Side
 from trading_bot.domain.timeframe import Timeframe
 from trading_bot.domain.utc import to_utc
+from trading_bot.persistence.state import StateKey
 
 
 class UtcDateTime(TypeDecorator[datetime]):
@@ -79,3 +80,27 @@ class SideType(TypeDecorator[Side]):
         if value is None:
             return None
         return Side(value)
+
+
+class StateKeyType(TypeDecorator[StateKey]):
+    """A ``StateKey`` stored as its text (``paused_since``, ``last_run.1d``, ...).
+
+    The same boundary rules as ``TimeframeType``: only a member binds, and text the database
+    should never hold raises ``ValueError`` when it is read instead of flowing on as a key that
+    matches nothing. The ``CHECK`` of ``bot_state`` is the same rule on the database side.
+    """
+
+    impl = String(32)
+    cache_ok = True
+
+    def process_bind_param(self, value: StateKey | None, dialect: Dialect) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, StateKey):
+            raise TypeError(f"key must be a StateKey, got {type(value).__name__}")
+        return value.value
+
+    def process_result_value(self, value: str | None, dialect: Dialect) -> StateKey | None:
+        if value is None:
+            return None
+        return StateKey(value)

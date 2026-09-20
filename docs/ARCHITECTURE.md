@@ -49,7 +49,7 @@ The user decides whether to trade. **There is no order execution layer** and one
 | `notifications/` | `Notifier` (Protocol) + `TelegramNotifier` | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk. |
 | `telegram_bot/` | Commands `/add /remove /list /rules /status /pause /resume /help` with python-telegram-bot (long polling) | Only chats in `TB_TELEGRAM_ALLOWED_CHAT_IDS`. |
 | `api/`, `dashboard/` | REST `/api/v1/tickers`, `/rules`, `/signals`; Jinja2 + HTMX dashboard (tickers, rule builder, history, charts) | Mandatory auth (password hash + signed session cookie). `/health` is the only public endpoint. |
-| `persistence/` | Synchronous SQLAlchemy 2 + Alembic on SQLite at `TB_DATA_DIR/trading_bot.db`: the engine and its pragmas, the `Database` handle and its sessions, the declarative metadata, the `UtcDateTime` column type, the packaged migrations, the configuration tables and the ticker, rule and assignment repositories behind their `Protocol`s; `cli/` manages that configuration from a command of its own | Migrations run at startup, before anything else; WAL, `foreign_keys=ON`, a busy timeout and `synchronous=FULL` on every connection; backups before each deploy. |
+| `persistence/` | Synchronous SQLAlchemy 2 + Alembic on SQLite at `TB_DATA_DIR/trading_bot.db`: the engine and its pragmas, the `Database` handle and its sessions, the declarative metadata, the `UtcDateTime` column type, the packaged migrations, the configuration tables, the signal history and the bot state, behind the five repository `Protocol`s; `cli/` manages the configuration and reads the history from a command of its own | Migrations run at startup, before anything else; WAL, `foreign_keys=ON`, a busy timeout and `synchronous=FULL` on every connection; sessions begin `BEGIN IMMEDIATE`; the signal key is a unique constraint; backups before each deploy. |
 
 ## Process
 
@@ -673,7 +673,7 @@ The evaluator answers "do the conditions hold at this candle?" and nothing else.
 
 - evaluates only rules whose `timeframe` equals the ticker's, on frames whose open candle was dropped (#8) and that hold at least `rule.stable_warmup()` candles when available, never on an empty frame;
 - builds `Signal(ticker=..., timeframe=rule.timeframe, rule_id=..., side=rule.signal, candle_close_ts=evaluation.candle_close_ts, close_price=evaluation.close_price, indicator_values=evaluation.indicator_values)` when `triggered` is true;
-- deduplicates by `Signal.idempotency_key` (`CLAUDE.md` rule 5) before notifying;
+- deduplicates by `Signal.idempotency_key` (`CLAUDE.md` rule 5) before notifying: the arbiter is `SignalRepository.record` (spec [014](specs/014-signal-idempotency.md)), whose unique constraint makes a duplicate impossible, and only the call that got `is_new=True` on a **committed** unit of work notifies;
 - applies `cooldown_bars` by row position over the evaluated frame, against the last notified signal of the same ticker and rule, never with `(t2 - t1) / duration`.
 
 ## Look-ahead testing
@@ -812,16 +812,28 @@ migrations, which ship inside the wheel and are applied at startup. Design and d
   default in SQLite and reset on every connection), `busy_timeout=5000` and `synchronous=FULL`
   (a committed signal survives a power cut on the SD card). The factory is the only supported
   way to build an engine, so no connection can miss them, and `echo` is never enabled. The same
-  listener sets `isolation_level = None` and a `begin` listener emits `BEGIN`, so SQLAlchemy and
-  not pysqlite controls transactions (spec 013, D88): a multi-statement migration is atomic, DDL
-  included, and `SAVEPOINT` works, which is how #13 catches an `IntegrityError` on the signal
-  constraint without losing its unit of work. The pragmas keep applying because the `connect`
-  listener runs before any `BEGIN`, and `PRAGMA journal_mode=WAL` is illegal inside one.
+  listener sets `isolation_level = None` and a `begin` listener emits the `BEGIN`, so SQLAlchemy
+  and not pysqlite controls transactions (spec 013, D88): a multi-statement migration is atomic,
+  DDL included, and `SAVEPOINT` works, which is how `record` catches an `IntegrityError` on the
+  signal constraint without losing its unit of work. The pragmas keep applying because the
+  `connect` listener runs before any `BEGIN`, and `PRAGMA journal_mode=WAL` is illegal inside
+  one.
 - **Synchronous SQLAlchemy 2.** One process with one writer (`CLAUDE.md` rule 7) and SQLite work
   is microseconds of local C code, so there is no async engine and no `aiosqlite`: callers that
   live in the event loop wrap their database work in `asyncio.to_thread`, one
   `Database.session()` per unit of work, and never share a `Session` across threads or across an
   `await`.
+- **Sessions begin `BEGIN IMMEDIATE`** (spec 014, D110). The session factory binds its sessions
+  to `engine.execution_options(trading_bot_begin_immediate=True)`, and the `begin` listener
+  emits `BEGIN IMMEDIATE` when that option is set, so a unit of work holds the write lock from
+  its **first statement**, reads included: in WAL mode a transaction that reads and then writes
+  cannot be rescued by the busy timeout, which is exactly the shape of "read the cooldown, then
+  record". Raw connections (`engine.connect()`, `engine.begin()`, the migrations, the CLI's
+  revision check, the pre-deploy backup) keep a deferred `BEGIN` and never take the write lock.
+  A session that executes nothing emits nothing and locks nothing. The consequences are
+  deliberate: units of work are serialized and must stay short, must never span an `await`, a
+  network call or a sleep, and **two sessions must never be open at once in one thread** — the
+  second would wait for a lock its own thread holds and fail with `database is locked`.
 - **`Database`** is the handle the rest of the app is injected with: a frozen `engine` plus a
   `sessionmaker(expire_on_commit=False)`, so a loaded object stays readable after the commit.
   `open_database(data_dir)` creates the engine, applies the migrations and returns it;
@@ -858,7 +870,7 @@ database = open_database(Path("data"))  # engine, pragmas and "alembic upgrade h
 try:
     with database.session() as session:  # commits on a clean exit, rolls back on any error
         assert session.execute(text("PRAGMA foreign_keys")).scalar() == 1
-    assert current_revision(database.engine) == "0002"
+    assert current_revision(database.engine) == "0003"
 finally:
     database.dispose()  # checkpoints the WAL and closes the pool
 ```
@@ -931,6 +943,72 @@ finally:
     database.dispose()
 ```
 
+### Signals and bot state
+
+Revision `0003` adds the two tables the engine writes while it runs. Design and decisions: spec
+[014](specs/014-signal-idempotency.md).
+
+| Table | Columns | Constraints |
+|-------|---------|-------------|
+| `signals` | `id`, `ticker_id`, `rule_id`, `timeframe`, `candle_close_ts`, `side`, `close_price`, `indicator_values_json`, `created_at`, `notified_at` | `AUTOINCREMENT`, unique `(ticker_id, rule_id, timeframe, candle_close_ts)`, foreign keys `(ticker_id, timeframe)` and `rule_id` `ON DELETE CASCADE`, `CHECK` on `timeframe`, on `side IN ('BUY', 'SELL')` and on `close_price > 0`, indexes on `(rule_id, candle_close_ts)` and on `candle_close_ts` |
+| `bot_state` | `key`, `value`, `updated_at` | primary key `key`, `CHECK key IN ('paused_since', 'last_heartbeat', 'last_run.1h', 'last_run.4h', 'last_run.1d')` |
+
+- **The signal identity is a database constraint.** `(ticker_id, rule_id, timeframe,
+  candle_close_ts)` is unique, which is the only arbiter of `CLAUDE.md` rule 5 that holds across
+  threads, the command-line process, retries and restarts. `SignalRepository.record(signal)`
+  returns `RecordOutcome(stored, is_new)`: the `INSERT` runs inside a `SAVEPOINT`, an
+  `IntegrityError` rolls that savepoint back, the row with the same key is read and returned
+  with `is_new=False`, and the unit of work stays usable. **The first write wins:** a stored
+  signal is never rewritten, so a later evaluation of the same candle on revised data cannot
+  change what was notified.
+- **Commit before notifying.** `is_new` is provisional until the caller's session commits: a
+  unit of work that rolls back never created that row. Only the call that got `is_new=True` on a
+  committed unit of work sends the notification, and `mark_notified(id)` stamps `notified_at`
+  afterwards, in a unit of work of its own. Delivery is **at-most-once**: a signal whose sending
+  failed or was interrupted is not re-sent, and stays visible with `notified_at` `NULL`.
+- **What a signal stores** is what a notification shows: the key, the side, the close price and
+  the indicator values, as the canonical JSON text of `dump_indicator_values` (floats written
+  with `repr`, so they round-trip bit for bit, keys in the evaluation's order). The rule **name**
+  is not stored: it is read live through the join, so a renamed rule shows its new name in the
+  history. A row that no longer loads raises `StoredSignalError` naming the id and the kind,
+  never the stored text, and is never skipped.
+- **`candle_close_ts` is stored exactly as the evaluation gives it** — the nominal close, never
+  recomputed or snapped to a grid — and `record` resolves the ticker by `(symbol, timeframe)` and
+  the rule by `int(signal.rule_id)`, raising `UntrackedTickerError`, `UnknownRuleError` or
+  `TimeframeMismatchError` instead of writing a row that names the wrong parent.
+- **Deleting a ticker or a rule deletes its signals**, through the database cascade and nothing
+  else. Ids are never reused (`AUTOINCREMENT`), so a re-added symbol starts a new history instead
+  of inheriting one.
+- **The history is keyset-paginated**, newest first, ordered by `(candle_close_ts DESC,
+  id DESC)`: `history(...)` filters by `ticker_id`, `rule_id`, `timeframe`, `notified` and the
+  half-open range `[since, until)` on the candle close, returns at most `limit` items (default
+  50, at most 500) and a `SignalCursor` to continue from. No row appears twice in one iteration
+  and every row that existed when it started appears exactly once, whatever is written meanwhile.
+  `latest(ticker_id, rule_id)` returns the pair's newest candle, which is what a cooldown counts
+  from.
+- **The bot state is a closed vocabulary of instants.** One row per `StateKey`, and a missing row
+  means "never": not paused, no heartbeat, no run of that timeframe. The global pause **is** the
+  presence of `paused_since`; `record_run` is monotonic, so a late or repeated report from the
+  scheduler is harmless.
+
+```python
+from trading_bot.persistence.repositories.bot_state import SqlBotStateRepository
+from trading_bot.persistence.repositories.signals import SqlSignalRepository
+
+with database.session() as session:  # one unit of work: the cooldown read and the claim
+    signals = SqlSignalRepository(session)
+    previous = signals.latest(ticker.id, rule.id)  # None when the pair never fired
+    outcome = signals.record(signal)  # is_new is False when another writer got there first
+
+if outcome.is_new:  # the block committed: the claim is durable
+    notify(outcome.stored)  # no session is open while a notification is sent
+    with database.session() as session:
+        SqlSignalRepository(session).mark_notified(outcome.stored.id)
+
+with database.session() as session:
+    SqlBotStateRepository(session).record_run(rule.timeframe, scheduled_now)
+```
+
 ### Configuration CLI
 
 `trading_bot/cli/` manages that configuration from the Raspberry Pi before Telegram and the
@@ -943,6 +1021,8 @@ tickers      list | add | remove | enable | disable
 rules        list | remove | enable | disable
 assignments  list | add | remove
 config       export | import
+signals      list
+state        show
 ```
 
 - **It never migrates** (spec 013, D95). `connect_database` opens an already-migrated database
@@ -968,6 +1048,17 @@ config       export | import
   the deploy takes. Re-importing the same file writes nothing.
 - **There is no `rules add`:** a rule is a JSON document, `parse_rule` is its single entry point,
   and `docs/examples/rules/` ships three ready-to-import examples, all disabled.
+- **`signals list` and `state show` are read-only** (spec 014, D122): they open one session,
+  write nothing and take no `--dry-run`. `signals list` prints the newest signals first, one
+  line each — the canonical key, the side, the rule's current name, the close price, the id and
+  the two instants — filtered by `--ticker`, `--timeframe`, `--rule` and `--limit` (default 20,
+  at most 500). `state show` prints the pause, the last heartbeat and the last run of each
+  timeframe, with `never` for a fact that has none. There is no `pause`/`resume`: pausing is
+  Telegram's `/pause`.
+- **Removing a ticker or a rule names its history.** `tickers remove` and `rules remove` refuse
+  while the row has assignments **or** signals, naming both counts, and `--force` removes and
+  reports them; `--dry-run` shows what would go first. Signals and the bot state are **not**
+  configuration, so neither enters `config export`.
 - Output is plain text on the injected stream, one line per item plus a summary; errors go to
   stderr as `error: <message>`. No secret, no rule document and no resolved database path is ever
   printed.
@@ -980,10 +1071,10 @@ Applied by revision `0002` (details in [Configuration tables and repositories](#
 - `rules(id, name, signal, timeframe, definition_json, enabled, created_at, updated_at)`
 - `ticker_rules(ticker_id, rule_id, timeframe, created_at)`
 
-Still a draft, planned for #13:
+Applied by revision `0003` (details in [Signals and bot state](#signals-and-bot-state)):
 
-- `signals(id, ticker_id, rule_id, timeframe, candle_close_ts, price, indicator_values_json, notified_at)` with unique `(ticker_id, rule_id, timeframe, candle_close_ts)`
-- `bot_state(key, value)`: global pause, last heartbeat
+- `signals(id, ticker_id, rule_id, timeframe, candle_close_ts, side, close_price, indicator_values_json, created_at, notified_at)` with unique `(ticker_id, rule_id, timeframe, candle_close_ts)`
+- `bot_state(key, value, updated_at)`: the global pause, the last heartbeat and the last run per timeframe
 
 ## Configuration (environment variables)
 
@@ -1006,5 +1097,5 @@ Still a draft, planned for #13:
 - **Async provider port with an explicit `now`.** The app is one asyncio process (FastAPI, `AsyncIOScheduler`, python-telegram-bot), so `MarketDataProvider` methods are coroutines: yfinance blocks, so #10 runs its calls in `asyncio.to_thread` and waits with `asyncio.sleep` between retries, which lets a run be cancelled at shutdown instead of waiting on a sleeping thread and keeps rate limiting a loop-local primitive without locks. `now` is the injected clock: the provider needs it to plan the window, drop the open candle and know which candle must be last, and one `now` per run keeps retries and simulated-clock tests deterministic. Providers never read the wall clock.
 - **Long polling and not webhooks** for Telegram: the Pi does not expose public endpoints.
 - **HTMX and not an SPA**: a single Python image, no Node toolchain.
-- **SQLite with synchronous SQLAlchemy 2 and Alembic**: a single writer process (rule 7), a Docker volume and a backup before each deploy. The engine factory applies WAL, `foreign_keys=ON`, a 5 s busy timeout and `synchronous=FULL` on every connection, because the last three are per connection and a power cut on the SD card would otherwise lose committed signals, which would then be notified twice. Async SQLAlchemy and `aiosqlite` were rejected: one writer and microseconds of local C code leave nothing to overlap, so callers in the event loop use `asyncio.to_thread`. Timestamps go through `UtcDateTime` instead of epoch integers, which sort just as well but make the deploy backup and any manual query unreadable. Migrations run first in the FastAPI lifespan and there is no flag to skip them: a failure aborts startup, so no container can ever serve on an old schema.
+- **SQLite with synchronous SQLAlchemy 2 and Alembic**: a single writer process (rule 7), a Docker volume and a backup before each deploy. The engine factory applies WAL, `foreign_keys=ON`, a 5 s busy timeout and `synchronous=FULL` on every connection, because the last three are per connection and a power cut on the SD card would otherwise lose committed signals, which would then be notified twice. Async SQLAlchemy and `aiosqlite` were rejected: one writer and microseconds of local C code leave nothing to overlap, so callers in the event loop use `asyncio.to_thread`. Timestamps go through `UtcDateTime` instead of epoch integers, which sort just as well but make the deploy backup and any manual query unreadable. Migrations run first in the FastAPI lifespan and there is no flag to skip them: a failure aborts startup, so no container can ever serve on an old schema. Sessions begin their transactions with `BEGIN IMMEDIATE` (spec 014, D110), because in WAL mode a transaction that reads before it writes fails with `SQLITE_BUSY`/`SQLITE_BUSY_SNAPSHOT` instead of waiting out the busy timeout, and the engine reads a cooldown before it records a signal; raw connections keep a deferred `BEGIN`, so the backup and the migrations never take the write lock.
 - **Backtesting** (vectorbt + walk-forward) in a later phase, with care for overfitting (Deflated Sharpe Ratio).

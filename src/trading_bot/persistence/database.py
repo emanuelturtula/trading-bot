@@ -39,6 +39,13 @@ class Database:
 
         Every ``BaseException`` rolls the session back and propagates, which also covers the
         ``asyncio.CancelledError`` of a shutdown, and the session is always closed.
+
+        The transaction begins with ``BEGIN IMMEDIATE`` at the session's first statement, so the
+        block holds the write lock from its first read to its end and a concurrent unit of work
+        waits, within the busy timeout, instead of failing (spec 014, D110). Keep the block
+        short, never hold it across an ``await``, a network call or a sleep, and never open a
+        second session in the same thread while one is live: it would wait for a lock its own
+        thread holds and fail with ``database is locked``.
         """
         session = self.session_factory()
         try:

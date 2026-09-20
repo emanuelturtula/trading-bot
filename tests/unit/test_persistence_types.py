@@ -220,9 +220,22 @@ def test_the_convention_names_every_constraint_of_a_sample_table(tmp_path: Path)
 
 def test_models_re_exports_the_single_declarative_base() -> None:
     assert models.Base is base.Base
-    assert models.__all__ == ["Base", "RuleRow", "TickerRow", "TickerRuleRow"]
+    assert models.__all__ == [
+        "Base",
+        "BotStateRow",
+        "RuleRow",
+        "SignalRow",
+        "TickerRow",
+        "TickerRuleRow",
+    ]
 
 
-def test_the_metadata_holds_only_the_configuration_tables_of_the_next_feature() -> None:
-    """Signals and ``bot_state`` arrive with #13 (spec 013, Design 3)."""
-    assert sorted(Base.metadata.tables) == ["rules", "ticker_rules", "tickers"]
+def test_the_metadata_holds_the_configuration_signal_and_state_tables() -> None:
+    """Signals and ``bot_state`` joined the configuration tables with #13 (spec 014, Design 3)."""
+    assert sorted(Base.metadata.tables) == [
+        "bot_state",
+        "rules",
+        "signals",
+        "ticker_rules",
+        "tickers",
+    ]

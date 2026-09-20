@@ -9,7 +9,7 @@ The phases are tracked on GitHub as the milestones `M1 · Analysis core` to `M8 
 | F0 | Foundations | Completed (v0.1.0) | CLAUDE.md, agents, hooks, secret protection, beta/prod CI/CD, `/health` skeleton | Green pipeline; beta on 8082 and prod on 8081 |
 | F1 | Domain and indicators | Completed (v0.5.0) | domain models, indicator registry (TA-Lib), rule schema and pure evaluator | Tests against reference values; anti look-ahead; invalid rules rejected |
 | F2 | Data provider | Completed (v0.8.0) | market calendar (NYSE), `MarketDataProvider` + `YFinanceProvider`: UTC normalization, open candle discarded, retries | Tests with recorded fixtures and no network; intraday limits respected |
-| F3 | Persistence | Pending | SQLAlchemy + Alembic: tickers, rules, signals, state | Reversible migrations; idempotency unique constraint |
+| F3 | Persistence | Completed (v0.11.0) | SQLAlchemy + Alembic: tickers, rules, signals, state; management CLI | Reversible migrations; idempotency unique constraint |
 | F4 | Engine and scheduler | Pending | `SignalEngine` + APScheduler per timeframe and market hours | No duplicate signals after restart; cooldown |
 | F5 | Telegram | Pending | Notifier (text + chart in BytesIO) and commands with a chat allowlist | `[BETA]` outside prod; disclaimer; unauthorized chats ignored |
 | F6 | API and dashboard | Pending | REST `/api/v1/*`, login, HTMX dashboard: tickers, rule builder, history, charts | Mandatory auth; rule validation in UI and backend |

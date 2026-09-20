@@ -8,6 +8,7 @@ requires-python = ">=3.12,<3.13"
 license = "MIT"
 dependencies = [
     "alembic>=1.13",
+    "apscheduler>=3.11,<4",
     "exchange-calendars>=4.13.2",
     "fastapi>=0.115",
     "numpy>=2.5.3",
@@ -64,7 +65,11 @@ strict = true
 files = ["src", "scripts", "deploy", ".claude/hooks", "tests/lookahead.py", "tests/fixtures"]
 mypy_path = "src"
 explicit_package_bases = true
-untyped_calls_exclude = ["yfinance"]
+untyped_calls_exclude = ["apscheduler", "yfinance"]
+
+[[tool.mypy.overrides]]
+module = ["apscheduler", "apscheduler.*"]
+follow_untyped_imports = true
 
 [[tool.mypy.overrides]]
 module = ["exchange_calendars", "exchange_calendars.*"]

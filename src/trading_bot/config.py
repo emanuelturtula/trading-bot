@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     # container). Infrastructure detail, not a secret: it is never added to ``secret_values``.
     data_dir: Path = Field(default=Path("data"), validate_default=True)
 
+    # How long after a real candle close the scheduler runs (spec 016, U1), and how late a
+    # missed fire may still run, which is also the startup catch-up window (decision D146).
+    # Operational integers, not secrets: they stay out of ``secret_values``.
+    candle_close_delay_seconds: int = Field(default=120, ge=0, le=900)
+    scheduler_misfire_grace_seconds: int = Field(default=900, ge=60, le=3600)
+
     telegram_bot_token: SecretStr | None = None
     telegram_allowed_chat_ids: str = ""
     dashboard_password_hash: SecretStr | None = None

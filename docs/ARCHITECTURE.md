@@ -45,7 +45,7 @@ The user decides whether to trade. **There is no order execution layer** and one
 | `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the market calendar (`MarketCalendar`: NYSE sessions, candle grid and real closes), candle normalization and open-candle removal (`normalize_candles`, `drop_open_candle`), `4h` candles resampled from hourly candles (`resample_hourly_to_4h`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
 | `data/` | `MarketDataProvider` (async Protocol), `TickerInfo` and the D27 policy, typed errors, and `prepare_candles`, which every provider uses to normalize, drop bad rows and the open candle, and require the last closed candle; `YFinanceProvider` in `data/yahoo/`, with `4h` candles built from `1h` bars; `ProviderTransport` (retries with backoff and jitter, timeouts, pacing) | Never decides signals. Respects Yahoo's limits: `1h` requests start at most 720 days back; `1d` is unlimited. |
 | `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → cooldown/dedupe → persistence → notification, over one configuration snapshot per run, and returns a `RunReport` | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`; the cooldown counts candle positions, never a duration; a failing ticker never stops the rest; no clock is read. |
-| `scheduler/` | APScheduler (AsyncIOScheduler). One job per timeframe, fired at candle close + margin, only during market hours | A single instance per process. |
+| `scheduler/` | APScheduler (`AsyncIOScheduler`) behind a pure schedule function: one job per timeframe with a custom calendar-driven trigger, fired at the **real** candle close plus `TB_CANDLE_CLOSE_DELAY_SECONDS`; the startup catch-up, the misfire window and the bounded retry of unpublished candles | One service per process, `max_instances=1` and `coalesce=True`; exactly once per close (`bot_state`); market hours by construction, never an `is_open` gate; no `Exception` escapes a job. |
 | `notifications/` | `Notifier` (Protocol), `SignalNotification` and `NotificationError`, shipped with the engine (#14); `TelegramNotifier` implements them (#17, #18) | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk; `notification.candles` is read-only. |
 | `telegram_bot/` | Commands `/add /remove /list /rules /status /pause /resume /help` with python-telegram-bot (long polling) | Only chats in `TB_TELEGRAM_ALLOWED_CHAT_IDS`. |
 | `api/`, `dashboard/` | REST `/api/v1/tickers`, `/rules`, `/signals`; Jinja2 + HTMX dashboard (tickers, rule builder, history, charts) | Mandatory auth (password hash + signed session cookie). `/health` is the only public endpoint. |
@@ -280,7 +280,7 @@ Every error is a `MarketDataError(Exception)`, and none is a `ValueError`, so an
 |-------|----------------|
 | #8 | Detects: `prepare_candles` raises `CandleNotPublishedError` (retryable, with `expected_label`) instead of returning a frame that ends before the last closed slot |
 | #10 | Never retries it internally: transport retries (backoff, jitter, timeout) apply to `ProviderUnavailableError` only |
-| #15 (with #14) | Owns the bounded window: retries those tickers with the **same** scheduled `now`, until a deadline no later than `calendar.next_candle_close(timeframe, now)`, then skips them and logs |
+| #15 (with #14) | Owns the bounded window, implemented in [`scheduler/runner.py`](#one-run-per-fire): re-runs **only** `report.retryable_tickers`, with the **same** scheduled `now`, waiting 30 s, 60 s, 120 s and 240 s between attempts, and starts no attempt at or after `min(calendar.next_candle_close(timeframe, now), first attempt + 10 min)`; the symbols still unresolved then are skipped with one `WARNING` naming them |
 
 ### Testing with the fake provider
 
@@ -801,6 +801,87 @@ Three rings. A **ticker** failure is logged and reported, and the run continues 
 
 The frame is shared, not copied: copying it per signal would duplicate up to 2 255 rows for every rule that fires, so an implementation must treat `notification.candles` as read-only and copy before drawing. It must also keep tokens, chat ids and provider text out of the exceptions it raises, because the engine logs the exception class only, and raise `NotificationError` when it finally gives up.
 
+## Scheduler
+
+`scheduler/` decides **when** the bot thinks, and nothing else: one job per timeframe, fired at each real candle close plus a configured delay, exactly once per close and never twice at a time. Design and decisions: spec [016](specs/016-candle-close-scheduler.md). Nothing is wired into the running application yet (#16 does that).
+
+```python
+from datetime import UTC, datetime, timedelta
+
+from trading_bot.domain.timeframe import Timeframe
+from trading_bot.scheduler.policy import SchedulerPolicy
+from trading_bot.scheduler.runner import TimeframeRunner
+from trading_bot.scheduler.service import SchedulerService
+from trading_bot.scheduler.slots import skip_unpublished_hours
+from trading_bot.scheduler.trigger import next_fire
+
+policy = SchedulerPolicy(close_delay=timedelta(seconds=120))  # from the TB_* settings (#16)
+should_run = skip_unpublished_hours(calendar)  # the 1h slots Yahoo never publishes
+
+before_the_open = datetime(2024, 7, 1, 13, 0, tzinfo=UTC)
+slot, fire = next_fire(calendar, Timeframe.D1, after=before_the_open, delay=policy.close_delay)
+assert slot.close_time == datetime(2024, 7, 1, 20, 0, tzinfo=UTC)  # the real session close
+assert fire == slot.close_time + policy.close_delay  # 20:02Z, never a nominal close
+
+
+async def start() -> SchedulerService:  # built in the FastAPI lifespan, inside the loop (#16)
+    runner = TimeframeRunner(
+        engine=engine,  # the SignalEngine; the scheduler only sees its run() method
+        calendar=calendar,
+        unit_of_work=unit_of_work,
+        policy=policy,
+        should_run=should_run,
+    )
+    service = SchedulerService(
+        runner=runner, calendar=calendar, policy=policy, should_run=should_run
+    )
+    service.start()
+    return service  # await service.aclose() at shutdown, before disposing the database
+```
+
+### The job set and the fire time
+
+- One job per `Timeframe` member, **always**, with the stable id `candle-close.<timeframe>`, whatever the configuration holds: an empty run costs one short database read, while a job set derived from the configuration would need an event the management CLI — another process — cannot send (decision D145).
+- The fire time is the calendar's **real close plus `TB_CANDLE_CLOSE_DELAY_SECONDS`**. `next_fire(calendar, timeframe, after=..., delay=...)` is a pure function that returns the first slot whose `close_time + delay` is at or after `after`, and `CandleCloseTrigger` is the thin APScheduler adapter over it. A calendar that cannot answer gives one `ERROR` and `None`, which drops that job instead of raising inside the scheduler's loop.
+- **Market hours are honoured by construction, and `is_open` is never called** (decision D151). It is the trap "only during market sessions" invites: the fire for the last candle of a session happens *after* the close by definition, so an `is_open` gate would silently drop the most interesting candle of every day and, on `1d`, every single run. The daily candle therefore fires right after the session close (16:00 New York), not at midnight and not at the next open.
+- `nominal_close` appears nowhere in the package, and a guard test enforces it: it would fire a day late for `1d` and skip the last `1h` candle of every session.
+- The `1h` slot of an early-close session that lasts less than an hour is **not fired for at all** (`skip_unpublished_hours`): Yahoo never publishes that half hour as hourly data, so a fire would produce one failed run per ticker about three days a year.
+
+| `after` (UTC, `delay = 120 s`) | `1h` | `4h` | `1d` |
+|--------------------------------|------|------|------|
+| 2024-07-01T13:00Z (before the open) | 07-01T14:32Z | 07-01T17:32Z | 07-01T20:02Z |
+| 2024-07-03T16:35Z (half day; its truncated `1h` slot is skipped) | 07-05T14:32Z | 07-03T17:02Z | 07-03T17:02Z |
+| 2024-11-01T20:05Z (the weekend of the EDT→EST change) | 11-04T15:32Z | 11-04T18:32Z | 11-04T21:02Z |
+
+### One run per fire
+
+The job carries no fire time. At each fire the runner derives the candle from the injected clock as `calendar.closed_candles(timeframe, clock(), 1)[-1]` and passes its `close_time` to the engine as `now` (decision D143), so a coalesced burst, a fire delayed by a busy loop and the startup catch-up all evaluate the **last closed candle** and nothing else. The engine never sees the firing instant.
+
+```text
+fire ──▶ await runner.run_timeframe(timeframe)          max_instances=1, coalesce=True
+
+  slot = calendar.closed_candles(timeframe, clock(), 1)[-1];  close = slot.close_time
+  should_run(slot)?                  no -> SLOT_SKIPPED
+  per-timeframe lock free?           no -> BUSY
+  clock() <= close + delay + grace?  no -> STALE
+  last_run(timeframe) < close?       no -> ALREADY_RUN
+
+  global lock ──▶ await engine.run(timeframe, close) ──▶ RunReport
+  while report.retryable_tickers and budget left:  sleep(backoff), re-run those symbols
+  record_run(timeframe, close)                     one unit of work, after everything
+```
+
+- **Exactly once per close.** `bot_state` holds the close each timeframe last ran for, and the runner skips a fire whose close is not newer (decision D144). It is what `max_instances=1` cannot give: a catch-up that coincides with a scheduled fire, a clock stepped backwards by NTP and two fires separated by a restart all collapse to one run. The engine's unique constraint remains the arbiter of `CLAUDE.md` rule 5 underneath.
+- **The misfire window.** Every job carries `coalesce=True` and `misfire_grace_time = TB_SCHEDULER_MISFIRE_GRACE_SECONDS`, and the runner applies the same rule itself: a fire arriving later than `close + close_delay + misfire_grace` returns `STALE` and does nothing. Coalescing is the only correct answer with "the last closed candle only": several missed fires describe the same work.
+- **The startup catch-up.** `start()` adds, besides the recurring job, one immediate job per timeframe that calls the same runner. The two rules above accept or reject it. It is not a backfill: it offers **one** run for the candle that is closed right now, never a sequence. Without it a container restarted at 21:10 UTC would ignore the daily candle that closed at 21:00 and wait a full day.
+- **`TB_SCHEDULER_MISFIRE_GRACE_SECONDS` is the only thing between "the bot restarted" and "that candle is lost forever."** There is no backfill and the job store is the default in-memory one, so after a restart APScheduler has no missed fire to replay. With the default of 900 s a deploy or a reboot of up to fifteen minutes keeps the candle; anything longer means that candle is never evaluated and its signals are never sent. F7 (#26) reads `bot_state.last_run` to make a lost close visible after the fact.
+- **The retry window** belongs to the scheduler (spec 010, decision D44): when a report carries `retryable_tickers`, the runner re-runs **only those symbols** with the **same** `now`, waiting 30 s, 60 s, 120 s and 240 s between attempts, and never starts an attempt at or after `min(next_candle_close(timeframe, close), first attempt + 10 min)`. Symbols still unresolved when the budget ends give one `WARNING` naming them. A paused run has nothing retryable and is still recorded (user decision U4), so a paused bot does not look dead to the missing-run alert.
+- **Two locks, and both are needed.** One `asyncio.Lock` per timeframe is held for the whole sequence, retries included, and a second fire of that timeframe is **skipped** (`BUSY`, one `WARNING`), never queued: queueing would evaluate a candle that is no longer the last one. One global lock is held only around each `engine.run`, because the three timeframes close at the same instant at every session close and three simultaneous runs would contend on one SQLite writer and on a transport that already serializes its calls. It is released while the retry backoff sleeps, so a `1h` retry window never blocks the `1d` run.
+- **No `Exception` escapes a job.** Every one is caught and logged as a single `ERROR` naming the exception **class**, the run returns `FAILED` and records nothing, and the next close fires normally. That is a secret-handling requirement: APScheduler's executor logs an escaped job exception with `logger.exception`, and `RedactingFilter` rewrites `record.msg` only (issue #50), so a traceback is **not** redacted and a notifier or provider exception can carry a bot token or Yahoo's session crumb. `BaseException`, `asyncio.CancelledError` included, is the only thing that leaves a job.
+- **Shutdown.** `await service.aclose()` stops the runner, pauses the scheduler so no new fire is submitted, waits for the run in flight for at most `shutdown_timeout` (one `WARNING` per timeframe if it does not finish) and only then shuts APScheduler down. The order matters: `AsyncIOExecutor.shutdown` **cancels** a coroutine job in flight rather than awaiting it, so pausing first is what makes the shutdown graceful. It is idempotent and a no-op before `start()`.
+
+The clock and the sleep are injected (`Clock`, `Sleep`), so every schedule, retry and misfire test runs on a simulated clock without waiting; only APScheduler's own loop reads the wall clock.
+
 ## Look-ahead testing
 
 `CLAUDE.md` rule 4 requires that the result at candle `t` computed with `data[:t]` is identical to the one computed with `data[:t+k]` truncated to `t` (`data[:t]` includes `t`). The reusable harness lives in `tests/lookahead.py` and the fixtures in `tests/fixtures/` (spec [003](specs/003-lookahead-harness.md)). Always import them with the `tests.` prefix (`from tests.lookahead import ...`): a second import path creates a second `LookaheadError` class that `pytest.raises` does not match.
@@ -1209,6 +1290,8 @@ Applied by revision `0003` (details in [Signals and bot state](#signals-and-bot-
 | `TB_VERSION` | Version injected into the image |
 | `TB_LOG_LEVEL` | Log level |
 | `TB_DATA_DIR` | Directory of the SQLite database and other runtime data (`/app/data` in the container) |
+| `TB_CANDLE_CLOSE_DELAY_SECONDS` | Operational, not a secret. Seconds after the real candle close before a run fires, `[0, 900]`, default `120` |
+| `TB_SCHEDULER_MISFIRE_GRACE_SECONDS` | Operational, not a secret. How late a missed fire may still run, `[60, 3600]`, default `900`. It is also the startup catch-up window: there is no backfill, so a candle older than this is never evaluated |
 | `TB_TELEGRAM_BOT_TOKEN` | Secret. A different bot per environment |
 | `TB_TELEGRAM_ALLOWED_CHAT_IDS` | Authorized chats (comma-separated) |
 | `TB_DASHBOARD_PASSWORD_HASH` | Secret. Hash of the dashboard password |
@@ -1220,6 +1303,7 @@ Applied by revision `0003` (details in [Signals and bot state](#signals-and-bot-
 - **`exchange_calendars` for NYSE sessions.** It is correct for every golden case of spec 009, including the 2025-01-09 closure and the holiday observance rules, maintained, Apache-2.0, ships pure-Python wheels and works with the locked pandas and numpy. `pandas_market_calendars` depends on it (a larger supply chain for no gain), and an in-house rule table would move holiday rules and ad hoc closures into our maintenance. It is imported only by `domain/market_calendar/nyse.py`, which converts the schedule once into an immutable `MarketCalendar`, so it can be replaced by rewriting one module. The library's calendar registry is never used: it caches instances and defaults its bounds from the wall clock (the `Dockerfile` smoke check fails the build if the calendar cannot be built).
 - **yfinance behind one adapter module.** yfinance 1.7.0 is the source chosen for v1 (issue #10): actively released, Apache-2.0, and every runtime package it adds has a linux/aarch64 wheel for Python 3.12 (the `Dockerfile` smoke check fails the build if it or its `curl_cffi` backend cannot load). Only `data/yahoo/client.py` imports it, so every exception mapping lives in one place, the provider and its test fakes load without yfinance or `curl_cffi`, and the source can be replaced by rewriting one module. yfinance keeps process-wide state (a session, three SQLite caches, one of them a pickled cookie jar, and a logger that prints the session crumb at `DEBUG`), so `configure_yfinance` moves the caches to a private directory, raises exceptions instead of returning empty frames, turns its retries off and sets its logger to `WARNING`. `4h` candles are resampled from `1h` bars on the session grid instead of taken from Yahoo's undocumented `4h` interval, which has the same half-day hole: Yahoo never publishes the last 30 minutes of an early-close session as hourly data, not even months later, so the half-day `4h` candle closes with the 09:30–12:30 ET bars (spec 011, D65).
 - **Async provider port with an explicit `now`.** The app is one asyncio process (FastAPI, `AsyncIOScheduler`, python-telegram-bot), so `MarketDataProvider` methods are coroutines: yfinance blocks, so #10 runs its calls in `asyncio.to_thread` and waits with `asyncio.sleep` between retries, which lets a run be cancelled at shutdown instead of waiting on a sleeping thread and keeps rate limiting a loop-local primitive without locks. `now` is the injected clock: the provider needs it to plan the window, drop the open candle and know which candle must be last, and one `now` per run keeps retries and simulated-clock tests deterministic. Providers never read the wall clock.
+- **APScheduler 3 with a calendar-driven custom trigger.** The candle grid is irregular by nature — holidays, half days, DST changes and a final slot truncated to thirty minutes — and no cron expression describes it, so `CandleCloseTrigger` computes each fire from the market calendar while APScheduler keeps what a self-rescheduling job would have to reimplement: `max_instances`, `coalesce`, the misfire grace and one job with a stable id for `/status`. The library is pure Python, MIT-licensed and confined to two modules (`scheduler/trigger.py` and `scheduler/service.py`) behind `next_fire`, a pure function of the calendar that is ours and fully tested, so nothing about the schedule depends on the library being correct and it can be replaced by rewriting those two modules; the provider quirk is isolated in a third (`scheduler/slots.py`). It is pinned below 4.0: APScheduler 4 is a different API, and the version the roadmap assumes is the one with `AsyncIOScheduler`, `max_instances`, `coalesce` and `misfire_grace_time`. Its only runtime dependency is `tzlocal`, and the `Dockerfile` smoke check fails the arm64 build if the scheduler cannot be imported.
 - **Long polling and not webhooks** for Telegram: the Pi does not expose public endpoints.
 - **HTMX and not an SPA**: a single Python image, no Node toolchain.
 - **SQLite with synchronous SQLAlchemy 2 and Alembic**: a single writer process (rule 7), a Docker volume and a backup before each deploy. The engine factory applies WAL, `foreign_keys=ON`, a 5 s busy timeout and `synchronous=FULL` on every connection, because the last three are per connection and a power cut on the SD card would otherwise lose committed signals, which would then be notified twice. Async SQLAlchemy and `aiosqlite` were rejected: one writer and microseconds of local C code leave nothing to overlap, so callers in the event loop use `asyncio.to_thread`. Timestamps go through `UtcDateTime` instead of epoch integers, which sort just as well but make the deploy backup and any manual query unreadable. Migrations run first in the FastAPI lifespan and there is no flag to skip them: a failure aborts startup, so no container can ever serve on an old schema. Sessions begin their transactions with `BEGIN IMMEDIATE` (spec 014, D110), because in WAL mode a transaction that reads before it writes fails with `SQLITE_BUSY`/`SQLITE_BUSY_SNAPSHOT` instead of waiting out the busy timeout, and the engine reads a cooldown before it records a signal; raw connections keep a deferred `BEGIN`, so the backup and the migrations never take the write lock.

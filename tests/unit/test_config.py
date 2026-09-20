@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -7,6 +8,8 @@ from trading_bot.logging_setup import REDACTED, RedactingFilter
 
 # Fake secrets are assembled at runtime so no token-shaped literal lives in the repo.
 FAKE_TOKEN = "987654321" + ":" + "Ab1_" * 9
+
+ENV_EXAMPLE = Path(__file__).resolve().parents[2] / ".env.example"
 
 
 def test_settings_repr_and_dump_never_expose_secrets() -> None:
@@ -51,3 +54,66 @@ def test_redacting_filter_hides_known_secrets_and_token_shapes() -> None:
     assert FAKE_TOKEN not in message
     assert "s3cr3t-value" not in message
     assert message == f"token={REDACTED} other={REDACTED}"
+
+
+# --- The scheduler settings (spec 016, T1; AC18) ---------------------------------------------
+
+
+def test_the_scheduler_settings_keep_the_documented_defaults() -> None:
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.candle_close_delay_seconds == 120
+    assert settings.scheduler_misfire_grace_seconds == 900
+
+
+def test_the_scheduler_settings_are_read_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TB_CANDLE_CLOSE_DELAY_SECONDS", "0")
+    monkeypatch.setenv("TB_SCHEDULER_MISFIRE_GRACE_SECONDS", "3600")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.candle_close_delay_seconds == 0
+    assert settings.scheduler_misfire_grace_seconds == 3600
+
+
+@pytest.mark.parametrize(
+    ("variable", "value"),
+    [
+        ("TB_CANDLE_CLOSE_DELAY_SECONDS", "-1"),
+        ("TB_CANDLE_CLOSE_DELAY_SECONDS", "901"),
+        ("TB_CANDLE_CLOSE_DELAY_SECONDS", "12.5"),
+        ("TB_CANDLE_CLOSE_DELAY_SECONDS", "two minutes"),
+        ("TB_SCHEDULER_MISFIRE_GRACE_SECONDS", "59"),
+        ("TB_SCHEDULER_MISFIRE_GRACE_SECONDS", "3601"),
+        ("TB_SCHEDULER_MISFIRE_GRACE_SECONDS", "900.5"),
+        ("TB_SCHEDULER_MISFIRE_GRACE_SECONDS", ""),
+    ],
+)
+def test_an_out_of_range_or_non_integer_scheduler_setting_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, variable: str, value: str
+) -> None:
+    monkeypatch.setenv(variable, value)
+
+    with pytest.raises(ValueError, match=variable.removeprefix("TB_").lower()):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_neither_scheduler_setting_is_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both are operational integers: visible in ``repr``, absent from ``secret_values``."""
+    monkeypatch.setenv("TB_CANDLE_CLOSE_DELAY_SECONDS", "300")
+    monkeypatch.setenv("TB_SCHEDULER_MISFIRE_GRACE_SECONDS", "600")
+
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
+
+    assert settings.secret_values() == []
+    assert "candle_close_delay_seconds=300" in repr(settings)
+    assert "scheduler_misfire_grace_seconds=600" in repr(settings)
+
+
+def test_both_scheduler_settings_are_documented_in_the_env_example() -> None:
+    lines = ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+
+    assert "#TB_CANDLE_CLOSE_DELAY_SECONDS=120" in lines
+    assert "#TB_SCHEDULER_MISFIRE_GRACE_SECONDS=900" in lines

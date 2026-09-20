@@ -14,9 +14,9 @@ a crash cannot resend (decisions D131, D115):
    session open and outside any worker thread holding one;
 3. ``mark_notified`` runs in a unit of work of its own, after the notifier returns.
 
-``_in_unit_of_work`` makes the session discipline structural: the work is a plain function of
-the repositories, so it cannot await, cannot reach the provider or the notifier and cannot open
-a second unit of work (spec 014, D110).
+``in_unit_of_work`` (``engine/unit_of_work.py``) makes the session discipline structural: the
+work is a plain function of the repositories, so it cannot await, cannot reach the provider or
+the notifier and cannot open a second unit of work (spec 014, D110).
 
 Errors come in three rings (decision D134): a **ticker** failure (any ``MarketDataError`` or
 other ``Exception`` while fetching or evaluating it) is logged and reported, and the run
@@ -69,7 +69,7 @@ from trading_bot.engine.results import (
     TickerOutcome,
     TickerStatus,
 )
-from trading_bot.engine.unit_of_work import EngineRepositories, UnitOfWork
+from trading_bot.engine.unit_of_work import EngineRepositories, UnitOfWork, in_unit_of_work
 from trading_bot.notifications.notifier import Notifier, SignalNotification
 from trading_bot.persistence.errors import (
     StoredRuleError,
@@ -294,18 +294,13 @@ class SignalEngine:
         return _outcome(key, stored_rule, SignalDisposition.NOTIFIED, stored.id)
 
     async def _in_unit_of_work[T](self, work: Callable[[EngineRepositories], T]) -> T:
-        """Run ``work`` in one unit of work, in a worker thread of its own (decision D138).
+        """This engine's unit of work, through the shared helper (decision D158).
 
-        ``work`` is a plain function of the repositories: it cannot await, cannot reach the
-        notifier or the provider and cannot open a second unit of work, so "never two sessions
-        at once in one thread" and "never a session across an ``await``" hold by construction.
+        The session discipline of spec 014 D110 has one implementation, in
+        ``engine/unit_of_work.py``, which the scheduler (#15) reuses for its own two reads and
+        writes; this method only binds it to the injected ``UnitOfWork``.
         """
-
-        def run() -> T:
-            with self._unit_of_work() as repositories:
-                return work(repositories)
-
-        return await asyncio.to_thread(run)
+        return await in_unit_of_work(self._unit_of_work, work)
 
     def _suppressed(
         self,

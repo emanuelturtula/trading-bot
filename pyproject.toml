@@ -56,13 +56,12 @@ known-first-party = ["trading_bot", "tests"]
 "tests/**" = ["PT011", "S101", "S105", "S106", "S108", "S603", "S607"]
 "scripts/**" = ["S603", "S607", "T201"]
 "deploy/**" = ["S603", "S607", "T201"]
-".claude/hooks/**" = ["S603", "S607", "T201"]
 
 [tool.mypy]
 python_version = "3.12"
 platform = "linux"
 strict = true
-files = ["src", "scripts", "deploy", ".claude/hooks", "tests/lookahead.py", "tests/fixtures"]
+files = ["src", "scripts", "deploy", "tests/lookahead.py", "tests/fixtures"]
 mypy_path = "src"
 explicit_package_bases = true
 untyped_calls_exclude = ["apscheduler", "yfinance"]

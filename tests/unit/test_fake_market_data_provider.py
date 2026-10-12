@@ -441,8 +441,8 @@ def test_concurrent_calls_from_one_event_loop_are_all_served() -> None:
 @pytest.mark.parametrize(
     ("calendar_name", "start", "end", "count"),
     [
-        ("nyse", "2024-07-01T00:00", "2024-07-10T00:00", {H1: 39, H4: 11, D1: 6}),
-        ("toy", "2024-03-06T05:00", "2024-03-15T04:00", {H1: 23, H4: 7, D1: 4}),
+        ("nyse", "2024-07-01T00:00", "2024-07-10T00:00", {H1: 39, H4: 11, D1: 6, Timeframe.W1: 2}),
+        ("toy", "2024-03-06T05:00", "2024-03-15T04:00", {H1: 23, H4: 7, D1: 4, Timeframe.W1: 2}),
     ],
 )
 def test_session_candles_are_canonical_and_on_the_calendar_grid(

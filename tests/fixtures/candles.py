@@ -21,10 +21,10 @@ import pandas as pd
 
 from trading_bot.domain.timeframe import Timeframe
 
-type TimeframeCode = Literal["1h", "4h", "1d"]
+type TimeframeCode = Literal["1h", "4h", "1d", "1w"]
 
 OHLCV_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close", "volume")
-TIMEFRAMES: tuple[TimeframeCode, ...] = ("1h", "4h", "1d")
+TIMEFRAMES: tuple[TimeframeCode, ...] = ("1h", "4h", "1d", "1w")
 DEFAULT_START = "2024-01-01T00:00:00+00:00"  # a Monday, on every grid
 MIN_PRICE = 1e-6
 MAX_PRICE = 1e9
@@ -135,7 +135,13 @@ def _parse_start(start: str | pd.Timestamp, timeframe: Timeframe) -> pd.Timestam
     ):
         raise ValueError(f"start must be a tz-aware UTC timestamp, got {start!r}")
     duration = pd.Timedelta(timeframe.duration)
-    if timestamp != timestamp.floor(duration):
+    # Weeks start on Monday 00:00; pandas floors seven days from the epoch, a Thursday.
+    on_grid = (
+        timestamp == timestamp.floor("D") and timestamp.dayofweek == 0
+        if timeframe is Timeframe.W1
+        else timestamp == timestamp.floor(duration)
+    )
+    if not on_grid:
         raise ValueError(f"start must be an open time on the {timeframe} grid, got {start!r}")
     return timestamp.tz_convert("UTC")
 

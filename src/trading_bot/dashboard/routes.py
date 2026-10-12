@@ -2,7 +2,8 @@
 
 ``install_dashboard(app, settings)`` mounts everything under ``/dashboard/``. Pages are rendered
 on the server with Jinja2 (autoescaping on), every change is a ``POST`` form followed by a
-redirect, and no page carries a script (D1). Access goes through ``page`` and ``action``: a valid
+redirect. The only scripts are the dashboard's own static files: the rule builder (spec 026) and
+the ticker chart (spec 027). Access goes through ``page`` and ``action``: a valid
 session cookie of an active user, and a valid CSRF token on every ``POST`` (AC2, AC6). Spec 023
 adds the accounts: a login per user, access links instead of a shared password, and the user
 pages only an administrator reaches.
@@ -23,8 +24,9 @@ from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+import pandas as pd
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -42,6 +44,7 @@ from trading_bot.dashboard.auth import (
     verify_password,
 )
 from trading_bot.dashboard.builder import builder_payload, fill
+from trading_bot.dashboard.chart import EXCHANGE_ZONE, chart_payload, fetch_lookback
 from trading_bot.dashboard.password import MIN_LENGTH as MIN_PASSWORD_LENGTH
 from trading_bot.dashboard.unit_of_work import (
     DashboardRepositories,
@@ -50,16 +53,19 @@ from trading_bot.dashboard.unit_of_work import (
     sql_dashboard_unit_of_work,
 )
 from trading_bot.data.errors import (
+    CandleNotPublishedError,
     InvalidTickerError,
     InvalidTickerReason,
+    MarketDataError,
     ProviderDataError,
     ProviderUnavailableError,
 )
-from trading_bot.data.provider import MarketDataProvider
+from trading_bot.data.provider import MAX_LOOKBACK, MarketDataProvider
 from trading_bot.domain.indicators.catalog import REGISTRY
+from trading_bot.domain.market_calendar.sessions import CalendarRangeError
 from trading_bot.domain.rules.errors import RuleValidationError
 from trading_bot.domain.rules.schema import Operator, PriceField, dump_rule, parse_rule
-from trading_bot.domain.signals import normalize_ticker
+from trading_bot.domain.signals import Signal, normalize_ticker
 from trading_bot.domain.timeframe import Timeframe
 from trading_bot.persistence.errors import (
     AssignedTimeframeError,
@@ -69,6 +75,7 @@ from trading_bot.persistence.errors import (
 )
 from trading_bot.persistence.records import StoredRule, StoredTicker, StoredUser
 from trading_bot.persistence.repositories.users import normalize_username
+from trading_bot.persistence.signal_records import SignalCursor, StoredSignal
 from trading_bot.watchlist import WatchOutcome, unwatch_ticker, watch_ticker
 
 __all__ = ["PREFIX", "TEMPLATES_DIR", "Dashboard", "install_dashboard"]
@@ -84,6 +91,9 @@ _FORM_TYPE: Final = "application/x-www-form-urlencoded"
 _LOGGER_NAME: Final = "trading_bot.dashboard"
 TEMPLATES_DIR: Final = Path(__file__).with_name("templates")
 STATIC_DIR: Final = Path(__file__).with_name("static")
+RECENT_SIGNALS: Final = 20  # on a ticker's page
+CHART_SIGNALS: Final = 500  # more than any chart window holds
+SIGNALS_PAGE: Final = 50
 
 SECURITY_HEADERS: Final = {
     "Cache-Control": "no-store",
@@ -91,7 +101,8 @@ SECURITY_HEADERS: Final = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": (
-        "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; "
+        "default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'unsafe-inline'; "
+        "img-src 'self' data:; "
         "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
     ),
 }
@@ -201,6 +212,7 @@ class Dashboard:
         self._templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
         self._templates.env.globals["prefix"] = PREFIX
         self._templates.env.filters["local"] = self._local
+        self._templates.env.filters["candle"] = self._candle
         self._logger = logging.getLogger(_LOGGER_NAME)
 
     @property
@@ -208,6 +220,13 @@ class Dashboard:
         return self._templates
 
     # --- plumbing ---------------------------------------------------------------------------
+
+    def _candle(self, signal: Signal) -> str:
+        """The candle a signal fired on: its trading day, or its local open time (spec 027)."""
+        label = signal.candle_close_ts - signal.timeframe.duration
+        if signal.timeframe is Timeframe.D1:
+            return label.astimezone(EXCHANGE_ZONE).date().isoformat()
+        return self._local(label)
 
     def _local(self, instant: datetime | None) -> str:
         if instant is None:
@@ -775,10 +794,75 @@ class Dashboard:
                 "ticker": ticker,
                 "candidates": candidates,
                 "signals": repositories.signals.count(ticker_id=ticker.id),
+                "recent": repositories.signals.history(
+                    ticker_id=ticker.id, limit=RECENT_SIGNALS
+                ).items,
             }
 
         context = await self._work(request, read)
         return self._render(request, "ticker.html", context, nonce=nonce)
+
+    async def chart_data(self, request: Request, nonce: str) -> Response:
+        """The JSON ``static/chart.js`` draws on a ticker's page (spec 027)."""
+        ticker_id = _path_id(request, "ticker_id")
+
+        def read(
+            repositories: DashboardRepositories,
+        ) -> tuple[StoredTicker, tuple[StoredRule, ...], tuple[StoredSignal, ...]]:
+            ticker = _ticker(repositories, ticker_id)
+            rules = tuple(repositories.assignments.rules_for_ticker(ticker.id))
+            signals = repositories.signals.history(ticker_id=ticker.id, limit=CHART_SIGNALS).items
+            return ticker, rules, signals
+
+        ticker, rules, signals = await self._work(request, read)
+        lookback = fetch_lookback(ticker.timeframe, [stored.rule for stored in rules], MAX_LOOKBACK)
+        try:
+            candles = await self._closed_candles(request, ticker, lookback)
+        except (MarketDataError, CalendarRangeError):
+            return JSONResponse(
+                {"error": f"The market data of {ticker.symbol} cannot be read right now."},
+                status_code=503,
+            )
+        payload = await asyncio.to_thread(
+            chart_payload,
+            candles=candles,
+            timeframe=ticker.timeframe,
+            rules=rules,
+            signals=signals,
+            zone=self._settings.display_zone,
+        )
+        return JSONResponse({"symbol": ticker.symbol, **payload})
+
+    async def _closed_candles(
+        self, request: Request, ticker: StoredTicker, lookback: int
+    ) -> pd.DataFrame:
+        """The last closed candles; while the newest one is not published, those before it."""
+        now = _utc_now()
+        provider = self._provider(request)
+        try:
+            return await provider.fetch_candles(ticker.symbol, ticker.timeframe, lookback, now=now)
+        except CandleNotPublishedError:
+            return await provider.fetch_candles(
+                ticker.symbol, ticker.timeframe, lookback, now=now - ticker.timeframe.duration
+            )
+
+    async def signals_page(self, request: Request, nonce: str) -> Response:
+        """The user's signals, newest first, a page at a time (spec 027)."""
+        query = request.query_params
+        ticker_text = query.get("ticker", "")
+        ticker_id = int(ticker_text) if ticker_text.isdigit() else None
+        before = _cursor(query.get("before", ""))
+
+        def read(repositories: DashboardRepositories) -> dict[str, object]:
+            tickers = repositories.tickers.list_all()
+            selected = next((item for item in tickers if item.id == ticker_id), None)
+            page = repositories.signals.history(
+                ticker_id=selected.id if selected else None, limit=SIGNALS_PAGE, before=before
+            )
+            return {"tickers": tickers, "selected": selected, "page": page}
+
+        context = await self._work(request, read)
+        return self._render(request, "signals.html", context, nonce=nonce)
 
     async def set_ticker_rules(self, request: Request, nonce: str, form: Form) -> Response:
         ticker_id = _path_id(request, "ticker_id")
@@ -1054,6 +1138,8 @@ def install_dashboard(app: FastAPI, settings: Settings) -> None:
         ("/account", dashboard.account_page),
         ("/tickers", dashboard.tickers_page),
         ("/tickers/{ticker_id:int}", dashboard.ticker_page),
+        ("/tickers/{ticker_id:int}/chart.json", dashboard.chart_data),
+        ("/signals", dashboard.signals_page),
         ("/tickers/{ticker_id:int}/delete", dashboard.delete_ticker_page),
         ("/rules", dashboard.rules_page),
         ("/rules/new", dashboard.new_rule_page),
@@ -1204,9 +1290,24 @@ def _password_problem(password: str, repeat: str) -> str | None:
     return None
 
 
+def _utc_now() -> datetime:
+    """The wall clock, read only to ask for the latest candles; tests replace it."""
+    return datetime.now(UTC)
+
+
+def _cursor(text: str) -> SignalCursor | None:
+    """The ``before`` query parameter of the signals page: ``<unix seconds>_<id>``."""
+    seconds, _, signal_id = text.partition("_")
+    if not (seconds.isdigit() and signal_id.isdigit()) or len(seconds) > 12:
+        return None
+    return SignalCursor(
+        candle_close_ts=datetime.fromtimestamp(int(seconds), UTC), id=int(signal_id)
+    )
+
+
 def _section(path: str) -> str:
     """The navigation entry a page belongs to, for ``aria-current`` (#12)."""
-    for section in ("tickers", "rules", "users", "account"):
+    for section in ("tickers", "rules", "signals", "users", "account"):
         if path.startswith(f"{PREFIX}/{section}"):
             return section
     return "overview" if path == PREFIX + "/" else ""

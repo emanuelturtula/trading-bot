@@ -1,0 +1,11 @@
+{# Rows of a signals table: candle, [ticker], rule, side, close, Telegram. #}
+{% for item in items %}
+<tr>
+  <td>{{ item.signal | candle }}</td>
+  {% if with_ticker %}<td><a class="plain" href="{{ prefix }}/tickers/{{ item.ticker_id }}">{{ item.signal.ticker }}</a> <span class="muted">{{ item.signal.timeframe.value }}</span></td>{% endif %}
+  <td>{{ item.rule_name }}</td>
+  <td><span class="side-{{ item.signal.side.value | lower }}">{{ item.signal.side.value }}</span></td>
+  <td>{{ '%.2f' | format(item.signal.close_price) }}</td>
+  <td class="hide-narrow">{% if item.notified_at %}<span class="on">Sent</span>{% else %}<span class="muted">Not sent</span>{% endif %}</td>
+</tr>
+{% endfor %}

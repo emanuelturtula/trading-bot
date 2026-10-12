@@ -6,24 +6,33 @@ provider, no network) and drives it with ``TestClient`` like a browser would.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
+from tests.fixtures.calendars import nyse_test_calendar
 from tests.fixtures.dashboard import ADMIN, HASH, PASSWORD, SECRET, Browser, make_app
 from tests.fixtures.repositories import sample_rule
+from tests.fixtures.session_candles import session_candles
+from trading_bot.dashboard import routes
 from trading_bot.dashboard.routes import SECURITY_HEADERS, SESSION_COOKIE
 from trading_bot.dashboard.unit_of_work import DashboardRepositories
 from trading_bot.data.errors import ProviderFailure, ProviderUnavailableError
 from trading_bot.data.tickers import AssetType, Exchange, TickerInfo
 from trading_bot.domain.rules.schema import dump_rule
+from trading_bot.domain.signals import Side, Signal
 from trading_bot.domain.timeframe import Timeframe
+from trading_bot.persistence.repositories.signals import SqlSignalRepository
+
+LIGHTWEIGHT_CHARTS = "lightweight-charts-5.2.1.standalone.production.js"
 
 
 @pytest.fixture
@@ -50,6 +59,8 @@ def signed_in(browser: Browser) -> Browser:
 _OWN_SCRIPTS = (
     (("type", "application/json"), ("id", "builder-data")),
     (("src", "/dashboard/static/builder.js"), ("defer", None)),
+    (("src", "/dashboard/static/vendor/" + LIGHTWEIGHT_CHARTS), ("defer", None)),
+    (("src", "/dashboard/static/chart.js"), ("defer", None)),
 )
 
 
@@ -112,6 +123,7 @@ GET_PAGES = [
     "/dashboard/rules/new",
     "/dashboard/rules/1",
     "/dashboard/rules/1/delete",
+    "/dashboard/signals",
 ]
 POST_ACTIONS = [
     "/dashboard/logout",
@@ -823,3 +835,146 @@ def test_rule_form_ships_the_builder(signed_in: Browser) -> None:
     assert new_rule is not None
     conditions = json.loads(new_rule.group(1).replace("&#34;", '"'))["conditions"]
     assert conditions["all"][0]["left"]["indicator"] == "rsi"  # opens on a template
+
+
+# --- chart and signal history (spec 027) -----------------------------------------------------
+
+CHART_NOW = datetime(2026, 10, 9, 21, 0, tzinfo=UTC)  # a Friday after the close
+
+
+@pytest.fixture
+def charted(signed_in: Browser, monkeypatch: pytest.MonkeyPatch) -> Browser:
+    """``AAPL 1d`` with candles up to ``CHART_NOW``, a BUY rule assigned and the clock fixed."""
+    monkeypatch.setattr(routes, "_utc_now", lambda: CHART_NOW)
+    candles = session_candles(
+        nyse_test_calendar(), Timeframe.D1, datetime(2024, 6, 1, tzinfo=UTC), CHART_NOW, seed=7
+    )
+    signed_in.provider.set_candles("AAPL", Timeframe.D1, candles)
+    ticker_id = add_ticker(signed_in)
+    rule_id = add_rule(signed_in, "Daily")
+    signed_in.repositories(lambda r: r.assignments.assign(ticker_id, rule_id))
+    return signed_in
+
+
+def record_signals(browser: Browser, count: int, *, symbol: str = "AAPL", rule_id: int = 1) -> None:
+    with browser.app.state.runtime.database.session() as session:
+        signals = SqlSignalRepository(session)
+        for day in range(count):
+            signals.record(
+                Signal(
+                    ticker=symbol,
+                    timeframe=Timeframe.D1,
+                    rule_id=str(rule_id),
+                    side=Side.BUY,
+                    candle_close_ts=datetime(2026, 1, 6, 5, tzinfo=UTC) + timedelta(days=day),
+                    close_price=100.0 + day,
+                )
+            )
+        session.commit()
+
+
+def test_chart_data_of_a_ticker(charted: Browser) -> None:
+    response = charted.get("/dashboard/tickers/1/chart.json")
+
+    data = response.json()
+    assert response.status_code == 200
+    assert data["symbol"] == "AAPL"
+    assert data["timeframe"] == "1d"
+    assert len(data["candles"]) == 250
+    assert data["candles"][-1]["time"] == "2026-10-09"
+    assert [line["label"] for line in data["lines"]] == ["SMA 20"]  # close > SMA 20
+    assert (
+        response.headers["Content-Security-Policy"] == SECURITY_HEADERS["Content-Security-Policy"]
+    )
+    assert charted.provider.fetch_calls[-1].now == CHART_NOW
+
+
+def test_chart_data_needs_a_session_and_an_own_ticker(charted: Browser) -> None:
+    assert charted.get("/dashboard/tickers/9/chart.json").status_code == 404
+    charted.post("/dashboard/logout")
+
+    response = charted.get("/dashboard/tickers/1/chart.json")
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/dashboard/login"
+
+
+def test_chart_waits_for_an_unpublished_candle(charted: Browser) -> None:
+    candles = charted.provider  # the newest candle of CHART_NOW is not published yet
+    full = session_candles(
+        nyse_test_calendar(), Timeframe.D1, datetime(2024, 6, 1, tzinfo=UTC), CHART_NOW, seed=7
+    )
+    candles.set_candles("AAPL", Timeframe.D1, full.iloc[:-1])
+
+    data = charted.get("/dashboard/tickers/1/chart.json").json()
+
+    assert data["candles"][-1]["time"] == "2026-10-08"
+    assert [call.now for call in charted.provider.fetch_calls[-2:]] == [
+        CHART_NOW,
+        CHART_NOW - Timeframe.D1.duration,
+    ]
+
+
+def test_chart_says_when_market_data_cannot_be_read(charted: Browser) -> None:
+    charted.provider.fail_next(
+        ProviderUnavailableError(ProviderFailure.TIMEOUT, ticker="AAPL"), ticker="AAPL"
+    )
+
+    response = charted.get("/dashboard/tickers/1/chart.json")
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "The market data of AAPL cannot be read right now."}
+    assert charted.get("/dashboard/tickers/1").status_code == 200
+
+
+def test_ticker_page_holds_the_chart_and_recent_signals(charted: Browser) -> None:
+    record_signals(charted, 25)
+
+    page = charted.get("/dashboard/tickers/1").text
+
+    assert 'data-src="/dashboard/tickers/1/chart.json"' in page
+    assert f'src="/dashboard/static/vendor/{LIGHTWEIGHT_CHARTS}"' in page
+    assert page.count("<td>Daily</td>") == 20
+    assert "<td>2026-01-29</td>" in page  # the newest candle: its trading day
+    assert '<a href="/dashboard/signals?ticker=1">All 25 signals</a>' in page
+
+
+def test_signals_page_lists_pages_and_filters(charted: Browser) -> None:
+    record_signals(charted, 55)
+    other = add_ticker(charted, "MSFT")
+    charted.repositories(lambda r: r.assignments.assign(other, 1))
+    record_signals(charted, 1, symbol="MSFT")
+
+    first = charted.get("/dashboard/signals").text
+    older = re.search(r'href="(/dashboard/signals\?before=[0-9]+_[0-9]+)"', first)
+    filtered = charted.get(f"/dashboard/signals?ticker={other}").text
+
+    assert first.count("<td>Daily</td>") == 50
+    assert 'aria-current="page">Signals</a>' in first
+    assert older is not None
+    assert charted.get(older.group(1)).text.count("<td>Daily</td>") == 6
+    assert filtered.count("<td>Daily</td>") == 1
+    assert "MSFT</a>" in filtered
+    assert (
+        charted.get("/dashboard/signals?before=x_1&ticker=abc").text.count("<td>Daily</td>") == 50
+    )
+
+
+def test_signals_page_without_signals(signed_in: Browser) -> None:
+    assert "No signal yet." in signed_in.get("/dashboard/signals").text
+
+
+def test_the_chart_library_is_the_pinned_release(signed_in: Browser) -> None:
+    script = signed_in.get(f"/dashboard/static/vendor/{LIGHTWEIGHT_CHARTS}")
+    chart = signed_in.get("/dashboard/static/chart.js")
+
+    assert script.status_code == 200
+    assert hashlib.sha256(script.content).hexdigest() == (
+        "e21cc5caa0226ef30bd8549c50b9ef926615f2a4ee6b4e486353477a55f598cf"
+    )
+    assert (
+        "Apache License"
+        in signed_in.get("/dashboard/static/vendor/lightweight-charts-LICENSE.txt").text
+    )
+    assert not re.search(r"innerHTML|outerHTML|insertAdjacentHTML|eval\(", chart.text)
+    assert "connect-src 'self';" in SECURITY_HEADERS["Content-Security-Policy"]

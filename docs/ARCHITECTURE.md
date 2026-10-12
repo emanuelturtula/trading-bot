@@ -47,13 +47,13 @@ The user decides whether to trade. **There is no order execution layer** and one
 | `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → cooldown/dedupe → persistence → notification, over one configuration snapshot per run, and returns a `RunReport` | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`; the cooldown counts candle positions, never a duration; a failing ticker never stops the rest; no clock is read. |
 | `scheduler/` | APScheduler (`AsyncIOScheduler`) behind a pure schedule function: one job per timeframe with a custom calendar-driven trigger, fired at the **real** candle close plus `TB_CANDLE_CLOSE_DELAY_SECONDS`; the startup catch-up, the misfire window and the bounded retry of unpublished candles | One service per process, `max_instances=1` and `coalesce=True`; exactly once per close (`bot_state`); market hours by construction, never an `is_open` gate; no `Exception` escapes a job. |
 | `notifications/` | `Notifier` (Protocol), `SignalNotification` and `NotificationError`, shipped with the engine (#14); `TelegramNotifier` implements them (#17, #18) | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk; `notification.candles` is read-only. |
-| `telegram_bot/` | Commands `/add /remove /list /rules /status /pause /resume /help` with python-telegram-bot (long polling) | Only chats in `TB_TELEGRAM_ALLOWED_CHAT_IDS`. |
+| `telegram_bot/` | Commands `/add /remove /list /rules /status /pause /resume /help` (library-free handlers) and the long-polling `TelegramPoller` (#19, #20) | Only chats in `TB_TELEGRAM_ALLOWED_CHAT_IDS`, checked before anything else. |
 | `api/`, `dashboard/` | REST `/api/v1/tickers`, `/rules`, `/signals`; Jinja2 + HTMX dashboard (tickers, rule builder, history, charts) | Mandatory auth (password hash + signed session cookie). `/health` is the only public endpoint. |
 | `persistence/` | Synchronous SQLAlchemy 2 + Alembic on SQLite at `TB_DATA_DIR/trading_bot.db`: the engine and its pragmas, the `Database` handle and its sessions, the declarative metadata, the `UtcDateTime` column type, the packaged migrations, the configuration tables, the signal history and the bot state, behind the five repository `Protocol`s; `cli/` manages the configuration and reads the history from a command of its own | Migrations run at startup, before anything else; WAL, `foreign_keys=ON`, a busy timeout and `synchronous=FULL` on every connection; sessions begin `BEGIN IMMEDIATE`; the signal key is a unique constraint; backups before each deploy. |
 
 ## Process
 
-A single asyncio process (`uvicorn ... --workers 1`). The FastAPI lifespan starts and stops the [runtime](#runtime): the scheduler, the notifier and, from #20, the Telegram poller. It is never scaled horizontally: a Telegram token allows a single poller (409 Conflict).
+A single asyncio process (`uvicorn ... --workers 1`). The FastAPI lifespan starts and stops the [runtime](#runtime): the scheduler, the notifier and the [Telegram poller](#telegram-commands). It is never scaled horizontally: a Telegram token allows a single poller (409 Conflict).
 
 ## Domain models
 
@@ -818,8 +818,25 @@ Not financial advice.              (italic)
 
 - **The candle is never presented by its nominal close.** The calendar slot whose label is the candle's open gives the session date (`1d`) or the real close (`1h`, `4h`), shown in `TB_DISPLAY_TIMEZONE` (default `Europe/Madrid`). Ticker, rule name and indicator names are HTML-escaped.
 - **Retries.** Per chat, up to four attempts with 1 s, 2 s and 4 s between them; a 429 waits Telegram's `retry_after` (at most 60 s); bad requests, a blocked bot and a rejected token are not retried. Delivery succeeds when at least one chat received the message; otherwise `notify` raises `NotificationError`, the signal stays with `notified_at` `NULL` and is never re-sent.
-- **Secrets.** `BotMessageSender` is the only code that imports python-telegram-bot (a guard test enforces it). The token is only ever in the request URL the library builds; `configure_logging` pins the `httpx`, `httpcore` and `telegram` loggers to `WARNING` because `httpx` logs every URL at `INFO`. `Bot.initialize` is never called, since its rejected-token error embeds the token. Chat ids are never logged: a failing recipient is named by its position. Errors raised from the module carry counts only and are raised `from None`.
+- **Secrets.** `BotMessageSender` and `BotUpdateSource` ([Telegram commands](#telegram-commands)) are the only code that imports python-telegram-bot (a guard test enforces it). The token is only ever in the request URL the library builds; `configure_logging` pins the `httpx`, `httpcore` and `telegram` loggers to `WARNING` because `httpx` logs every URL at `INFO`. `Bot.initialize` is never called, since its rejected-token error embeds the token. Chat ids are never logged: a failing recipient is named by its position. Errors raised from the module carry counts only and are raised `from None`.
 - **Not configured.** Without a token or without chat ids the runtime injects `LogNotifier`, which logs one `INFO` line per signal, and logs one `WARNING` at startup (U2). Signals "delivered" this way are marked notified and are not re-sent once the bot is configured.
+
+### Telegram commands
+
+The bot is managed from the phone (spec [018](specs/018-telegram-commands.md), issues #19 and #20). `telegram_bot/` has three parts:
+
+- **`TelegramPoller`** (`poller.py`) is its own `getUpdates` loop, not `telegram.ext.Application`: a 30 s long poll asking only for `message` updates. It drops every message from a chat outside `TB_TELEGRAM_ALLOWED_CHAT_IDS` before parsing it, logging one `INFO` line without the chat id, user or text. `BotUpdateSource` is the python-telegram-bot adapter and maps the library's errors onto `PollError` (`transient`, `conflict`, `rejected_token`), raised `from None`.
+- **`CommandHandler`** (`commands.py`) is library-free: text in, HTML reply out (or `None` for a command addressed to another bot). Every database access is one unit of work (`unit_of_work.py`) in a worker thread. User text is HTML-escaped and echoed truncated to 32 characters; every reply starts with `[BETA]` outside `prod`. An unexpected error is logged by class name and answered with a fixed sentence.
+- **Commands.** `/add TICKER [1h|4h|1d]` validates the symbol with the provider, defaults to `1d`, stores it enabled (or re-enables it) and assigns every stored rule of that timeframe. `/remove TICKER [timeframe]` disables it and keeps its assignments and signals; deleting stays a CLI action. `/list`, `/rules`, `/status` (version, pause, last and next run per timeframe in `TB_DISPLAY_TIMEZONE`), `/pause`, `/resume`, `/help`. Rules are not created from Telegram.
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Telegram unreachable, timeouts, 5xx | Retried 1 s, 2 s, 4 s ... capped at 60 s; a 429 waits `retry_after` (at most 60 s) |
+| `409 Conflict` (another process polls with the same token) | Waits at least 30 s; one `WARNING` saying beta and prod need different tokens |
+| Token rejected | Retried every 60 s; one `ERROR` naming `TB_TELEGRAM_BOT_TOKEN` |
+| A reply fails | Logged by kind and dropped: a reply is not a signal |
+
+Each failure streak is logged once and its end once ("recovered"), so `/health` and the scheduler never depend on Telegram. **Offsets:** the poller advances its offset before handling a batch, and stopping lets the command being handled finish (up to 10 s), then makes one short `getUpdates` call that confirms it. A clean restart never runs a command twice; a crash in the middle of a command may. Commands sent while the bot was down are handled when it starts.
 
 ## Runtime
 
@@ -833,6 +850,7 @@ Not financial advice.              (italic)
 | Yahoo provider, with a per-process cache directory under the system temp dir | `aclose()`, cache directory removed |
 | `TelegramNotifier` or `LogNotifier` | `aclose()` |
 | `SignalEngine`, `TimeframeRunner`, `SchedulerService` (policy from `TB_*`, `skip_unpublished_hours` injected into both) | `service.aclose()`, then up to 10 s more if a run is still in flight |
+| `TelegramPoller`, only with a token and chat ids | stopped first: the command in flight finishes, its offset is confirmed |
 
 - **One process per data directory.** The lock is an exclusive, non-blocking `flock`, released by the kernel even if the process dies, so there is never a stale lock. A second process on the same volume logs one `ERROR` naming the lock file and exits (`CLAUDE.md` rule 7).
 - **A failed start never yields.** Whatever was already built is closed in reverse order and the exception propagates, so uvicorn exits non-zero, the container never becomes healthy and the deploy rolls back.

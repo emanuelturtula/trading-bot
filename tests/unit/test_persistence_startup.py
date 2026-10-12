@@ -111,6 +111,10 @@ def test_health_is_unchanged_and_touches_no_connection(tmp_path: Path) -> None:
         statements.append(statement)
 
     with TestClient(app) as client:
+        # Since spec 017 the scheduler runs in the same process and its startup catch-up may be
+        # reading the database right now: stop it first so only ``/health`` is observed.
+        assert client.portal is not None
+        client.portal.call(app.state.runtime.scheduler.aclose)
         engine = app.state.database.engine
         event.listen(engine, "before_cursor_execute", record_statement)
         event.listen(engine.pool, "checkout", lambda *args: checkouts.append(args))

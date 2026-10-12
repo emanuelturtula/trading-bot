@@ -16,7 +16,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.fixtures.calendars import nyse_test_calendar
-from tests.fixtures.runtime import ClosableFakeProvider, RecordingSender, offline_runtime
+from tests.fixtures.runtime import (
+    ClosableFakeProvider,
+    FakeUpdateSource,
+    RecordingSender,
+    offline_runtime,
+)
 from trading_bot import runtime as runtime_module
 from trading_bot.config import Settings
 from trading_bot.domain.market_calendar.sessions import MarketCalendar
@@ -59,6 +64,11 @@ class Recorded:
                 events.append("notifier")
                 await super().aclose()
 
+        class Source(FakeUpdateSource):
+            async def aclose(self) -> None:
+                events.append("poller")
+                await super().aclose()
+
         def build_provider(calendar: MarketCalendar, cache_dir: Path) -> Provider:
             provider = Provider(calendar=calendar, cache_dir=cache_dir)
             self.providers.append(provider)
@@ -74,6 +84,7 @@ class Recorded:
             build_calendar=nyse_test_calendar,
             build_provider=build_provider,
             build_sender=build_sender,
+            build_update_source=lambda token: Source(),
         )
 
 
@@ -109,6 +120,8 @@ def test_start_builds_everything_and_close_undoes_it_in_reverse(
         await runtime.start()
         assert runtime.scheduler.running
         assert isinstance(runtime.notifier, TelegramNotifier)
+        assert runtime.poller is not None
+        assert runtime.poller.running
         assert (tmp_path / LOCK_FILENAME).exists()
         cache_dir = recorded.providers[0].cache_dir
         assert cache_dir.is_dir()
@@ -120,7 +133,7 @@ def test_start_builds_everything_and_close_undoes_it_in_reverse(
 
     asyncio.run(scenario())
 
-    assert events == ["scheduler", "notifier", "provider", "lock"]
+    assert events == ["poller", "scheduler", "notifier", "provider", "lock"]
     assert recorded.providers[0].closed
     assert recorded.senders[0].closed
 
@@ -141,6 +154,7 @@ def test_without_telegram_configured_signals_are_only_logged(
         await runtime.start()
         try:
             assert isinstance(runtime.notifier, LogNotifier)
+            assert runtime.poller is None  # no token or no chat: nobody to answer (AC11)
         finally:
             await runtime.aclose()
 

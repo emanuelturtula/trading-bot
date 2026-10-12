@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, tzinfo
 from pathlib import Path
@@ -214,6 +214,8 @@ class Dashboard:
             "csrf": self._signer.csrf_token(nonce) if nonce and self._credentials else "",
             "signed_in": nonce is not None,
             "flash": _read_flash(request),
+            "active": _section(request.url.path),
+            "zone": self._settings.display_timezone,
         }
         values.update(context or {})
         response = self._templates.TemplateResponse(
@@ -362,18 +364,37 @@ class Dashboard:
     # --- overview and pause -----------------------------------------------------------------
 
     async def overview(self, request: Request, nonce: str) -> Response:
+        next_runs = dict(_next_fire_times(request))
+
         def read(repositories: DashboardRepositories) -> dict[str, object]:
             state = repositories.state.load()
             tickers = repositories.tickers.list_all()
             rules = repositories.rules.list_all()
+            # What the engine evaluates: enabled tickers with at least one enabled rule.
+            active: dict[Timeframe, int] = dict.fromkeys(Timeframe, 0)
+            for ticker in tickers:
+                if ticker.enabled and repositories.assignments.rules_for_ticker(
+                    ticker.id, enabled_only=True
+                ):
+                    active[ticker.timeframe] += 1
+            enabled_rules = [rule for rule in rules if rule.enabled]
             return {
                 "paused_since": state.paused_since,
                 "tickers_total": len(tickers),
                 "tickers_enabled": sum(1 for ticker in tickers if ticker.enabled),
                 "rules_total": len(rules),
-                "rules_enabled": sum(1 for rule in rules if rule.enabled),
-                "runs": [
-                    (timeframe.value, run.scheduled_at if run else None)
+                "rules_enabled": len(enabled_rules),
+                "evaluated": sum(active.values()),
+                "timeframes": [
+                    {
+                        "code": timeframe.value,
+                        "evaluated": active[timeframe],
+                        "rules": sum(
+                            1 for rule in enabled_rules if rule.rule.timeframe is timeframe
+                        ),
+                        "last": run.scheduled_at if run else None,
+                        "next": next_runs.get(timeframe),
+                    }
                     for timeframe in Timeframe
                     for run in (state.last_run(timeframe),)
                 ],
@@ -403,7 +424,7 @@ class Dashboard:
     # --- tickers ----------------------------------------------------------------------------
 
     async def tickers_page(self, request: Request, nonce: str) -> Response:
-        def read(repositories: DashboardRepositories) -> list[dict[str, object]]:
+        def read(repositories: DashboardRepositories) -> dict[str, object]:
             rows: list[dict[str, object]] = []
             for ticker in repositories.tickers.list_all():
                 assigned = repositories.assignments.rules_for_ticker(ticker.id)
@@ -414,10 +435,18 @@ class Dashboard:
                         "enabled_rules": sum(1 for rule in assigned if rule.enabled),
                     }
                 )
-            return rows
+            enabled = repositories.rules.list_enabled()
+            # Each option says how many enabled rules a new ticker of that timeframe gets (#3).
+            options = [
+                {
+                    "code": timeframe.value,
+                    "rules": sum(1 for rule in enabled if rule.rule.timeframe is timeframe),
+                }
+                for timeframe in Timeframe
+            ]
+            return {"rows": rows, "options": options}
 
-        rows = await self._work(request, read)
-        context = {"rows": rows, "timeframes": [timeframe.value for timeframe in Timeframe]}
+        context = await self._work(request, read)
         return self._render(request, "tickers.html", context, nonce=nonce)
 
     async def add_ticker(self, request: Request, nonce: str, form: Form) -> Response:
@@ -498,13 +527,14 @@ class Dashboard:
         return _redirect(f"/tickers/{ticker_id}", flash=message)
 
     async def enable_ticker(self, request: Request, nonce: str, form: Form) -> Response:
-        return await self._switch_ticker(request, enabled=True)
+        return await self._switch_ticker(request, form, enabled=True)
 
     async def disable_ticker(self, request: Request, nonce: str, form: Form) -> Response:
-        return await self._switch_ticker(request, enabled=False)
+        return await self._switch_ticker(request, form, enabled=False)
 
-    async def _switch_ticker(self, request: Request, *, enabled: bool) -> Response:
+    async def _switch_ticker(self, request: Request, form: Form, *, enabled: bool) -> Response:
         ticker_id = _path_id(request, "ticker_id")
+        back = f"/tickers/{ticker_id}" if _field(form, "back") == "ticker" else "/tickers"
 
         def work(repositories: DashboardRepositories) -> str:
             ticker = _ticker(repositories, ticker_id)
@@ -518,7 +548,7 @@ class Dashboard:
                 return f"{subject} was already stopped."
             return f"Stopped watching {subject}. Its signal history is kept."
 
-        return _redirect("/tickers", flash=await self._work(request, work))
+        return _redirect(back, flash=await self._work(request, work))
 
     async def delete_ticker_page(self, request: Request, nonce: str) -> Response:
         ticker_id = _path_id(request, "ticker_id")
@@ -573,6 +603,10 @@ class Dashboard:
             return self._rule_form(
                 request, nonce, document=document, enabled=enabled, assign=assign, error=error
             )
+        if _field(form, "intent") == "check":
+            return self._rule_form(
+                request, nonce, document=document, enabled=enabled, assign=assign, checked=True
+            )
 
         def work(repositories: DashboardRepositories) -> str:
             stored = repositories.rules.add(rule, enabled=enabled)
@@ -605,20 +639,33 @@ class Dashboard:
         rule_id = _path_id(request, "rule_id")
         stored = await self._work(request, lambda repositories: _rule(repositories, rule_id))
         return self._rule_form(
-            request, nonce, document=_pretty(dump_rule(stored.rule)), stored=stored
+            request,
+            nonce,
+            document=_pretty(dump_rule(stored.rule)),
+            stored=stored,
+            enabled=stored.enabled,
         )
 
     async def update_rule(self, request: Request, nonce: str, form: Form) -> Response:
         rule_id = _path_id(request, "rule_id")
         stored = await self._work(request, lambda repositories: _rule(repositories, rule_id))
         document = _field(form, "document")
+        enabled = _field(form, "enabled") == "on"
         try:
             rule = parse_rule(document)
         except RuleValidationError as error:
-            return self._rule_form(request, nonce, document=document, stored=stored, error=error)
+            return self._rule_form(
+                request, nonce, document=document, stored=stored, enabled=enabled, error=error
+            )
+        if _field(form, "intent") == "check":
+            return self._rule_form(
+                request, nonce, document=document, stored=stored, enabled=enabled, checked=True
+            )
 
         def work(repositories: DashboardRepositories) -> StoredRule:
-            return repositories.rules.replace(_rule(repositories, rule_id).id, rule)
+            return repositories.rules.replace(
+                _rule(repositories, rule_id).id, rule, enabled=enabled
+            )
 
         problem: str | None = None
         try:
@@ -633,9 +680,15 @@ class Dashboard:
             )
         if problem is not None:
             return self._rule_form(
-                request, nonce, document=document, stored=stored, problems=[problem]
+                request,
+                nonce,
+                document=document,
+                stored=stored,
+                enabled=enabled,
+                problems=[problem],
             )
-        return _redirect("/rules", flash=f"Saved rule {updated.name}.")
+        state = "enabled" if updated.enabled else "disabled"
+        return _redirect("/rules", flash=f"Saved rule {updated.name} ({state}).")
 
     async def enable_rule(self, request: Request, nonce: str, form: Form) -> Response:
         return await self._switch_rule(request, enabled=True)
@@ -693,6 +746,7 @@ class Dashboard:
         assign: bool = False,
         error: RuleValidationError | None = None,
         problems: list[str] | None = None,
+        checked: bool = False,
     ) -> HTMLResponse:
         listed = list(problems or [])
         if error is not None:
@@ -705,6 +759,7 @@ class Dashboard:
             "enabled": enabled,
             "assign": assign,
             "problems": listed,
+            "checked": checked,
             "catalog": REGISTRY.describe(),
             "operators": [operator.value for operator in Operator],
             "prices": [price.value for price in PriceField],
@@ -805,6 +860,21 @@ def _read_flash(request: Request) -> dict[str, str] | None:
     if level not in ("ok", "error") or not text:
         return None
     return {"level": level, "text": text}
+
+
+def _section(path: str) -> str:
+    """The navigation entry a page belongs to, for ``aria-current`` (#12)."""
+    for section in ("tickers", "rules"):
+        if path.startswith(f"{PREFIX}/{section}"):
+            return section
+    return "overview" if path == PREFIX + "/" else ""
+
+
+def _next_fire_times(request: Request) -> Sequence[tuple[Timeframe, datetime | None]]:
+    try:
+        return request.app.state.runtime.scheduler.next_fire_times()  # type: ignore[no-any-return]
+    except (AttributeError, RuntimeError):  # the runtime is not started
+        return ()
 
 
 def _path_id(request: Request, name: str) -> int:

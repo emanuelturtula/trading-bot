@@ -113,9 +113,17 @@ def signed_in(browser: Browser) -> Browser:
     return browser
 
 
-def add_rule(browser: Browser, name: str, *, timeframe: str = "1d", enabled: bool = True) -> int:
+def add_rule(
+    browser: Browser,
+    name: str,
+    *,
+    timeframe: str = "1d",
+    enabled: bool = True,
+    signal: str = "BUY",
+) -> int:
     def work(repositories: DashboardRepositories) -> int:
-        stored = repositories.rules.add(sample_rule(name, timeframe=timeframe), enabled=enabled)
+        rule = sample_rule(name, timeframe=timeframe, signal=signal)
+        stored = repositories.rules.add(rule, enabled=enabled)
         return stored.id
 
     result: int = browser.repositories(work)
@@ -262,7 +270,7 @@ def test_login_sets_a_strict_http_only_session(browser: Browser) -> None:
     assert "secure" not in cookie  # plain HTTP on the LAN or the tailnet
     page = browser.get("/dashboard/")
     assert page.status_code == 200
-    assert "Running." in page.text
+    assert "Running, with nothing to evaluate" in page.text
     assert browser.get("/dashboard/login").status_code == 303  # already signed in
 
 
@@ -342,7 +350,7 @@ def test_no_secret_reaches_a_page(signed_in: Browser) -> None:
 def test_pause_and_resume(signed_in: Browser) -> None:
     page = signed_in.follow(signed_in.post("/dashboard/pause"))
     assert "Paused. No candle is evaluated" in page.text
-    assert "Paused</span> since" in page.text
+    assert 'class="badge off">Paused</span> since' in page.text
     assert signed_in.repositories(lambda repositories: repositories.state.load().paused)
 
     again = signed_in.follow(signed_in.post("/dashboard/pause"))
@@ -350,7 +358,7 @@ def test_pause_and_resume(signed_in: Browser) -> None:
 
     resumed = signed_in.follow(signed_in.post("/dashboard/resume"))
     assert "Resumed." in resumed.text
-    assert "Running." in resumed.text
+    assert "Running, with nothing to evaluate" in resumed.text
     assert "The bot was not paused." in signed_in.follow(signed_in.post("/dashboard/resume")).text
 
 
@@ -362,14 +370,29 @@ def test_overview_counts(signed_in: Browser) -> None:
     text = signed_in.get("/dashboard/").text
 
     assert "Tickers watched" in text
-    assert re.search(r"1 <span[^>]*>of 1</span>", text)
-    assert re.search(r"1 <span[^>]*>of 2</span>", text)
-    # The startup catch-up may already have evaluated a timeframe, depending on the wall clock
-    # (market hours), so each row shows either "never" or a local timestamp.
-    rows = re.findall(
-        r"<tr><td>(1h|4h|1d)</td><td>(never|\d{4}-\d\d-\d\d \d\d:\d\d \S+)</td></tr>", text
-    )
-    assert [timeframe for timeframe, _ in rows] == ["1h", "4h", "1d"]
+    assert re.search(r'<div class="value">1</div>\s*<div class="muted">none stopped</div>', text)
+    assert re.search(r'<div class="value">1</div>\s*<div class="muted">1 disabled</div>', text)
+    assert "Running, with nothing to evaluate" in text  # the ticker has no rule assigned
+
+
+def test_overview_says_what_is_evaluated(signed_in: Browser) -> None:
+    ticker_id = add_ticker(signed_in)
+    rule_id = add_rule(signed_in, "Daily")
+    signed_in.repositories(lambda repositories: repositories.assignments.assign(ticker_id, rule_id))
+
+    text = signed_in.get("/dashboard/").text
+
+    assert 'class="badge on">Running</span> 1 ticker evaluated' in text
+    assert re.search(r"<td>1d</td>\s*<td>1 ticker</td>", text)
+    assert re.search(r"<td>1h</td>\s*<td><span class=\"muted\">nothing</span></td>", text)
+    assert "Next run" in text
+
+
+def test_overview_without_rules_points_to_them(signed_in: Browser) -> None:
+    text = signed_in.get("/dashboard/").text
+
+    assert "Running, with nothing to evaluate" in text
+    assert "Enable or create a rule" in text
 
 
 # --- tickers ---------------------------------------------------------------------------------
@@ -584,15 +607,98 @@ def test_edit_a_rule(signed_in: Browser) -> None:
     assert page.status_code == 200
     assert "&#34;Before&#34;" in page.text or "&quot;Before&quot;" in page.text
 
+    assert 'name="enabled" checked' in page.text  # the stored flag is offered as is
+
     saved = signed_in.follow(
-        signed_in.post(f"/dashboard/rules/{rule_id}", {"document": rule_document("After")})
+        signed_in.post(
+            f"/dashboard/rules/{rule_id}", {"document": rule_document("After"), "enabled": "on"}
+        )
     )
 
-    assert "Saved rule After." in saved.text
+    assert "Saved rule After (enabled)." in saved.text
     names = signed_in.repositories(
         lambda repositories: [(rule.name, rule.enabled) for rule in repositories.rules.list_all()]
     )
-    assert names == [("After", True)]  # the flag is kept
+    assert names == [("After", True)]
+
+    disabled = signed_in.follow(
+        signed_in.post(f"/dashboard/rules/{rule_id}", {"document": rule_document("After")})
+    )
+    assert "Saved rule After (disabled)." in disabled.text
+
+
+@pytest.mark.parametrize("path", ["/dashboard/rules", "/dashboard/rules/{id}"])
+def test_check_without_saving(signed_in: Browser, path: str) -> None:
+    rule_id = add_rule(signed_in, "Existing")
+    target = path.format(id=rule_id)
+
+    valid = signed_in.post(
+        target, {"document": rule_document("Checked"), "intent": "check", "enabled": "on"}
+    )
+    invalid = signed_in.post(target, {"document": "{}", "intent": "check"})
+
+    assert valid.status_code == 200
+    assert "The rule is valid. Nothing was saved yet." in valid.text
+    assert 'name="enabled" checked' in valid.text
+    assert invalid.status_code == 422
+    names = signed_in.repositories(
+        lambda repositories: [rule.name for rule in repositories.rules.list_all()]
+    )
+    assert names == ["Existing"]
+
+
+def test_navigation_marks_the_current_page(signed_in: Browser) -> None:
+    rule_id = add_rule(signed_in, "Rule")
+    expected = {
+        "/dashboard/": "Overview",
+        "/dashboard/tickers": "Tickers",
+        "/dashboard/rules": "Rules",
+        f"/dashboard/rules/{rule_id}": "Rules",
+    }
+    for path, label in expected.items():
+        text = signed_in.get(path).text
+        assert re.findall(r'aria-current="page">(\w+)<', text) == [label], path
+
+
+def test_layout_details(signed_in: Browser) -> None:
+    text = signed_in.get("/dashboard/tickers").text
+
+    assert 'rel="icon" href="data:image/svg+xml' in text
+    assert "scrollbar-gutter: stable" in text
+    assert "<footer>Signals only" in text
+    assert "Times are shown in America/Argentina/Buenos_Aires" in text
+    assert '<label class="field" for="symbol">Symbol</label>' in text
+    assert "for example <code>AAPL</code>" in text  # the empty state invites a first ticker
+
+
+def test_timeframe_options_say_how_many_rules_a_new_ticker_gets(signed_in: Browser) -> None:
+    add_rule(signed_in, "Daily one")
+    add_rule(signed_in, "Daily two")
+    add_rule(signed_in, "Daily off", enabled=False)
+
+    text = signed_in.get("/dashboard/tickers").text
+
+    assert '<option value="1d" selected>1d · 2 enabled rules</option>' in text
+    assert '<option value="1h" >1h · no enabled rule</option>' in text
+
+
+def test_state_badges_switch_and_sides_are_colored(signed_in: Browser) -> None:
+    ticker_id = add_ticker(signed_in)
+    add_rule(signed_in, "Buyer")
+    add_rule(signed_in, "Seller", signal="SELL", enabled=False)
+
+    rules = signed_in.get("/dashboard/rules").text
+    assert '<span class="side-buy">BUY</span>' in rules
+    assert '<span class="side-sell">SELL</span>' in rules
+    assert 'class="badge on"' in rules
+    assert 'class="badge off"' in rules
+    assert 'class="button danger"' in rules
+
+    page = signed_in.follow(
+        signed_in.post(f"/dashboard/tickers/{ticker_id}/disable", {"back": "ticker"})
+    )
+    assert "Stopped watching AAPL 1d." in page.text
+    assert ">Stopped</button>" in page.text  # back on the ticker's own page
 
 
 def test_an_assigned_rule_cannot_change_timeframe(signed_in: Browser) -> None:
@@ -673,6 +779,20 @@ def test_the_dashboard_shows_beta_outside_production(tmp_path: Path) -> None:
         assert "[BETA]" in client.get("/dashboard/login").text
     with TestClient(make_app(tmp_path, environment="prod")) as client:
         assert "[BETA]" not in client.get("/dashboard/login").text
+
+
+def test_opening_a_delete_link_never_deletes(signed_in: Browser) -> None:
+    ticker_id = add_ticker(signed_in)
+    rule_id = add_rule(signed_in, "Kept")
+
+    for path in (f"/dashboard/tickers/{ticker_id}/delete", f"/dashboard/rules/{rule_id}/delete"):
+        page = signed_in.get(path)
+        assert page.status_code == 200
+        assert 'method="post"' in page.text
+        assert 'name="csrf"' in page.text
+
+    assert len(signed_in.repositories(lambda repositories: repositories.tickers.list_all())) == 1
+    assert len(signed_in.repositories(lambda repositories: repositories.rules.list_all())) == 1
 
 
 # --- behind a TLS-terminating tunnel (spec 021) ----------------------------------------------

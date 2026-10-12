@@ -462,7 +462,7 @@ class Dashboard:
             path=PREFIX,
             httponly=True,
             samesite="strict",
-            secure=request.url.scheme == "https",
+            secure=_is_https(request),
         )
         return response
 
@@ -1097,6 +1097,19 @@ def install_dashboard(app: FastAPI, settings: Settings) -> None:
 
 
 # --- helpers ---------------------------------------------------------------------------------
+
+
+def _is_https(request: Request) -> bool:
+    """Whether the browser reached the dashboard over HTTPS (spec 021).
+
+    Behind a tunnel that terminates TLS (Cloudflare), the app itself sees plain HTTP, but the
+    browser still sends the scheme it used in the ``Origin`` header of every ``POST``. An
+    ``Origin`` that is absent, ``null`` or not HTTP(S) falls back to the request URL.
+    """
+    scheme = urlsplit(request.headers.get("origin", "")).scheme.casefold()
+    if scheme not in ("http", "https"):
+        scheme = request.url.scheme
+    return scheme == "https"
 
 
 def _redirect(path: str, *, flash: str | None = None, error: bool = False) -> RedirectResponse:

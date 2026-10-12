@@ -739,3 +739,38 @@ def test_opening_a_delete_link_never_deletes(signed_in: Browser) -> None:
 
     assert len(signed_in.repositories(lambda repositories: repositories.tickers.list_all())) == 1
     assert len(signed_in.repositories(lambda repositories: repositories.rules.list_all())) == 1
+
+
+# --- behind a TLS-terminating tunnel (spec 021) ----------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("origin", "secure"),
+    [
+        ("https://dashboard.example", True),  # through the tunnel: the browser used HTTPS
+        ("http://192.0.2.10:8081", False),  # plain HTTP on the LAN or the tailnet
+        ("null", False),  # opaque origin: fall back to the request URL (plain HTTP here)
+        (None, False),  # no Origin header: same fallback
+    ],
+)
+def test_session_cookie_is_secure_when_the_browser_used_https(
+    browser: Browser, origin: str | None, secure: bool
+) -> None:
+    headers = {"origin": origin} if origin is not None else {}
+
+    response = browser.client.post("/dashboard/login", data={"password": PASSWORD}, headers=headers)
+
+    assert response.status_code == 303
+    cookie = response.headers["set-cookie"].lower()
+    assert SESSION_COOKIE in cookie
+    assert ("; secure" in cookie) is secure
+
+
+def test_session_cookie_is_secure_when_the_app_itself_serves_https(tmp_path: Path) -> None:
+    with TestClient(
+        make_app(tmp_path), base_url="https://testserver", follow_redirects=False
+    ) as client:
+        response = client.post("/dashboard/login", data={"password": PASSWORD})
+
+    assert response.status_code == 303
+    assert "; secure" in response.headers["set-cookie"].lower()

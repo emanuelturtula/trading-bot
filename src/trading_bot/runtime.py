@@ -104,6 +104,7 @@ class Runtime:
         self._stack: AsyncExitStack | None = None
         self._database: Database | None = None
         self._notifier: RuntimeNotifier | None = None
+        self._provider: ClosableProvider | None = None
         self._service: SchedulerService | None = None
         self._poller: TelegramPoller | None = None
         self._logger = logging.getLogger(_LOGGER_NAME)
@@ -113,6 +114,12 @@ class Runtime:
         if self._database is None:
             raise RuntimeError("the runtime is not started")
         return self._database
+
+    @property
+    def provider(self) -> MarketDataProvider:
+        if self._provider is None:
+            raise RuntimeError("the runtime is not started")
+        return self._provider
 
     @property
     def notifier(self) -> RuntimeNotifier:
@@ -155,6 +162,7 @@ class Runtime:
         await stack.aclose()
         self._database = None
         self._notifier = None
+        self._provider = None
         self._service = None
         self._poller = None
 
@@ -180,6 +188,7 @@ class Runtime:
         self._push(stack, "provider cache", _sync(lambda: shutil.rmtree(cache_dir, True)))
         provider = self._build_provider(calendar, cache_dir)
         self._push(stack, "provider", provider.aclose)
+        self._provider = provider
 
         notifier = self._make_notifier(calendar)
         self._push(stack, "notifier", notifier.aclose)

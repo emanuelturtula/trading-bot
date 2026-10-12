@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Error{% endblock %}
+{% block content %}
+<h1>Something is not right</h1>
+<div class="panel"><p>{{ message }}</p><p><a href="{{ prefix }}/">Back to the overview</a></p></div>
+{% endblock %}

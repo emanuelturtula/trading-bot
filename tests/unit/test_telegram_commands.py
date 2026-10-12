@@ -334,7 +334,9 @@ def test_removing_twice_says_it_was_already_stopped(bot: Harness) -> None:
 
 def test_list_and_rules_when_empty(bot: Harness) -> None:
     assert bot.reply("/list") == "No symbol is watched yet. Try /add AAPL"
-    assert bot.reply("/rules") == "No rule is stored yet. Rules are loaded with the management CLI."
+    assert bot.reply("/rules") == (
+        "No rule is stored yet. Create one from the dashboard or the management CLI."
+    )
 
 
 def test_list_shows_state_and_enabled_rules(bot: Harness, database: Database) -> None:

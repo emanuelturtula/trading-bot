@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Overview{% endblock %}
+{% block content %}
+<h1>Overview</h1>
+<div class="panel">
+  {% if paused_since %}
+  <p><span class="off">Paused</span> since {{ paused_since | local }}. No candle is evaluated and no signal is sent.</p>
+  <form class="inline" method="post" action="{{ prefix }}/resume">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="primary">Resume</button>
+  </form>
+  {% else %}
+  <p><span class="on">Running.</span> Rules are evaluated at every candle close.</p>
+  <form class="inline" method="post" action="{{ prefix }}/pause">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">Pause</button>
+  </form>
+  {% endif %}
+</div>
+<div class="stats">
+  <a class="panel stat" href="{{ prefix }}/tickers" style="color:inherit;text-decoration:none">
+    <div class="muted">Tickers watched</div>
+    <div class="value">{{ tickers_enabled }} <span class="muted" style="font-size:14px">of {{ tickers_total }}</span></div>
+  </a>
+  <a class="panel stat" href="{{ prefix }}/rules" style="color:inherit;text-decoration:none">
+    <div class="muted">Rules enabled</div>
+    <div class="value">{{ rules_enabled }} <span class="muted" style="font-size:14px">of {{ rules_total }}</span></div>
+  </a>
+</div>
+<h2>Last completed run</h2>
+<div class="panel table-wrap">
+  <table>
+    <tr><th>Timeframe</th><th>Last candle evaluated</th></tr>
+    {% for timeframe, when in runs %}
+    <tr><td>{{ timeframe }}</td><td>{{ when | local }}</td></tr>
+    {% endfor %}
+  </table>
+</div>
+<p class="muted">Configuration changes take effect at the next candle close.</p>
+{% endblock %}

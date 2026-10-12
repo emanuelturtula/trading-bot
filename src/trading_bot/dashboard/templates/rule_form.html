@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit rule' if stored else 'New rule' }}{% endblock %}
+{% block content %}
+<h1>{% if stored %}Edit rule <span class="muted">{{ stored.name }}</span>{% else %}New rule{% endif %}</h1>
+<div class="split">
+  <div class="panel">
+    {% if problems %}
+    <p><strong>The rule was not saved:</strong></p>
+    <ul class="problems">{% for problem in problems %}<li>{{ problem }}</li>{% endfor %}</ul>
+    {% endif %}
+    <form method="post" action="{{ prefix }}/rules{% if stored %}/{{ stored.id }}{% endif %}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <textarea name="document" spellcheck="false" aria-label="Rule document (JSON)">{{ document }}</textarea>
+      {% if not stored %}
+      <p class="row">
+        <label><input type="checkbox" name="enabled" {% if enabled %}checked{% endif %}> Enabled</label>
+        <label><input type="checkbox" name="assign" {% if assign %}checked{% endif %}> Assign to every ticker of its timeframe</label>
+      </p>
+      {% else %}
+      <p class="muted">The rule is {{ 'enabled' if stored.enabled else 'disabled' }}; switch it from the rules list.</p>
+      {% endif %}
+      <div class="actions">
+        <button type="submit" class="primary">{{ 'Save' if stored else 'Create' }}</button>
+        <a class="button" href="{{ prefix }}/rules">Cancel</a>
+      </div>
+    </form>
+  </div>
+  <div class="panel">
+    <h2 style="margin-top:0">How a rule is written</h2>
+    <p class="muted">A rule fires on a closed candle when its conditions hold. <code>conditions</code> is
+    <code>{"all": [...]}</code> or <code>{"any": [...]}</code>, one level of nesting allowed. Each condition is
+    <code>{"left": operand, "op": operator, "right": operand}</code>.</p>
+    <dl class="catalog">
+      <dt>Fields</dt>
+      <dd><code>signal</code>: BUY or SELL · <code>timeframe</code>: {{ timeframes | join(', ') }} · <code>cooldown_bars</code>: candles to stay quiet after a signal</dd>
+      <dt>Operators</dt>
+      <dd>{% for operator in operators %}<code>{{ operator }}</code>{{ ', ' if not loop.last }}{% endfor %}</dd>
+      <dt>Operands</dt>
+      <dd><code>{"price": "close"}</code> ({{ prices | join(', ') }}), <code>{"value": 30}</code>,
+      or <code>{"indicator": "rsi", "params": {"length": 14}, "output": "value"}</code></dd>
+    </dl>
+    <h2>Indicators</h2>
+    <dl class="catalog">
+      {% for indicator in catalog %}
+      <dt><code>{{ indicator.name }}</code> · {{ indicator.label }}</dt>
+      <dd>{{ indicator.description }}<br>
+        Params: {% for param in indicator.params %}<code>{{ param.name }}</code> {{ param.default }} [{{ param.min }}–{{ param.max }}]{{ ', ' if not loop.last }}{% else %}none{% endfor %}<br>
+        Outputs: {% for output in indicator.outputs %}<code>{{ output.name }}</code>{{ ', ' if not loop.last }}{% endfor %}</dd>
+      {% endfor %}
+    </dl>
+  </div>
+</div>
+{% endblock %}

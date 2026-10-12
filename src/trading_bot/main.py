@@ -14,6 +14,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from trading_bot.config import Environment, Settings, get_settings
+from trading_bot.dashboard.routes import install_dashboard
 from trading_bot.logging_setup import configure_logging
 from trading_bot.runtime import Runtime
 
@@ -62,4 +63,5 @@ def create_app(
             status="ok", version=settings.version, environment=settings.environment
         )
 
+    install_dashboard(app, settings)  # spec 020: disabled (503) unless both secrets are set
     return app

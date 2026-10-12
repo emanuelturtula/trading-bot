@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Rules{% endblock %}
+{% block content %}
+<h1>Rules</h1>
+<p><a class="button primary" href="{{ prefix }}/rules/new">New rule</a></p>
+<div class="panel table-wrap">
+  {% if rows %}
+  <table>
+    <tr><th>Name</th><th>Timeframe</th><th>Side</th><th>State</th><th>Tickers</th><th></th></tr>
+    {% for row in rows %}
+    {% set stored = row.rule %}
+    <tr>
+      <td><a href="{{ prefix }}/rules/{{ stored.id }}">{{ stored.name }}</a></td>
+      <td>{{ stored.rule.timeframe.value }}</td>
+      <td>{{ stored.rule.signal.value }}</td>
+      <td>{% if stored.enabled %}<span class="on">on</span>{% else %}<span class="off">off</span>{% endif %}</td>
+      <td>{{ row.tickers }}</td>
+      <td>
+        <div class="actions">
+          <a class="button" href="{{ prefix }}/rules/{{ stored.id }}">Edit</a>
+          <form class="inline" method="post" action="{{ prefix }}/rules/{{ stored.id }}/{{ 'disable' if stored.enabled else 'enable' }}">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit">{{ 'Disable' if stored.enabled else 'Enable' }}</button>
+          </form>
+          <a class="button" href="{{ prefix }}/rules/{{ stored.id }}/delete">Delete</a>
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No rule is stored yet.</p>
+  {% endif %}
+</div>
+<p class="muted">Which tickers a rule runs on is chosen on each ticker's page.</p>
+{% endblock %}

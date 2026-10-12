@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}{{ ticker.symbol }} {{ ticker.timeframe.value }}{% endblock %}
+{% block content %}
+<h1>{{ ticker.symbol }} <span class="muted">{{ ticker.timeframe.value }}</span></h1>
+<div class="panel">
+  <p>{% if ticker.enabled %}<span class="on">Watched.</span>{% else %}<span class="off">Stopped.</span>{% endif %}
+  {{ signals }} signal{{ '' if signals == 1 else 's' }} recorded. Added {{ ticker.created_at | local }}.</p>
+</div>
+<h2>Rules evaluated on it</h2>
+<div class="panel">
+  {% if candidates %}
+  <form method="post" action="{{ prefix }}/tickers/{{ ticker.id }}/rules">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <table>
+      <tr><th></th><th>Rule</th><th>Side</th><th>State</th></tr>
+      {% for item in candidates %}
+      <tr>
+        <td><input type="checkbox" id="rule-{{ item.rule.id }}" name="rule" value="{{ item.rule.id }}" {% if item.assigned %}checked{% endif %}></td>
+        <td><label for="rule-{{ item.rule.id }}">{{ item.rule.name }}</label></td>
+        <td>{{ item.rule.rule.signal.value }}</td>
+        <td>{% if item.rule.enabled %}<span class="on">on</span>{% else %}<span class="off">off</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    <p><button type="submit" class="primary">Save</button></p>
+  </form>
+  <p class="muted">Only rules of the {{ ticker.timeframe.value }} timeframe can run on it. A disabled rule stays assigned but sends nothing.</p>
+  {% else %}
+  <p class="muted">There is no {{ ticker.timeframe.value }} rule yet. <a href="{{ prefix }}/rules/new">Create one</a>.</p>
+  {% endif %}
+</div>
+<p><a href="{{ prefix }}/tickers">Back to the tickers</a></p>
+{% endblock %}

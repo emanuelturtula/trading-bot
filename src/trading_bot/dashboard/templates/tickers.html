@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Tickers{% endblock %}
+{% block content %}
+<h1>Tickers</h1>
+<div class="panel">
+  <form method="post" action="{{ prefix }}/tickers" class="row">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="text" name="symbol" placeholder="Symbol, e.g. AAPL" maxlength="32" required>
+    <select name="timeframe">
+      {% for timeframe in timeframes %}<option value="{{ timeframe }}" {% if timeframe == "1d" %}selected{% endif %}>{{ timeframe }}</option>{% endfor %}
+    </select>
+    <button type="submit" class="primary">Watch</button>
+  </form>
+  <p class="muted" style="margin:8px 0 0">The symbol is checked with the market data provider and gets every rule of that timeframe, as Telegram <code>/add</code> does.</p>
+</div>
+<div class="panel table-wrap">
+  {% if rows %}
+  <table>
+    <tr><th>Symbol</th><th>Timeframe</th><th>State</th><th>Rules</th><th></th></tr>
+    {% for row in rows %}
+    {% set ticker = row.ticker %}
+    <tr>
+      <td><a href="{{ prefix }}/tickers/{{ ticker.id }}">{{ ticker.symbol }}</a></td>
+      <td>{{ ticker.timeframe.value }}</td>
+      <td>{% if ticker.enabled %}<span class="on">on</span>{% else %}<span class="off">off</span>{% endif %}</td>
+      <td>{{ row.assigned }} <span class="muted">({{ row.enabled_rules }} enabled)</span></td>
+      <td>
+        <div class="actions">
+          <a class="button" href="{{ prefix }}/tickers/{{ ticker.id }}">Rules</a>
+          <form class="inline" method="post" action="{{ prefix }}/tickers/{{ ticker.id }}/{{ 'disable' if ticker.enabled else 'enable' }}">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit">{{ 'Stop' if ticker.enabled else 'Watch again' }}</button>
+          </form>
+          <a class="button" href="{{ prefix }}/tickers/{{ ticker.id }}/delete">Delete</a>
+        </div>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No symbol is watched yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

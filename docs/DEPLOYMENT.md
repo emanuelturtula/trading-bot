@@ -120,8 +120,8 @@ cat > ~/trading-bot/secrets.env <<'EOF'
 TB_TELEGRAM_BOT_TOKEN=<bot token>
 TB_TELEGRAM_ALLOWED_CHAT_IDS=<chat id>
 #TB_DISPLAY_TIMEZONE=<IANA zone, default Europe/Madrid>
-TB_DASHBOARD_PASSWORD_HASH=<hash>
-TB_SESSION_SECRET=<long random value>
+TB_DASHBOARD_PASSWORD_HASH=<hash, see "Dashboard" below>
+TB_SESSION_SECRET=<long random value, see "Dashboard" below>
 EOF
 chmod 600 ~/trading-bot/secrets.env
 ```
@@ -141,6 +141,21 @@ TB_PORT=8081 TB_ENVIRONMENT=prod TB_SECRETS_ENV_FILE="$PWD/secrets.env" \
 ```
 
 Check it in `docker compose --project-name trading-bot-prod logs app`: with a token and chat ids the startup line reads `started: environment prod, telegram notifier`. Then, from the phone, `/status` answers with the version. If it does not, the same logs show one line explaining why (`409 Conflict`, rejected token, Telegram unreachable); the bot keeps retrying on its own.
+
+#### Dashboard
+
+The configuration dashboard (spec [020](specs/020-config-dashboard.md)) is served by the bot at `http://<DEPLOY_HOST>:8081/dashboard/`. It stays disabled (every page answers `503`) until both variables are set:
+
+```sh
+# The password hash: run it in the deployed container and type the password twice (no echo)
+docker compose --project-name trading-bot-prod exec app python -m trading_bot.dashboard.password
+# The session secret: any long random value
+python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+```
+
+Put both values in `~/trading-bot/secrets.env` as `TB_DASHBOARD_PASSWORD_HASH=...` and `TB_SESSION_SECRET=...` and recreate the container as shown above. The hash contains no `$`, so it can be pasted as is. If the startup log says `dashboard disabled: ...`, it names the variable to fix and never shows its value. Changing either value logs every open session out; sessions otherwise last 7 days. After 5 wrong passwords from one device within 15 minutes, that device has to wait out the 15 minutes.
+
+The dashboard travels over plain HTTP: use it from the LAN or the tailnet only, and never forward port 8081 from the router.
 
 ### 5. Repository protection
 
@@ -186,7 +201,8 @@ uv run pre-commit install
 
 ### Managing the configuration
 
-The tickers, the rules and their assignments live in that database and are managed with
+The tickers, the rules and their assignments live in that database. Day to day they are managed
+from the [dashboard](#dashboard) or Telegram; for bulk changes and backups, use
 `python -m trading_bot.cli` inside the running container (spec
 [013](specs/013-config-repositories.md)). The examples use `-` for standard input and output, so
 no file has to be copied into the container.

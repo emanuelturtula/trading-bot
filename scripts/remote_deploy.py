@@ -24,11 +24,7 @@ from pathlib import Path
 REPOSITORY = "emanuelturtula/trading-bot"
 WORKFLOW = f"{REPOSITORY}/.github/workflows/delivery.yml"
 IMAGE_PATTERN = rf"ghcr\.io/{re.escape(REPOSITORY)}@sha256:[0-9a-f]{{64}}"
-FEATURE_REF_PATTERN = r"refs/heads/feature/[A-Za-z0-9._/-]+"
-VERSION_PATTERNS = {
-    "beta": r"v\d+\.\d+\.\d+-beta\.[0-9a-f]{7}",
-    "prod": r"v\d+\.\d+\.\d+",
-}
+VERSION_PATTERN = r"v\d+\.\d+\.\d+"
 SSH_TIMEOUT_SECONDS = 1020  # headroom for the bounded host-lock wait
 
 
@@ -53,10 +49,10 @@ def checked(value: str, pattern: str, name: str) -> str:
 
 
 def parse_request(env: Mapping[str, str]) -> Request:
-    environment = checked(env.get("DEPLOY_ENVIRONMENT", ""), r"beta|prod", "environment")
+    environment = checked(env.get("DEPLOY_ENVIRONMENT", ""), r"prod", "environment")
     revision = checked(env.get("DEPLOY_REVISION", ""), r"[0-9a-f]{40}", "revision")
     image = checked(env.get("DEPLOY_IMAGE", ""), IMAGE_PATTERN, "image")
-    version = checked(env.get("DEPLOY_VERSION", ""), VERSION_PATTERNS[environment], "version")
+    version = checked(env.get("DEPLOY_VERSION", ""), VERSION_PATTERN, "version")
     host = checked(env.get("DEPLOY_HOST", "").strip(), r"[a-zA-Z0-9][a-zA-Z0-9.-]*", "host")
     user = checked(env.get("DEPLOY_USER", "").strip(), r"[a-z_][a-z0-9_-]*", "user")
 
@@ -68,10 +64,8 @@ def parse_request(env: Mapping[str, str]) -> Request:
         or env.get("GITHUB_WORKFLOW_REF") != f"{WORKFLOW}@{ref}"
     ):
         raise ValueError("Deployments require a push to this repository's delivery workflow")
-    if environment == "prod" and ref != "refs/heads/main":
+    if ref != "refs/heads/main":
         raise ValueError("Production deploys only from main")
-    if environment == "beta" and not re.fullmatch(FEATURE_REF_PATTERN, ref):
-        raise ValueError("Beta deploys only from feature/** branches")
 
     run_number = checked(env.get("GITHUB_RUN_NUMBER", ""), r"[1-9][0-9]*", "run number")
     run_id = checked(env.get("GITHUB_RUN_ID", ""), r"[1-9][0-9]*", "run id")

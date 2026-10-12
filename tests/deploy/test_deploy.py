@@ -29,6 +29,7 @@ class FakeDocker:
         self.healthy_images = healthy_images
         self.labels = labels
         self.running: str | None = None
+        self.database = "absent"
         self.commands: list[list[str]] = []
 
     def __call__(self, args: list[str], *, env: dict[str, str] | None = None) -> str:
@@ -53,7 +54,9 @@ class FakeDocker:
                 [{"Config": {"Image": self.running}, "State": {"Health": {"Status": health}}}]
             )
         if args[:2] == ["docker", "exec"]:
-            return "absent"
+            return self.database
+        if args[:2] == ["docker", "cp"]:
+            Path(args[3]).write_bytes(b"sqlite")
         return ""
 
 
@@ -87,30 +90,57 @@ def deploy_prod(root: Path, **overrides: Any) -> Any:
     return dp.deploy(**args)
 
 
+OLD_COMPOSE = "services: {}\n"
+
+
 def seed_previous(root: Path, **overrides: Any) -> dict[str, Any]:
-    attempt = root / "prod" / "attempts" / "20260101T000000Z-previous"
-    attempt.mkdir(parents=True)
-    (attempt / "compose.yml").write_text("services: {}\n", encoding="utf-8")
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "compose.yml").write_text(OLD_COMPOSE, encoding="utf-8")
     previous: dict[str, Any] = {
         "environment": "prod",
         "image": OLD_IMAGE,
         "revision": OLD_REVISION,
         "version": "v0.1.0",
-        "compose": str(attempt / "compose.yml"),
-        "secrets_env_file": str(root / "prod" / "secrets.env"),
+        "compose": str(root / "compose.yml"),
+        "secrets_env_file": str(root / "secrets.env"),
         "status": "healthy",
-        "attempt": str(attempt),
         "delivery": {"run_number": 5, "source_run_url": RUN_URL},
     }
     previous.update(overrides)
-    dp.write_json(root / "prod" / "current.json", previous)
+    dp.write_json(root / "current.json", previous)
     return previous
+
+
+def seed_legacy(legacy: Path) -> dict[str, Any]:
+    """The ``~/trading-bot-deploy/prod`` layout of older releases."""
+    prod = legacy / "prod"
+    attempts = [prod / "attempts" / f"2026010{day}T000000Z-old" for day in (1, 2)]
+    for attempt in attempts:
+        attempt.mkdir(parents=True)
+        (attempt / "compose.yml").write_text(OLD_COMPOSE, encoding="utf-8")
+        (attempt / "database.sqlite3").write_bytes(attempt.name.encode())
+    (prod / "secrets.env").write_text("TB_SOMETHING=kept\n", encoding="utf-8")
+    manifest: dict[str, Any] = {
+        "environment": "prod",
+        "image": OLD_IMAGE,
+        "revision": OLD_REVISION,
+        "version": "v0.1.0",
+        "compose": str(attempts[-1] / "compose.yml"),
+        "secrets_env_file": str(prod / "secrets.env"),
+        "status": "healthy",
+        "attempt": str(attempts[-1]),
+        "backup": str(attempts[0] / "database.sqlite3"),
+        "delivery": {"run_number": 5, "source_run_url": RUN_URL},
+    }
+    dp.write_json(prod / "current.json", manifest)
+    return manifest
 
 
 @pytest.mark.parametrize(
     "overrides",
     [
         {"environment": "test"},
+        {"environment": "beta"},
         {"image": "ghcr.io/other/trading-bot@sha256:" + "b" * 64},
         {"image": "ghcr.io/emanuelturtula/trading-bot:latest"},
         {"revision": "main"},
@@ -146,20 +176,105 @@ def test_first_deploy_writes_current_manifest_and_uses_prod_port(
     result = deploy_prod(tmp_path)
 
     assert result["status"] == "healthy"
-    assert dp.read_json(tmp_path / "prod" / "current.json")["image"] == IMAGE
+    assert dp.read_json(tmp_path / "current.json")["image"] == IMAGE
     assert {env["TB_PORT"] for env in envs} == {"8081"}
-    assert (tmp_path / "prod" / "secrets.env").exists()
+    assert (tmp_path / "secrets.env").exists()
 
 
-def test_beta_uses_port_8082_and_project_name(
+def test_a_healthy_deploy_leaves_a_flat_root_with_backups(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    docker = FakeDocker(healthy_images={IMAGE}, labels=labels(version="v0.2.0-beta.aaaaaaa"))
+    seed_previous(tmp_path)
+    docker = FakeDocker(healthy_images={IMAGE, OLD_IMAGE}, labels=labels())
+    docker.running = OLD_IMAGE
+    docker.database = "ok"
     install(monkeypatch, docker)
-    deploy_prod(tmp_path, environment="beta", version="v0.2.0-beta.aaaaaaa")
+
+    result = deploy_prod(tmp_path)
+
+    assert {path.name for path in tmp_path.iterdir()} == {
+        "backups",
+        "compose.yml",
+        "current.json",
+        "deploy.py",
+        "secrets.env",
+    }
+    assert (tmp_path / "compose.yml").read_text(encoding="utf-8") == (
+        REPO_ROOT / "deploy" / "compose.yml"
+    ).read_text(encoding="utf-8")
+    assert (tmp_path / "deploy.py").read_bytes() == (
+        REPO_ROOT / "deploy" / "deploy.py"
+    ).read_bytes()
+    assert result["compose"] == str(tmp_path / "compose.yml")
+    assert Path(result["backup"]).parent == tmp_path / "backups"
+    assert Path(result["backup"]).is_file()
+    assert dp.read_json(tmp_path / "current.json") == result
+
+
+def test_prod_keeps_its_compose_project_so_the_data_volume_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    docker = FakeDocker(healthy_images={IMAGE}, labels=labels())
+    install(monkeypatch, docker)
+    deploy_prod(tmp_path)
     compose_calls = [c for c in docker.commands if c[:2] == ["docker", "compose"]]
-    assert all(c[3] == "trading-bot-beta" for c in compose_calls)
-    assert dp.PORTS["beta"] == "8082"
+    assert compose_calls
+    assert all(c[3] == "trading-bot-prod" for c in compose_calls)
+    assert dp.PORTS == {"prod": "8081"}
+
+
+def test_default_root_is_trading_bot_in_the_home_directory() -> None:
+    assert Path.home() / "trading-bot" == dp.DEFAULT_ROOT
+    assert Path.home() / "trading-bot-deploy" == dp.LEGACY_ROOT
+
+
+def test_legacy_state_is_copied_into_the_flat_root(tmp_path: Path) -> None:
+    legacy = tmp_path / "trading-bot-deploy"
+    root = tmp_path / "trading-bot"
+    old = seed_legacy(legacy)
+
+    assert dp.migrate_legacy_root(legacy, root) is True
+
+    assert (legacy / "prod" / "current.json").exists()  # never deleted by the deploy
+    assert (root / "secrets.env").read_text(encoding="utf-8") == "TB_SOMETHING=kept\n"
+    assert (root / "compose.yml").read_text(encoding="utf-8") == OLD_COMPOSE
+    assert sorted(p.name for p in (root / "backups").iterdir()) == [
+        "20260101T000000Z-old.sqlite3",
+        "20260102T000000Z-old.sqlite3",
+    ]
+    current = dp.read_json(root / "current.json")
+    assert current["compose"] == str(root.resolve() / "compose.yml")
+    assert current["secrets_env_file"] == str(root.resolve() / "secrets.env")
+    assert current["backup"] == str(root.resolve() / "backups" / "20260101T000000Z-old.sqlite3")
+    assert "attempt" not in current
+    kept = {"environment", "image", "revision", "version", "status", "delivery"}
+    assert {k: current[k] for k in kept} == {k: old[k] for k in kept}
+
+
+def test_migration_runs_once(tmp_path: Path) -> None:
+    legacy = tmp_path / "trading-bot-deploy"
+    root = tmp_path / "trading-bot"
+    seed_legacy(legacy)
+    assert dp.migrate_legacy_root(legacy, root) is True
+    assert dp.migrate_legacy_root(legacy, root) is False
+
+
+def test_migration_is_a_no_op_without_legacy_prod_state(tmp_path: Path) -> None:
+    root = tmp_path / "trading-bot"
+    root.mkdir()
+    (tmp_path / "trading-bot-deploy" / "beta").mkdir(parents=True)
+    assert dp.migrate_legacy_root(tmp_path / "trading-bot-deploy", root) is False
+    assert list(root.iterdir()) == []
+
+
+def test_migration_refuses_a_root_that_is_something_else(tmp_path: Path) -> None:
+    legacy = tmp_path / "trading-bot-deploy"
+    root = tmp_path / "trading-bot"
+    seed_legacy(legacy)
+    (root / ".git").mkdir(parents=True)
+    with pytest.raises(dp.DeploymentError, match="not a deploy root"):
+        dp.migrate_legacy_root(legacy, root)
+    assert not (root / "current.json").exists()
 
 
 @pytest.mark.parametrize(
@@ -188,7 +303,9 @@ def test_unhealthy_candidate_rolls_back_to_previous_deployment(
         deploy_prod(tmp_path)
 
     assert docker.running == OLD_IMAGE
-    assert dp.read_json(tmp_path / "prod" / "current.json")["image"] == OLD_IMAGE
+    assert dp.read_json(tmp_path / "current.json")["image"] == OLD_IMAGE
+    assert (tmp_path / "compose.yml").read_text(encoding="utf-8") == OLD_COMPOSE
+    assert not (tmp_path / dp.STAGED_COMPOSE).exists()
 
 
 def test_unhealthy_first_deploy_is_taken_down(
@@ -199,7 +316,8 @@ def test_unhealthy_first_deploy_is_taken_down(
     with pytest.raises(dp.DeploymentError, match="rollback=no_previous_deployment"):
         deploy_prod(tmp_path)
     assert docker.running is None
-    assert not (tmp_path / "prod" / "current.json").exists()
+    assert not (tmp_path / "current.json").exists()
+    assert not (tmp_path / dp.STAGED_COMPOSE).exists()
 
 
 @pytest.mark.parametrize(
@@ -232,32 +350,32 @@ def test_older_workflow_runs_never_replace_newer_deployments(
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
 def test_secrets_file_is_created_private_and_loose_permissions_are_refused(tmp_path: Path) -> None:
-    path = dp.prepare_secrets_env_file(tmp_path, "prod")
+    path = dp.prepare_secrets_env_file(tmp_path)
+    assert path == tmp_path / "secrets.env"
     assert path.stat().st_mode & 0o777 == 0o600
     path.chmod(0o644)
     with pytest.raises(dp.DeploymentError, match="chmod 600"):
-        dp.prepare_secrets_env_file(tmp_path, "prod")
+        dp.prepare_secrets_env_file(tmp_path)
 
 
 def test_existing_secrets_file_is_never_rewritten(tmp_path: Path) -> None:
-    path = tmp_path / "beta" / "secrets.env"
-    path.parent.mkdir(parents=True)
+    path = tmp_path / "secrets.env"
     path.write_text("TB_SOMETHING=kept\n", encoding="utf-8")
     if os.name == "posix":
         path.chmod(0o600)
-    dp.prepare_secrets_env_file(tmp_path, "beta")
+    dp.prepare_secrets_env_file(tmp_path)
     assert path.read_text(encoding="utf-8") == "TB_SOMETHING=kept\n"
 
 
-def test_old_attempts_are_pruned_but_protected_ones_are_kept(tmp_path: Path) -> None:
-    attempts = tmp_path / "attempts"
+def test_only_the_newest_backups_are_kept(tmp_path: Path) -> None:
     for index in range(15):
-        (attempts / f"2026010{index:02d}").mkdir(parents=True)
-    protected = str(attempts / "202601000")
-    dp.prune_attempts(attempts, {protected})
-    remaining = sorted(p.name for p in attempts.iterdir())
-    assert len(remaining) == dp.KEEP_ATTEMPTS + 1
-    assert "202601000" in remaining
+        (tmp_path / f"202601{index:02d}T000000Z-x.sqlite3").write_bytes(b"")
+    (tmp_path / "notes.txt").write_text("kept", encoding="utf-8")
+    dp.prune_backups(tmp_path)
+    remaining = sorted(p.name for p in tmp_path.glob("*.sqlite3"))
+    assert len(remaining) == dp.KEEP_BACKUPS
+    assert remaining[0] == "20260105T000000Z-x.sqlite3"
+    assert (tmp_path / "notes.txt").exists()
 
 
 # --- The database path the application, the deploy script and compose must agree on ---------

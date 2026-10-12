@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -232,7 +232,7 @@ def test_a_second_runtime_on_the_same_directory_refuses_to_start(
 
 
 def test_the_close_delay_setting_reaches_the_schedule(tmp_path: Path) -> None:
-    async def fire_times(delay: int) -> dict[str, object]:
+    async def fire_times(delay: int) -> dict[str, datetime | None]:
         runtime = offline_runtime(settings_for(tmp_path, candle_close_delay_seconds=delay))
         await runtime.start()
         try:
@@ -240,13 +240,24 @@ def test_the_close_delay_setting_reaches_the_schedule(tmp_path: Path) -> None:
         finally:
             await runtime.aclose()
 
-    async def scenario() -> tuple[dict[str, object], dict[str, object]]:
+    async def scenario() -> tuple[dict[str, datetime | None], dict[str, datetime | None]]:
         return await fire_times(0), await fire_times(300)
 
+    delay = timedelta(seconds=300)
+    started = datetime.now(UTC)
     immediate, delayed = asyncio.run(scenario())
+    finished = datetime.now(UTC)
 
     for timeframe, when in immediate.items():
-        assert delayed[timeframe] - when == timedelta(seconds=300)  # type: ignore[operator]
+        fire = delayed[timeframe]
+        assert when is not None
+        assert fire is not None
+        close = fire - delay
+        if close != when:
+            # A candle closed less than the delay ago: its delayed fire is still ahead, while
+            # the immediate schedule already moved on to the next close.
+            assert started - delay <= close <= finished
+            assert close < when
 
 
 def test_the_lifespan_serves_health_with_the_bot_running(tmp_path: Path) -> None:

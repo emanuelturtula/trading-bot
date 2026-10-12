@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """Deploy an immutable trading-bot image on the Raspberry Pi using Docker Compose.
 
-Runs on the Pi (stdlib only). State lives under ``<root>/<environment>/``:
+Runs on the Pi (stdlib only). Production is the only environment. Everything lives
+flat in ``<root>`` (default ``~/trading-bot``):
 
-    deploy.lock                 host-wide lock shared by beta and prod
-    <env>/secrets.env           operator-managed secrets (chmod 600, never read here)
-    <env>/current.json          last healthy deployment (written atomically)
-    <env>/attempts/<id>/        compose.yml, request.json, previous.json,
-                                database.sqlite3 (backup), result.json
+    deploy.lock        host-wide lock (one deployment at a time)
+    deploy.py          this script, as used by the last healthy deployment
+    compose.yml        compose file of the last healthy deployment
+    secrets.env        operator-managed secrets (chmod 600, never read here)
+    current.json       last healthy deployment (written atomically)
+    backups/           SQLite backup taken before each deploy (last 10 kept)
 
 Safety properties:
 * inputs validated before any command; image must be this repository's digest;
 * image OCI labels must match the requested revision and version;
 * older workflow runs can never replace a newer deployment (rerun protection);
 * the new container must be healthy and run the exact digest, otherwise the
-  previous deployment is restored.
+  previous deployment is restored;
+* the state of an older release in ``~/trading-bot-deploy/prod`` is copied into the new
+  root once (secrets, compose file, manifest and backups); the old folder is left in place.
 """
 
 from __future__ import annotations
@@ -37,15 +41,15 @@ from typing import Any
 REPOSITORY = "emanuelturtula/trading-bot"
 IMAGE = re.compile(rf"ghcr\.io/{re.escape(REPOSITORY)}@sha256:[0-9a-f]{{64}}")
 REVISION = re.compile(r"[0-9a-f]{40}")
-VERSIONS = {
-    "beta": re.compile(r"v\d+\.\d+\.\d+-beta\.[0-9a-f]{7}"),
-    "prod": re.compile(r"v\d+\.\d+\.\d+"),
-}
+VERSIONS = {"prod": re.compile(r"v\d+\.\d+\.\d+")}
 RUN_URL = re.compile(rf"https://github\.com/{re.escape(REPOSITORY)}/actions/runs/[1-9][0-9]*")
-PORTS = {"beta": "8082", "prod": "8081"}
+PORTS = {"prod": "8081"}
 DATABASE = "/app/data/trading_bot.db"
 WAIT_TIMEOUT_SECONDS = "180"
-KEEP_ATTEMPTS = 10
+KEEP_BACKUPS = 10
+DEFAULT_ROOT = Path.home() / "trading-bot"
+LEGACY_ROOT = Path.home() / "trading-bot-deploy"
+STAGED_COMPOSE = "compose.next.yml"
 
 Manifest = dict[str, Any]
 
@@ -70,13 +74,9 @@ def read_json(path: Path) -> Manifest:
     return data
 
 
-def write_json(path: Path, value: Manifest, *, immutable: bool = False) -> None:
+def write_json(path: Path, value: Manifest) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(value, indent=2, sort_keys=True) + "\n"
-    if immutable:
-        with path.open("x", encoding="utf-8") as target:
-            target.write(data)
-        return
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(data, encoding="utf-8")
     temporary.replace(path)
@@ -116,7 +116,7 @@ def validate(
     source_run_url: str,
 ) -> None:
     if environment not in PORTS:
-        raise DeploymentError("Environment must be beta or prod")
+        raise DeploymentError("Environment must be prod")
     if not IMAGE.fullmatch(image) or not REVISION.fullmatch(revision):
         raise DeploymentError("A repository-scoped image digest and full commit SHA are required")
     if not VERSIONS[environment].fullmatch(version):
@@ -125,14 +125,53 @@ def validate(
         raise DeploymentError("Workflow run evidence is required")
 
 
-def prepare_secrets_env_file(root: Path, environment: str) -> Path:
-    """Guarantee ``<root>/<env>/secrets.env`` exists with 0600 permissions.
+def migrate_legacy_root(legacy: Path, root: Path) -> bool:
+    """Copy the production state of an older release into ``root``, once.
+
+    Older releases kept ``<legacy>/prod/{secrets.env,current.json,attempts/<id>/}``. The
+    compose project name, and therefore the ``data`` volume, does not depend on the folder,
+    so only these files move. They are copied, never deleted: the operator removes the old
+    folder. ``current.json`` is written last, so an interrupted copy is simply redone.
+    Returns whether a migration happened.
+    """
+    legacy = Path(legacy).expanduser().resolve() / "prod"
+    root = Path(root).expanduser().resolve()
+    if not (legacy / "current.json").is_file() or (root / "current.json").exists():
+        return False
+    ours = {"deploy.lock", "compose.yml", "secrets.env", "backups"}
+    if root.exists() and any(path.name not in ours for path in root.iterdir()):
+        raise DeploymentError(f"{root} exists and is not a deploy root; move it away and retry")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with deployment_lock(root):
+        manifest = read_json(legacy / "current.json")
+        shutil.copyfile(manifest["compose"], root / "compose.yml")
+        if (legacy / "secrets.env").is_file():
+            shutil.copy2(legacy / "secrets.env", root / "secrets.env")
+        backups = root / "backups"
+        backups.mkdir(exist_ok=True)
+        for database in sorted(legacy.glob("attempts/*/database.sqlite3")):
+            shutil.copy2(database, backups / f"{database.parent.name}.sqlite3")
+        manifest.update(
+            compose=str(root / "compose.yml"), secrets_env_file=str(root / "secrets.env")
+        )
+        manifest.pop("attempt", None)
+        old_backup = manifest.pop("backup", None)
+        if old_backup:
+            copied = backups / f"{Path(old_backup).parent.name}.sqlite3"
+            if copied.is_file():
+                manifest["backup"] = str(copied)
+        write_json(root / "current.json", manifest)
+    return True
+
+
+def prepare_secrets_env_file(root: Path) -> Path:
+    """Guarantee ``<root>/secrets.env`` exists with 0600 permissions.
 
     The operator writes this file over SSH. This script never reads, writes or
     logs its content; it only creates an empty file on first install and refuses
     to continue if its permissions were loosened.
     """
-    path = root / environment / "secrets.env"
+    path = root / "secrets.env"
     path.parent.mkdir(parents=True, exist_ok=True)
     if not path.exists():
         path.touch()
@@ -177,13 +216,13 @@ def verify_running(manifest: Manifest) -> str:
     return str(container)
 
 
-def backup(previous: Manifest, attempt: Path) -> str | None:
-    """Copy the running SQLite database into the attempt directory, if there is one."""
+def backup(previous: Manifest, destination: Path) -> str | None:
+    """Copy the running SQLite database to ``destination``, if there is one."""
     try:
         container = verify_running(previous)
     except DeploymentError:
         return None  # Nothing healthy to back up; the deploy may be the fix.
-    inner_path = f"/app/data/deploy-backup-{attempt.name}.sqlite3"
+    inner_path = f"/app/data/deploy-backup-{destination.stem}.sqlite3"
     script = (
         "import os,sqlite3,sys\n"
         f"if not os.path.exists({DATABASE!r}): print('absent'); sys.exit(0)\n"
@@ -194,7 +233,7 @@ def backup(previous: Manifest, attempt: Path) -> str | None:
     )
     if run(["docker", "exec", container, "python", "-c", script, inner_path]) == "absent":
         return None
-    destination = attempt / "database.sqlite3"
+    destination.parent.mkdir(parents=True, exist_ok=True)
     run(["docker", "cp", f"{container}:{inner_path}", str(destination)])
     run(["docker", "exec", container, "rm", "-f", inner_path])
     return str(destination)
@@ -211,11 +250,9 @@ def check_run_order(previous: Manifest | None, image: str, revision: str, run_nu
         )
 
 
-def prune_attempts(attempts: Path, protected: set[str]) -> None:
-    existing = sorted(path for path in attempts.iterdir() if path.is_dir())
-    for path in existing[:-KEEP_ATTEMPTS]:
-        if str(path) not in protected:
-            shutil.rmtree(path, ignore_errors=True)
+def prune_backups(backups: Path) -> None:
+    for path in sorted(backups.glob("*.sqlite3"))[:-KEEP_BACKUPS]:
+        path.unlink(missing_ok=True)
 
 
 def deploy(
@@ -244,7 +281,7 @@ def deploy_locked(
     source_run_url: str,
     root: Path,
 ) -> Manifest:
-    current_path = root / environment / "current.json"
+    current_path = root / "current.json"
     previous = read_json(current_path) if current_path.exists() else None
     check_run_order(previous, image, revision, run_number)
 
@@ -256,33 +293,25 @@ def deploy_locked(
     if labels.get("org.opencontainers.image.version") != version:
         raise DeploymentError("OCI version label does not match the requested version")
 
-    attempts = root / environment / "attempts"
-    attempt = attempts / f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:12]}"
-    attempt.mkdir(parents=True)
-    compose_path = attempt / "compose.yml"
-    shutil.copyfile(Path(__file__).with_name("compose.yml"), compose_path)
+    # The candidate runs from a staged compose file; compose.yml stays the previous one
+    # until the candidate is healthy, so a rollback uses exactly what was running.
+    staged = root / STAGED_COMPOSE
+    shutil.copyfile(Path(__file__).with_name("compose.yml"), staged)
     candidate: Manifest = {
         "environment": environment,
         "image": image,
         "revision": revision,
         "version": version,
-        "compose": str(compose_path),
-        "secrets_env_file": str(prepare_secrets_env_file(root, environment)),
-        "status": "pending",
-        "attempt": str(attempt),
+        "compose": str(staged),
+        "secrets_env_file": str(prepare_secrets_env_file(root)),
         "delivery": {"run_number": run_number, "source_run_url": source_run_url},
     }
-    write_json(attempt / "request.json", candidate, immutable=True)
     if previous:
-        write_json(attempt / "previous.json", previous, immutable=True)
+        stamp = f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:12]}"
         try:
-            candidate["backup"] = backup(previous, attempt)
+            candidate["backup"] = backup(previous, root / "backups" / f"{stamp}.sqlite3")
         except Exception as failure:
-            write_json(
-                attempt / "result.json",
-                dict(candidate, status="failed", stage="backup", error=str(failure)),
-                immutable=True,
-            )
+            staged.unlink(missing_ok=True)
             raise DeploymentError(
                 f"Backup failed before replacing the service: {failure}"
             ) from failure
@@ -293,7 +322,6 @@ def deploy_locked(
         )
         verify_running(candidate)
     except Exception as failure:
-        result = dict(candidate, status="failed", error=str(failure))
         try:
             if previous:
                 compose(
@@ -306,23 +334,25 @@ def deploy_locked(
                     "app",
                 )
                 verify_running(previous)
-                result["rollback"] = "healthy"
+                rollback = "healthy"
             else:
                 compose(candidate, "down")  # keeps the data volume
-                result["rollback"] = "no_previous_deployment"
+                rollback = "no_previous_deployment"
         except Exception as rollback_failure:
-            result["rollback"] = "failed"
-            result["rollback_error"] = str(rollback_failure)
-        write_json(attempt / "result.json", result, immutable=True)
-        raise DeploymentError(
-            f"Deployment failed; rollback={result['rollback']}; evidence={attempt}"
-        ) from failure
+            rollback = f"failed ({rollback_failure})"
+        staged.unlink(missing_ok=True)
+        raise DeploymentError(f"Deployment failed: {failure}; rollback={rollback}") from failure
 
-    candidate.update(status="healthy", deployed_at=datetime.now(UTC).isoformat())
-    write_json(attempt / "result.json", candidate, immutable=True)
+    staged.replace(root / "compose.yml")
+    if Path(__file__).resolve() != (root / "deploy.py").resolve():
+        shutil.copyfile(Path(__file__), root / "deploy.py")
+    candidate.update(
+        compose=str(root / "compose.yml"),
+        status="healthy",
+        deployed_at=datetime.now(UTC).isoformat(),
+    )
     write_json(current_path, candidate)
-    protected = {str(attempt), str(previous["attempt"]) if previous else ""}
-    prune_attempts(attempts, protected)
+    prune_backups(root / "backups")
     return candidate
 
 
@@ -334,9 +364,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--run-number", type=int, required=True)
     parser.add_argument("--source-run-url", required=True)
-    parser.add_argument("--root", type=Path, default=Path.home() / "trading-bot-deploy")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     args = parser.parse_args(argv)
     try:
+        if args.root == DEFAULT_ROOT and migrate_legacy_root(LEGACY_ROOT, DEFAULT_ROOT):
+            print(f"Moved {LEGACY_ROOT} to {DEFAULT_ROOT}", file=sys.stderr)
         result = deploy(**vars(args))
     except (DeploymentError, subprocess.SubprocessError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)

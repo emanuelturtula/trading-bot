@@ -23,9 +23,9 @@
 - [ ] No secrets, IPs, hostnames or infrastructure users in the diff (gitleaks OK)
 - [ ] `domain/` is still pure; no look-ahead (closed candles only)
 - [ ] No order execution code
-- [ ] Beta verified on port 8082 (`/health` with the beta version)
+- [ ] CI green on this PR
 - [ ] Everything in English: code, comments, docs, commits, and this PR
 
-## Beta evidence
+## Evidence
 
-<!-- version, image digest, link to the run -->
+<!-- test output, link to the CI run -->

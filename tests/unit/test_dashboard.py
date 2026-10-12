@@ -10,6 +10,7 @@ import json
 import logging
 import re
 from collections.abc import Iterator
+from html.parser import HTMLParser
 from pathlib import Path
 
 import httpx
@@ -114,15 +115,27 @@ def signed_in(browser: Browser) -> Browser:
 
 
 _OWN_SCRIPTS = (
-    '<script type="application/json" id="builder-data">',
-    '<script src="/dashboard/static/builder.js" defer>',
+    (("type", "application/json"), ("id", "builder-data")),
+    (("src", "/dashboard/static/builder.js"), ("defer", None)),
 )
+
+
+class _ScriptTags(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.found: list[tuple[tuple[str, str | None], ...]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script":  # the parser lowercases tag names
+            self.found.append(tuple(attrs))
 
 
 def assert_only_own_scripts(body: str) -> None:
     """Pages run only the dashboard's own files: every script tag is data or a static file."""
-    for tag in re.findall(r"<script[^>]*>", body):
-        assert tag in _OWN_SCRIPTS, tag
+    parser = _ScriptTags()
+    parser.feed(body)
+    for attrs in parser.found:
+        assert attrs in _OWN_SCRIPTS, attrs
 
 
 def add_rule(
@@ -847,11 +860,10 @@ def test_session_cookie_is_secure_when_the_app_itself_serves_https(tmp_path: Pat
 
 def test_rule_form_ships_the_builder(signed_in: Browser) -> None:
     page = signed_in.get("/dashboard/rules/new").text
-    data = re.search(r'<script type="application/json" id="builder-data">(.*?)</script>', page)
+    data = page.partition('id="builder-data">')[2].partition("<")[0]  # tojson escapes "<"
     script = signed_in.get("/dashboard/static/builder.js")
 
-    assert data is not None
-    assert "rsi_level" in [template["id"] for template in json.loads(data.group(1))["templates"]]
+    assert "rsi_level" in [template["id"] for template in json.loads(data)["templates"]]
     assert '<div id="builder" class="builder" hidden></div>' in page
     assert script.status_code == 200
     assert "javascript" in script.headers["content-type"]

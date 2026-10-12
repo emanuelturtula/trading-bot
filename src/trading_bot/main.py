@@ -6,7 +6,7 @@ Run with a single worker (the bot will own the scheduler and the Telegram poller
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from trading_bot.config import Environment, Settings, get_settings
 from trading_bot.logging_setup import configure_logging
-from trading_bot.persistence.database import open_database
+from trading_bot.runtime import Runtime
 
 
 class HealthResponse(BaseModel):
@@ -24,24 +24,29 @@ class HealthResponse(BaseModel):
     environment: Environment
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    build_runtime: Callable[[Settings], Runtime] = Runtime,  # tests inject fakes
+) -> FastAPI:
     settings = settings or get_settings()
     configure_logging(settings.log_level, settings.secret_values())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """Open the database, migrations included, before anything else starts.
+        """Start the bot (spec 017): lock, database, calendar, provider, notifier, scheduler.
 
         A failure propagates: the lifespan never yields, uvicorn exits non-zero, the container
-        never becomes healthy and ``deploy/deploy.py`` restores the previous deployment. The
-        migration is fast and nothing else is scheduled yet, so it needs no worker thread.
+        never becomes healthy and ``deploy/deploy.py`` restores the previous deployment.
         """
-        database = open_database(settings.data_dir)
-        app.state.database = database
+        runtime = build_runtime(settings)
+        await runtime.start()
+        app.state.runtime = runtime
+        app.state.database = runtime.database
         try:
             yield
         finally:
-            database.dispose()
+            await runtime.aclose()
 
     app = FastAPI(
         title="trading-bot",

@@ -37,6 +37,9 @@ _ALLOWED_PREFIXES = (
     "trading_bot.persistence.signal_records",
     "trading_bot.persistence.state",
 )
+# The single module allowed to talk to Telegram (spec 017, D2): the library and ``SecretStr``.
+_TELEGRAM_MODULE = "notifications/telegram.py"
+_TELEGRAM_PREFIXES = ("telegram", "pydantic")
 # The single module allowed to name the implementations and the handle (decision D124).
 _SQL_MODULE = "engine/sql_unit_of_work.py"
 _SQL_PREFIXES = (
@@ -181,13 +184,18 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "engine/sql_unit_of_work.py",
         "engine/unit_of_work.py",
         "notifications/__init__.py",
+        "notifications/log_notifier.py",
+        "notifications/message.py",
         "notifications/notifier.py",
+        "notifications/telegram.py",
     }
 
 
 @pytest.mark.parametrize("path", SCANNED_FILES, ids=_relative)
 def test_module_imports_stay_within_the_allowlist(path: Path) -> None:
-    extra = _SQL_PREFIXES if _relative(path) == _SQL_MODULE else ()
+    extra = {_SQL_MODULE: _SQL_PREFIXES, _TELEGRAM_MODULE: _TELEGRAM_PREFIXES}.get(
+        _relative(path), ()
+    )
     found = disallowed_imports(_parse(path), extra_prefixes=extra)
 
     assert found == [], f"{_relative(path)} imports outside the engine allowlist: {found}"
@@ -196,6 +204,8 @@ def test_module_imports_stay_within_the_allowlist(path: Path) -> None:
 @pytest.mark.parametrize("path", SCANNED_FILES, ids=_relative)
 def test_no_module_imports_a_library_of_another_layer(path: Path) -> None:
     found = forbidden_imports(_parse(path))
+    if _relative(path) == _TELEGRAM_MODULE:
+        found = [name for name in found if not _matches(name, ("telegram",))]
 
     assert found == [], f"{_relative(path)} imports {found}"
 
@@ -265,6 +275,17 @@ def test_the_sql_unit_of_work_does_name_the_implementations() -> None:
 
     assert "trading_bot.persistence.database" in imported
     assert "trading_bot.persistence.repositories.signals" in imported
+
+
+def test_telegram_is_imported_by_one_module_only() -> None:
+    """Control: the allowance is not vacuous, and it really is confined to that module."""
+    importers = {
+        _relative(path)
+        for path in SCANNED_FILES
+        if any(_matches(name, ("telegram",)) for name in imported_names(_parse(path)))
+    }
+
+    assert importers == {_TELEGRAM_MODULE}
 
 
 def test_the_domain_imports_neither_package() -> None:

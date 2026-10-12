@@ -16,6 +16,6 @@ The modules, in dependency order:
 - ``service.py``: the ``AsyncIOScheduler`` and the job set.
 
 It re-exports nothing, like ``data/`` and ``engine/``: import from the submodules. ``domain/``
-is never imported the other way round, and nothing here is wired into the running application
-yet (#16 does that).
+is never imported the other way round. ``trading_bot.runtime`` builds the one service of the
+running application (spec 017).
 """

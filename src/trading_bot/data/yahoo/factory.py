@@ -1,9 +1,9 @@
 """Wiring of the Yahoo provider (spec 011, Design 11; decision D63).
 
 ``build_yfinance_provider`` assembles the yfinance client, the token bucket, the transport and
-the provider. It performs no I/O other than creating the cache directory, and nothing in the
-running app calls it yet: the lifespan wiring belongs to #16, which also builds the calendar,
-awaits ``provider.aclose()`` at shutdown and removes the cache directory.
+the provider. It performs no I/O other than creating the cache directory. ``trading_bot.runtime``
+(spec 017) calls it once, builds the calendar, awaits ``provider.aclose()`` at shutdown and
+removes the cache directory.
 
 Call it inside the running event loop and use the provider only from that loop (decision D68):
 the transport's synchronization primitives bind to the first loop that waits on them.

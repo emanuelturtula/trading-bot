@@ -53,7 +53,7 @@ The user decides whether to trade. **There is no order execution layer** and one
 
 ## Process
 
-A single asyncio process (`uvicorn ... --workers 1`). The FastAPI lifespan starts and stops the scheduler and the Telegram poller. It is never scaled horizontally: a Telegram token allows a single poller (409 Conflict).
+A single asyncio process (`uvicorn ... --workers 1`). The FastAPI lifespan starts and stops the [runtime](#runtime): the scheduler, the notifier and, from #20, the Telegram poller. It is never scaled horizontally: a Telegram token allows a single poller (409 Conflict).
 
 ## Domain models
 
@@ -797,13 +797,51 @@ Three rings. A **ticker** failure is logged and reported, and the run continues 
 
 ### The notifier port
 
-`Notifier` (`notifications/notifier.py`) is an async `Protocol` with one method, `notify(notification: SignalNotification) -> None`, injected in `main.py` like every other port. `SignalNotification` carries the committed `StoredSignal` (key, side, close price, indicator values, the rule's current name and the row id), the parsed `Rule` for the chart's indicators, and the **closed candles the decision was made on**, so a message and its chart need no second provider request and no second database read.
+`Notifier` (`notifications/notifier.py`) is an async `Protocol` with one method, `notify(notification: SignalNotification) -> None`, injected by `trading_bot.runtime` like every other port. `SignalNotification` carries the committed `StoredSignal` (key, side, close price, indicator values, the rule's current name and the row id), the parsed `Rule` for the chart's indicators, and the **closed candles the decision was made on**, so a message and its chart need no second provider request and no second database read.
 
 The frame is shared, not copied: copying it per signal would duplicate up to 2 255 rows for every rule that fires, so an implementation must treat `notification.candles` as read-only and copy before drawing. It must also keep tokens, chat ids and provider text out of the exceptions it raises, because the engine logs the exception class only, and raise `NotificationError` when it finally gives up.
 
+### Telegram notifier
+
+`TelegramNotifier` (`notifications/telegram.py`) sends each signal as one HTML message to **every** chat in `TB_TELEGRAM_ALLOWED_CHAT_IDS` (spec [017](specs/017-runtime-wiring-and-telegram-notifier.md), U1); the chart joins with #18. The text comes from the pure `format_signal_message` (`notifications/message.py`):
+
+```
+[BETA] 🟢 BUY · AAPL · 1d          (bold; no [BETA] in prod)
+Rule: RSI bounce
+Close: 182.41
+Candle: 2024-07-01 (session)       (1h/4h: "closed 2024-07-01 22:00 CEST", the real close)
+rsi_14: 28.73
+sma_50: 190.12
+
+Not financial advice.              (italic)
+```
+
+- **The candle is never presented by its nominal close.** The calendar slot whose label is the candle's open gives the session date (`1d`) or the real close (`1h`, `4h`), shown in `TB_DISPLAY_TIMEZONE` (default `Europe/Madrid`). Ticker, rule name and indicator names are HTML-escaped.
+- **Retries.** Per chat, up to four attempts with 1 s, 2 s and 4 s between them; a 429 waits Telegram's `retry_after` (at most 60 s); bad requests, a blocked bot and a rejected token are not retried. Delivery succeeds when at least one chat received the message; otherwise `notify` raises `NotificationError`, the signal stays with `notified_at` `NULL` and is never re-sent.
+- **Secrets.** `BotMessageSender` is the only code that imports python-telegram-bot (a guard test enforces it). The token is only ever in the request URL the library builds; `configure_logging` pins the `httpx`, `httpcore` and `telegram` loggers to `WARNING` because `httpx` logs every URL at `INFO`. `Bot.initialize` is never called, since its rejected-token error embeds the token. Chat ids are never logged: a failing recipient is named by its position. Errors raised from the module carry counts only and are raised `from None`.
+- **Not configured.** Without a token or without chat ids the runtime injects `LogNotifier`, which logs one `INFO` line per signal, and logs one `WARNING` at startup (U2). Signals "delivered" this way are marked notified and are not re-sent once the bot is configured.
+
+## Runtime
+
+`trading_bot.runtime.Runtime` owns every long-lived component of the process (spec [017](specs/017-runtime-wiring-and-telegram-notifier.md), issue #16); the FastAPI lifespan only calls `await runtime.start()` and `await runtime.aclose()`.
+
+| Start (in order) | Stop (reverse order) |
+|------------------|----------------------|
+| `InstanceLock` on `<TB_DATA_DIR>/trading-bot.lock` | released |
+| `Database` (migrations included) | `dispose()` |
+| NYSE `MarketCalendar` 2000-2099, built in a worker thread | — |
+| Yahoo provider, with a per-process cache directory under the system temp dir | `aclose()`, cache directory removed |
+| `TelegramNotifier` or `LogNotifier` | `aclose()` |
+| `SignalEngine`, `TimeframeRunner`, `SchedulerService` (policy from `TB_*`, `skip_unpublished_hours` injected into both) | `service.aclose()`, then up to 10 s more if a run is still in flight |
+
+- **One process per data directory.** The lock is an exclusive, non-blocking `flock`, released by the kernel even if the process dies, so there is never a stale lock. A second process on the same volume logs one `ERROR` naming the lock file and exits (`CLAUDE.md` rule 7).
+- **A failed start never yields.** Whatever was already built is closed in reverse order and the exception propagates, so uvicorn exits non-zero, the container never becomes healthy and the deploy rolls back.
+- **A failed stop step is isolated.** It is logged as one `ERROR` naming the exception class, and the remaining steps still run.
+- `/health` is unchanged: public, configuration-free, and it never touches the database.
+
 ## Scheduler
 
-`scheduler/` decides **when** the bot thinks, and nothing else: one job per timeframe, fired at each real candle close plus a configured delay, exactly once per close and never twice at a time. Design and decisions: spec [016](specs/016-candle-close-scheduler.md). Nothing is wired into the running application yet (#16 does that).
+`scheduler/` decides **when** the bot thinks, and nothing else: one job per timeframe, fired at each real candle close plus a configured delay, exactly once per close and never twice at a time. Design and decisions: spec [016](specs/016-candle-close-scheduler.md). `trading_bot.runtime` builds the one service of the running application ([Runtime](#runtime)).
 
 ```python
 from datetime import UTC, datetime, timedelta

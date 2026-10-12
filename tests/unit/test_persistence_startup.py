@@ -14,8 +14,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, event, text
 
 from tests.fixtures.database import temporary_database
-from trading_bot import main as main_module
+from tests.fixtures.runtime import offline_runtime
+from trading_bot import runtime as runtime_module
 from trading_bot.config import Settings
+from trading_bot.instance_lock import LOCK_FILENAME
 from trading_bot.main import create_app
 from trading_bot.persistence.database import Database
 from trading_bot.persistence.engine import DATABASE_FILENAME, database_path
@@ -26,7 +28,7 @@ MIGRATOR_LOGGER = "trading_bot.persistence.migrator"
 
 def make_app(data_dir: Path) -> FastAPI:
     settings = Settings(_env_file=None, data_dir=data_dir)  # type: ignore[call-arg]
-    return create_app(settings)
+    return create_app(settings, build_runtime=offline_runtime)
 
 
 def stored_revisions(engine: Engine) -> list[str]:
@@ -90,7 +92,8 @@ def test_the_lifespan_stores_a_migrated_database_and_disposes_it(tmp_path: Path)
         assert disposed == []
 
     assert len(disposed) == 1
-    assert sidecar_files(tmp_path) == [DATABASE_FILENAME]  # the WAL was checkpointed away
+    # The WAL was checkpointed away; the instance lock file stays, released (spec 017, D4).
+    assert sidecar_files(tmp_path) == sorted([DATABASE_FILENAME, LOCK_FILENAME])
 
 
 def test_health_is_unchanged_and_touches_no_connection(tmp_path: Path) -> None:
@@ -157,7 +160,7 @@ def test_a_failed_migration_aborts_the_startup(
     def failing_open(data_dir: Path) -> Database:
         raise RuntimeError("migration failed")
 
-    monkeypatch.setattr(main_module, "open_database", failing_open)
+    monkeypatch.setattr(runtime_module, "open_database", failing_open)
     app = make_app(tmp_path)
 
     with pytest.raises(RuntimeError, match="migration failed"), TestClient(app):

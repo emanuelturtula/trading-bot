@@ -15,6 +15,7 @@ from contextlib import AbstractContextManager, contextmanager
 from trading_bot.engine.unit_of_work import EngineRepositories, UnitOfWork
 from trading_bot.persistence.clock import Clock, system_clock
 from trading_bot.persistence.database import Database
+from trading_bot.persistence.owner import ALL_OWNERS
 from trading_bot.persistence.repositories.assignments import SqlAssignmentRepository
 from trading_bot.persistence.repositories.bot_state import SqlBotStateRepository
 from trading_bot.persistence.repositories.signals import SqlSignalRepository
@@ -43,8 +44,9 @@ def sql_unit_of_work(database: Database, *, clock: Clock = system_clock) -> Unit
 def _repositories(database: Database, clock: Clock) -> Iterator[EngineRepositories]:
     with database.session() as session:
         yield EngineRepositories(
-            tickers=SqlTickerRepository(session, clock=clock),
-            assignments=SqlAssignmentRepository(session, clock=clock),
+            # The engine evaluates every user's configuration (spec 024, D3).
+            tickers=SqlTickerRepository(session, clock=clock, owner=ALL_OWNERS),
+            assignments=SqlAssignmentRepository(session, clock=clock, owner=ALL_OWNERS),
             signals=SqlSignalRepository(session, clock=clock),
             state=SqlBotStateRepository(session, clock=clock),
         )

@@ -28,7 +28,7 @@ def test_add_stores_an_enabled_ticker_with_the_injected_instant(database: Databa
         stored = repositories(session, clock=fixed_clock(START)).tickers.add("AAPL", Timeframe.D1)
 
     assert stored == StoredTicker(
-        id=1, symbol="AAPL", timeframe=Timeframe.D1, enabled=True, created_at=START
+        id=1, symbol="AAPL", timeframe=Timeframe.D1, enabled=True, created_at=START, user_id=1
     )
 
 

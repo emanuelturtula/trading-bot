@@ -52,4 +52,6 @@ def notification(
         created_at=datetime(2024, 7, 1, 20, 2, tzinfo=UTC),
         notified_at=None,
     )
-    return SignalNotification(signal=stored, rule=triggering_rule("x"), candles=pd.DataFrame())
+    return SignalNotification(
+        signal=stored, rule=triggering_rule("x"), candles=pd.DataFrame(), owner_id=1
+    )

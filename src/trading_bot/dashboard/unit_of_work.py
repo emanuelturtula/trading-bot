@@ -10,9 +10,11 @@ import asyncio
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
+from typing import Protocol
 
 from trading_bot.persistence.clock import Clock, system_clock
 from trading_bot.persistence.database import Database
+from trading_bot.persistence.owner import Owner
 from trading_bot.persistence.repositories.assignments import SqlAssignmentRepository
 from trading_bot.persistence.repositories.bot_state import SqlBotStateRepository
 from trading_bot.persistence.repositories.protocols import (
@@ -46,16 +48,22 @@ class DashboardRepositories:
     users: UserRepository
 
 
-type DashboardUnitOfWork = Callable[[], AbstractContextManager[DashboardRepositories]]
+class DashboardUnitOfWork(Protocol):
+    """Opens one unit of work over ``owner``'s configuration (spec 024): the signed-in user."""
+
+    def __call__(self, owner: Owner = None) -> AbstractContextManager[DashboardRepositories]: ...
 
 
 async def in_dashboard_unit_of_work[T](
-    unit_of_work: DashboardUnitOfWork, work: Callable[[DashboardRepositories], T]
+    unit_of_work: DashboardUnitOfWork,
+    work: Callable[[DashboardRepositories], T],
+    *,
+    owner: Owner = None,
 ) -> T:
-    """Run ``work`` in one unit of work, in a worker thread of its own."""
+    """Run ``work`` in one unit of work over ``owner``'s rows, in a worker thread of its own."""
 
     def run() -> T:
-        with unit_of_work() as repositories:
+        with unit_of_work(owner) as repositories:
             return work(repositories)
 
     return await asyncio.to_thread(run)
@@ -69,12 +77,12 @@ def sql_dashboard_unit_of_work(
         raise TypeError(f"database must be a Database, got {type(database).__name__}")
 
     @contextmanager
-    def unit_of_work() -> Iterator[DashboardRepositories]:
+    def unit_of_work(owner: Owner = None) -> Iterator[DashboardRepositories]:
         with database.session() as session:
             yield DashboardRepositories(
-                tickers=SqlTickerRepository(session, clock=clock),
-                rules=SqlRuleRepository(session, clock=clock),
-                assignments=SqlAssignmentRepository(session, clock=clock),
+                tickers=SqlTickerRepository(session, clock=clock, owner=owner),
+                rules=SqlRuleRepository(session, clock=clock, owner=owner),
+                assignments=SqlAssignmentRepository(session, clock=clock, owner=owner),
                 state=SqlBotStateRepository(session, clock=clock),
                 signals=SqlSignalRepository(session, clock=clock),
                 users=SqlUserRepository(session, clock=clock),

@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Final
@@ -177,19 +177,52 @@ class SignalEngine:
                 plan.paused_since.isoformat(),
             )
             return RunReport(timeframe=timeframe, now=now, paused=True, tickers=())
+        fetch = self._shared_fetch(plan.tickers, now)
         outcomes: list[TickerOutcome] = []
         for ticker_plan in plan.tickers:
-            outcomes.append(await self._run_ticker(ticker_plan, now))
+            outcomes.append(await self._run_ticker(ticker_plan, fetch))
         report = RunReport(timeframe=timeframe, now=now, paused=False, tickers=tuple(outcomes))
         self._logger.info("%s", report.summary)
         return report
 
-    async def _run_ticker(self, plan: TickerPlan, now: datetime) -> TickerOutcome:
+    def _shared_fetch(
+        self, tickers: Sequence[TickerPlan], now: datetime
+    ) -> Callable[[TickerPlan], Awaitable[pd.DataFrame]]:
+        """One provider request per symbol and run, however many users watch it (spec 024, D3).
+
+        The request asks for the largest lookback any of those users needs: a longer frame
+        evaluates to the same result, since ``plan_lookback`` already covers the warm-up and the
+        cooldown. The outcome, a frame or a failure, is kept for the run and shared read-only.
+        """
+        lookbacks: dict[str, int] = {}
+        for ticker in tickers:
+            lookbacks[ticker.symbol] = max(lookbacks.get(ticker.symbol, 0), ticker.lookback)
+        fetched: dict[str, pd.DataFrame | Exception] = {}
+
+        async def fetch(plan: TickerPlan) -> pd.DataFrame:
+            result = fetched.get(plan.symbol)
+            if result is None:
+                try:
+                    result = await self._provider.fetch_candles(
+                        plan.symbol, plan.timeframe, lookbacks[plan.symbol], now=now
+                    )
+                except _PROPAGATING:
+                    raise
+                except Exception as error:
+                    result = error
+                fetched[plan.symbol] = result
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        return fetch
+
+    async def _run_ticker(
+        self, plan: TickerPlan, fetch: Callable[[TickerPlan], Awaitable[pd.DataFrame]]
+    ) -> TickerOutcome:
         """One ticker: one fetch, one evaluation of each rule, then its triggered signals."""
         try:
-            frame = await self._provider.fetch_candles(
-                plan.symbol, plan.timeframe, plan.lookback, now=now
-            )
+            frame = await fetch(plan)
         except _PROPAGATING:
             raise
         except MarketDataError as error:
@@ -201,7 +234,7 @@ class SignalEngine:
             len(frame),
             plan.symbol,
             plan.timeframe.value,
-            plan.lookback,
+            plan.lookback,  # what this ticker needs; a shared fetch may hold more
         )
         try:
             triggered = await asyncio.to_thread(_evaluate_rules, plan, frame)
@@ -276,7 +309,9 @@ class SignalEngine:
             self._log_duplicate(key, stored.id, stored.signal, signal)
             return _outcome(key, stored_rule, SignalDisposition.DUPLICATE, stored.id)
         try:
-            await self._notifier.notify(SignalNotification(signal=stored, rule=rule, candles=frame))
+            await self._notifier.notify(
+                SignalNotification(signal=stored, rule=rule, candles=frame, owner_id=plan.user_id)
+            )
         except Exception as error:
             self._logger.error("delivery failed for %s: %s", key, type(error).__name__)
             return _outcome(key, stored_rule, SignalDisposition.UNDELIVERED, stored.id)

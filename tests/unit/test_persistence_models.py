@@ -40,9 +40,11 @@ CREATE TABLE tickers (
     timeframe VARCHAR(2) NOT NULL,
     enabled BOOLEAN NOT NULL,
     created_at DATETIME NOT NULL,
-    CONSTRAINT uq_tickers_symbol_timeframe UNIQUE (symbol, timeframe),
+    user_id INTEGER NOT NULL,
+    CONSTRAINT uq_tickers_user_id_symbol_timeframe UNIQUE (user_id, symbol, timeframe),
     CONSTRAINT uq_tickers_id_timeframe UNIQUE (id, timeframe),
-    CONSTRAINT ck_tickers_timeframe CHECK (timeframe IN ('1h', '4h', '1d'))
+    CONSTRAINT ck_tickers_timeframe CHECK (timeframe IN ('1h', '4h', '1d')),
+    CONSTRAINT fk_tickers_user_id_users FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
 )
 """,
     "rules": """
@@ -55,10 +57,12 @@ CREATE TABLE rules (
     enabled BOOLEAN NOT NULL,
     created_at DATETIME NOT NULL,
     updated_at DATETIME NOT NULL,
-    CONSTRAINT uq_rules_name UNIQUE (name),
+    user_id INTEGER NOT NULL,
+    CONSTRAINT uq_rules_user_id_name UNIQUE (user_id, name),
     CONSTRAINT uq_rules_id_timeframe UNIQUE (id, timeframe),
     CONSTRAINT ck_rules_timeframe CHECK (timeframe IN ('1h', '4h', '1d')),
-    CONSTRAINT ck_rules_signal CHECK (signal IN ('BUY', 'SELL'))
+    CONSTRAINT ck_rules_signal CHECK (signal IN ('BUY', 'SELL')),
+    CONSTRAINT fk_rules_user_id_users FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
 )
 """,
     "ticker_rules": """
@@ -150,10 +154,16 @@ def stored_ddl(connection: Connection, name: str) -> str:
     return collapsed(row)
 
 
-def insert_ticker(connection: Connection, symbol: str, timeframe: str = "1d") -> int:
+OWNER = 1  # the administrator migration 0005 creates in an empty database
+
+
+def insert_ticker(
+    connection: Connection, symbol: str, timeframe: str = "1d", *, user_id: int = OWNER
+) -> int:
     connection.exec_driver_sql(
-        "INSERT INTO tickers (symbol, timeframe, enabled, created_at) VALUES (?, ?, 1, ?)",
-        (symbol, timeframe, TIMESTAMP),
+        "INSERT INTO tickers (symbol, timeframe, enabled, created_at, user_id)"
+        " VALUES (?, ?, 1, ?, ?)",
+        (symbol, timeframe, TIMESTAMP, user_id),
     )
     identifier = connection.exec_driver_sql("SELECT last_insert_rowid()").scalar()
     assert isinstance(identifier, int)
@@ -161,13 +171,18 @@ def insert_ticker(connection: Connection, symbol: str, timeframe: str = "1d") ->
 
 
 def insert_rule(
-    connection: Connection, name: str, timeframe: str = "1d", signal: str = "BUY"
+    connection: Connection,
+    name: str,
+    timeframe: str = "1d",
+    signal: str = "BUY",
+    *,
+    user_id: int = OWNER,
 ) -> int:
     connection.exec_driver_sql(
         "INSERT INTO rules"
-        " (name, signal, timeframe, definition_json, enabled, created_at, updated_at)"
-        " VALUES (?, ?, ?, '{}', 0, ?, ?)",
-        (name, signal, timeframe, TIMESTAMP, TIMESTAMP),
+        " (name, signal, timeframe, definition_json, enabled, created_at, updated_at, user_id)"
+        " VALUES (?, ?, ?, '{}', 0, ?, ?, ?)",
+        (name, signal, timeframe, TIMESTAMP, TIMESTAMP, user_id),
     )
     identifier = connection.exec_driver_sql("SELECT last_insert_rowid()").scalar()
     assert isinstance(identifier, int)
@@ -369,6 +384,7 @@ def test_the_reflected_columns_carry_the_declared_types_and_nullability(
             ("timeframe", "VARCHAR(2)", False),
             ("enabled", "BOOLEAN", False),
             ("created_at", "DATETIME", False),
+            ("user_id", "INTEGER", False),
         ],
         "rules": [
             ("id", "INTEGER", False),
@@ -379,6 +395,7 @@ def test_the_reflected_columns_carry_the_declared_types_and_nullability(
             ("enabled", "BOOLEAN", False),
             ("created_at", "DATETIME", False),
             ("updated_at", "DATETIME", False),
+            ("user_id", "INTEGER", False),
         ],
         "ticker_rules": [
             ("ticker_id", "INTEGER", False),
@@ -419,11 +436,11 @@ def test_the_reflected_unique_constraints_have_the_expected_names(database: Data
     assert found == {
         "tickers": [
             ("uq_tickers_id_timeframe", ("id", "timeframe")),
-            ("uq_tickers_symbol_timeframe", ("symbol", "timeframe")),
+            ("uq_tickers_user_id_symbol_timeframe", ("user_id", "symbol", "timeframe")),
         ],
         "rules": [
             ("uq_rules_id_timeframe", ("id", "timeframe")),
-            ("uq_rules_name", ("name",)),
+            ("uq_rules_user_id_name", ("user_id", "name")),
         ],
         "ticker_rules": [],
         "signals": [
@@ -505,6 +522,42 @@ def test_the_signal_foreign_keys_cascade_on_delete(database: Database) -> None:
             "CASCADE",
         ),
     ]
+
+
+@pytest.mark.parametrize("table", ["tickers", "rules"])
+def test_the_configuration_belongs_to_a_user_and_goes_with_it(
+    database: Database, table: str
+) -> None:
+    """Spec 024: every ticker and rule has an owner, and deleting the owner deletes them."""
+    found = [
+        (
+            str(key["name"]),
+            tuple(key["constrained_columns"]),
+            str(key["referred_table"]),
+            str(key["options"]["ondelete"]),
+        )
+        for key in inspect(database.engine).get_foreign_keys(table)
+    ]
+
+    assert found == [(f"fk_{table}_user_id_users", ("user_id",), "users", "CASCADE")]
+
+
+def test_two_users_may_watch_the_same_ticker_and_name_a_rule_alike(database: Database) -> None:
+    with database.engine.begin() as connection:
+        connection.exec_driver_sql(
+            "INSERT INTO users (username, is_admin, active, created_at, updated_at)"
+            " VALUES ('ana', 0, 1, ?, ?)",
+            (TIMESTAMP, TIMESTAMP),
+        )
+        other = connection.exec_driver_sql("SELECT last_insert_rowid()").scalar()
+        assert isinstance(other, int)
+        insert_ticker(connection, "AAPL")
+        insert_ticker(connection, "AAPL", user_id=other)
+        insert_rule(connection, "daily")
+        insert_rule(connection, "daily", user_id=other)
+
+        assert count_rows(connection, "tickers") == 2
+        assert count_rows(connection, "rules") == 2
 
 
 def test_the_bot_state_table_has_no_foreign_key(database: Database) -> None:

@@ -4,6 +4,10 @@
 the composite foreign keys refuse the row anyway, but an ``IntegrityError`` is a poor message
 for a user and it would end the unit of work. Assigning twice is idempotent: the existing row
 is returned with its original ``created_at``.
+
+Both ends of an assignment belong to the same user (spec 024): a ticker or a rule outside the
+repository's owner is reported as unknown, and a rule of another user than the ticker's is an
+``UnknownRuleError``.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ from trading_bot.persistence.errors import (
     UnknownTickerError,
 )
 from trading_bot.persistence.models import RuleRow, TickerRow, TickerRuleRow
+from trading_bot.persistence.owner import Owner, OwnerScope
 from trading_bot.persistence.records import Assignment, StoredRule, StoredTicker
 from trading_bot.persistence.repositories.rules import load_rule_document
 from trading_bot.persistence.repositories.tickers import to_record as ticker_record
@@ -39,16 +44,19 @@ def to_record(row: TickerRuleRow) -> Assignment:
 class SqlAssignmentRepository:
     """``AssignmentRepository`` over one session; build one per unit of work."""
 
-    def __init__(self, session: Session, *, clock: Clock = system_clock) -> None:
+    def __init__(
+        self, session: Session, *, clock: Clock = system_clock, owner: Owner = None
+    ) -> None:
         self._session = session
         self._clock = clock
+        self._owner = OwnerScope(session, owner)
 
     def assign(self, ticker_id: int, rule_id: int) -> Assignment:
-        ticker = self._session.get(TickerRow, ticker_id)
+        ticker = self._ticker(ticker_id)
         if ticker is None:
             raise UnknownTickerError(ticker_id)
         rule = self._session.get(RuleRow, rule_id)
-        if rule is None:
+        if rule is None or rule.user_id != ticker.user_id:
             raise UnknownRuleError(rule_id)
         if ticker.timeframe != rule.timeframe:
             raise TimeframeMismatchError(ticker.timeframe, rule.timeframe)
@@ -67,7 +75,7 @@ class SqlAssignmentRepository:
 
     def unassign(self, ticker_id: int, rule_id: int) -> bool:
         row = self._session.get(TickerRuleRow, (ticker_id, rule_id))
-        if row is None:
+        if row is None or self._ticker(ticker_id) is None:
             return False
         self._session.delete(row)
         self._session.flush()
@@ -75,11 +83,17 @@ class SqlAssignmentRepository:
 
     def list_all(self) -> tuple[Assignment, ...]:
         statement = select(TickerRuleRow).order_by(TickerRuleRow.ticker_id, TickerRuleRow.rule_id)
+        if not self._owner.everyone:
+            statement = statement.join(TickerRow, TickerRow.id == TickerRuleRow.ticker_id).where(
+                TickerRow.user_id == self._owner.user_id
+            )
         return tuple(to_record(row) for row in self._session.execute(statement).scalars())
 
     def rules_for_ticker(
         self, ticker_id: int, *, enabled_only: bool = False
     ) -> tuple[StoredRule, ...]:
+        if self._ticker(ticker_id) is None:
+            return ()
         statement = (
             select(RuleRow)
             .join(TickerRuleRow, TickerRuleRow.rule_id == RuleRow.id)
@@ -95,6 +109,7 @@ class SqlAssignmentRepository:
                 enabled=row.enabled,
                 created_at=to_utc(row.created_at),
                 updated_at=to_utc(row.updated_at),
+                user_id=row.user_id,
             )
             for row in self._session.execute(statement).scalars()
         )
@@ -102,6 +117,9 @@ class SqlAssignmentRepository:
     def tickers_for_rule(
         self, rule_id: int, *, enabled_only: bool = False
     ) -> tuple[StoredTicker, ...]:
+        rule = self._session.get(RuleRow, rule_id)
+        if rule is None or not self._owner.allows(rule.user_id):
+            return ()
         statement = (
             select(TickerRow)
             .join(TickerRuleRow, TickerRuleRow.ticker_id == TickerRow.id)
@@ -111,3 +129,7 @@ class SqlAssignmentRepository:
         if enabled_only:
             statement = statement.where(TickerRow.enabled.is_(True))
         return tuple(ticker_record(row) for row in self._session.execute(statement).scalars())
+
+    def _ticker(self, ticker_id: int) -> TickerRow | None:
+        row = self._session.get(TickerRow, ticker_id)
+        return row if row is not None and self._owner.allows(row.user_id) else None

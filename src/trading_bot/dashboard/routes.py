@@ -18,7 +18,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, tzinfo
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Final
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -259,7 +259,11 @@ class Dashboard:
         return unit_of_work
 
     async def _work[T](self, request: Request, work: Callable[[DashboardRepositories], T]) -> T:
-        return await in_dashboard_unit_of_work(self._unit_of_work(request), work)
+        # Signed in: that user's configuration only (spec 024). Before the gate ran, only the
+        # users repository is used, which has no owner.
+        user: StoredUser | None = getattr(request.state, "user", None)
+        owner = None if user is None else user.id
+        return await in_dashboard_unit_of_work(self._unit_of_work(request), work, owner=owner)
 
     def _provider(self, request: Request) -> MarketDataProvider:
         provider: MarketDataProvider = request.app.state.runtime.provider
@@ -359,7 +363,7 @@ class Dashboard:
         """Whether someone can log in: a user exists, or the first one can be created (D2)."""
         if self._credentials is not None and self._credentials.bootstrap_hash is not None:
             return True
-        return await self._work(request, lambda repositories: repositories.users.count() > 0)
+        return await self._work(request, _reachable)
 
     async def login(self, request: Request) -> Response:
         credentials = self._credentials
@@ -390,12 +394,12 @@ class Dashboard:
                 status_code=429,
             )
 
-        def read(repositories: DashboardRepositories) -> tuple[StoredUser | None, int]:
+        def read(repositories: DashboardRepositories) -> tuple[StoredUser | None, bool]:
             self._bootstrap(repositories, credentials)
-            return repositories.users.get_by_username(username), repositories.users.count()
+            return repositories.users.get_by_username(username), _reachable(repositories)
 
-        user, count = await self._work(request, read)
-        if count == 0:
+        user, reachable = await self._work(request, read)
+        if not reachable:
             return self._disabled(request)
         stored = _stored_hash(user)
         # scrypt takes tens of milliseconds by design: keep it off the event loop.
@@ -432,13 +436,30 @@ class Dashboard:
         return peer
 
     def _bootstrap(self, repositories: DashboardRepositories, credentials: _Credentials) -> None:
-        """Create the first administrator from ``TB_DASHBOARD_PASSWORD_HASH`` (spec 023, D2)."""
-        if credentials.bootstrap_hash is None or repositories.users.count() > 0:
+        """Give the first administrator ``TB_DASHBOARD_PASSWORD_HASH`` (spec 023, D2).
+
+        Only while nobody can get in: no user has a password and no access link is pending.
+        Migration ``0005`` creates that administrator, without a password, as the owner of the
+        existing configuration; an empty table (never migrated past ``0004``) gets a new one.
+        """
+        if credentials.bootstrap_hash is None or _reachable(repositories):
             return
-        user = repositories.users.add(
-            credentials.admin_username, is_admin=True, password_hash=credentials.bootstrap_hash
-        )
-        self._logger.info("dashboard: created the first administrator, user %d", user.id)
+        users = repositories.users
+        admins = [user for user in users.list_all() if user.is_admin]
+        if not admins:
+            created = users.add(
+                credentials.admin_username, is_admin=True, password_hash=credentials.bootstrap_hash
+            )
+            self._logger.info("dashboard: created the first administrator, user %d", created.id)
+            return
+        first = min(admins, key=lambda user: user.id)
+        if first.username != credentials.admin_username and (
+            users.get_by_username(credentials.admin_username) is None
+        ):
+            users.rename(first.id, credentials.admin_username)
+        users.set_active(first.id, True)
+        users.set_password(first.id, credentials.bootstrap_hash)
+        self._logger.info("dashboard: set the first administrator's password, user %d", first.id)
 
     def _decoy_hash(self) -> PasswordHash:
         if self._decoy is None:
@@ -1042,8 +1063,6 @@ def install_dashboard(app: FastAPI, settings: Settings) -> None:
     actions: list[tuple[str, Callable[[Request, str, Form], Awaitable[Response]]]] = [
         ("/logout", dashboard.logout),
         ("/account/password", dashboard.change_password),
-        ("/pause", dashboard.pause),
-        ("/resume", dashboard.resume),
         ("/tickers", dashboard.add_ticker),
         ("/tickers/{ticker_id:int}/rules", dashboard.set_ticker_rules),
         ("/tickers/{ticker_id:int}/enable", dashboard.enable_ticker),
@@ -1069,6 +1088,9 @@ def install_dashboard(app: FastAPI, settings: Settings) -> None:
         PREFIX + "/users", dashboard.page(dashboard.users_page, admin=True), methods=["GET"]
     )
     admin_actions: list[tuple[str, Callable[[Request, str, Form], Awaitable[Response]]]] = [
+        # The pause still stops the whole bot, so it is an administrator's switch (spec 024).
+        ("/pause", dashboard.pause),
+        ("/resume", dashboard.resume),
         ("/users", dashboard.invite_user),
         ("/users/{user_id:int}/link", dashboard.new_link),
         ("/users/{user_id:int}/enable", dashboard.enable_user),
@@ -1132,6 +1154,16 @@ def _read_flash(request: Request) -> dict[str, str] | None:
     if level not in ("ok", "error") or not text:
         return None
     return {"level": level, "text": text}
+
+
+def _reachable(repositories: DashboardRepositories) -> bool:
+    """Whether anyone can get in: a user who can log in, or a pending access link."""
+    now = datetime.now(UTC)
+    return any(
+        user.can_log_in
+        or (user.active and user.invite_expires_at is not None and user.invite_expires_at > now)
+        for user in repositories.users.list_all()
+    )
 
 
 def _origin(request: Request) -> str:

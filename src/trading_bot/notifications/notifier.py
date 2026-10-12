@@ -34,6 +34,7 @@ class SignalNotification:
     signal: StoredSignal  # the committed row: key, side, close price, values, rule name and id
     rule: Rule  # the parsed document, for the chart's indicators (#18)
     candles: pd.DataFrame  # the closed candles the decision was made on; read-only, never copied
+    owner_id: int  # the user whose ticker and rule produced the signal (spec 024)
 
 
 class Notifier(Protocol):

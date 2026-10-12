@@ -136,6 +136,16 @@ class SqlUserRepository:
             return None
         return self.set_password(row.id, password_hash)
 
+    def rename(self, user_id: int, username: str) -> StoredUser:
+        normalized = normalize_username(username)
+        row = self._row(user_id)
+        if row.username == normalized:
+            return to_record(row)
+        if self._by_username(normalized) is not None:
+            raise DuplicateUsernameError(normalized)
+        row.username = normalized
+        return self._touched(row)
+
     def set_active(self, user_id: int, active: bool) -> StoredUser:
         row = self._row(user_id)
         if row.active == active:

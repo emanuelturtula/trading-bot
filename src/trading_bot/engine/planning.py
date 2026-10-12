@@ -34,6 +34,7 @@ class TickerPlan:
     """One ticker of the snapshot: what to fetch and which rules to evaluate on it."""
 
     ticker_id: int
+    user_id: int  # the owner (spec 024)
     symbol: str  # normalized
     timeframe: Timeframe
     rules: tuple[StoredRule, ...]  # enabled, ordered by name, at least one
@@ -117,6 +118,7 @@ def read_plan(
         planned.append(
             TickerPlan(
                 ticker_id=stored.id,
+                user_id=stored.user_id,
                 symbol=stored.symbol,
                 timeframe=stored.timeframe,
                 rules=rules,

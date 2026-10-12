@@ -17,18 +17,18 @@ WORKFLOW = "emanuelturtula/trading-bot/.github/workflows/delivery.yml"
 
 def make_env(**overrides: str) -> dict[str, str]:
     env = {
-        "DEPLOY_ENVIRONMENT": "beta",
+        "DEPLOY_ENVIRONMENT": "prod",
         "DEPLOY_REVISION": REVISION,
         "DEPLOY_IMAGE": IMAGE,
-        "DEPLOY_VERSION": "v0.2.0-beta.aaaaaaa",
+        "DEPLOY_VERSION": "v0.2.0",
         "DEPLOY_HOST": "pi-host",
         "DEPLOY_USER": "deployer",
         "DEPLOY_SSH_KEY": "fake-key-material",
         "DEPLOY_KNOWN_HOSTS": "pi-host ssh-ed25519 AAAAfake",
         "GITHUB_EVENT_NAME": "push",
         "GITHUB_REPOSITORY": "emanuelturtula/trading-bot",
-        "GITHUB_REF": "refs/heads/feature/new-rule",
-        "GITHUB_WORKFLOW_REF": (f"{WORKFLOW}@refs/heads/feature/new-rule"),
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_WORKFLOW_REF": f"{WORKFLOW}@refs/heads/main",
         "GITHUB_SHA": REVISION,
         "GITHUB_RUN_NUMBER": "42",
         "GITHUB_RUN_ID": "123456",
@@ -40,27 +40,16 @@ def make_env(**overrides: str) -> dict[str, str]:
 
 
 def prod_env(**overrides: str) -> dict[str, str]:
-    base = {
-        "DEPLOY_ENVIRONMENT": "prod",
-        "DEPLOY_VERSION": "v0.2.0",
-        "GITHUB_REF": "refs/heads/main",
-        "GITHUB_WORKFLOW_REF": (f"{WORKFLOW}@refs/heads/main"),
-    }
-    base.update(overrides)
-    return make_env(**base)
+    return make_env(**overrides)
 
 
-def test_valid_beta_request() -> None:
-    request = rd.parse_request(make_env())
-    assert request.environment == "beta"
+def test_valid_prod_request() -> None:
+    request = rd.parse_request(prod_env())
+    assert request.environment == "prod"
     assert (
         request.source_run_url
         == "https://github.com/emanuelturtula/trading-bot/actions/runs/123456"
     )
-
-
-def test_valid_prod_request() -> None:
-    assert rd.parse_request(prod_env()).environment == "prod"
 
 
 @pytest.mark.parametrize(
@@ -72,6 +61,10 @@ def test_valid_prod_request() -> None:
         {"GITHUB_SHA": "c" * 40},
         {"GITHUB_WORKFLOW_REF": WORKFLOW.replace("delivery", "other") + "@refs/heads/main"},
         {"GITHUB_REF": "refs/heads/feature/x"},
+        {
+            "GITHUB_REF": "refs/heads/feature/x",
+            "GITHUB_WORKFLOW_REF": f"{WORKFLOW}@refs/heads/feature/x",
+        },
         {"DEPLOY_VERSION": "v0.2.0-beta.aaaaaaa"},
         {"GITHUB_RUN_NUMBER": "0"},
         {"GHCR_TOKEN": " "},
@@ -82,23 +75,15 @@ def test_prod_rejects_anything_but_a_main_push(overrides: dict[str, str]) -> Non
         rd.parse_request(prod_env(**overrides))
 
 
-@pytest.mark.parametrize(
-    "overrides",
-    [
-        {
-            "GITHUB_REF": "refs/heads/main",
-            "GITHUB_WORKFLOW_REF": f"{WORKFLOW}@refs/heads/main",
-        },
-        {
-            "GITHUB_REF": "refs/heads/hotfix",
-            "GITHUB_WORKFLOW_REF": f"{WORKFLOW}@refs/heads/hotfix",
-        },
-        {"DEPLOY_VERSION": "v0.2.0"},
-    ],
-)
-def test_beta_rejects_non_feature_branches_and_stable_versions(overrides: dict[str, str]) -> None:
-    with pytest.raises(ValueError):
-        rd.parse_request(make_env(**overrides))
+def test_beta_is_no_longer_a_deploy_target() -> None:
+    beta = {
+        "DEPLOY_ENVIRONMENT": "beta",
+        "DEPLOY_VERSION": "v0.2.0-beta.aaaaaaa",
+        "GITHUB_REF": "refs/heads/feature/new-rule",
+        "GITHUB_WORKFLOW_REF": f"{WORKFLOW}@refs/heads/feature/new-rule",
+    }
+    with pytest.raises(ValueError, match="environment"):
+        rd.parse_request(make_env(**beta))
 
 
 @pytest.mark.parametrize(

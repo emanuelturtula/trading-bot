@@ -111,6 +111,7 @@ def seed_previous(root: Path, **overrides: Any) -> dict[str, Any]:
     "overrides",
     [
         {"environment": "test"},
+        {"environment": "beta"},
         {"image": "ghcr.io/other/trading-bot@sha256:" + "b" * 64},
         {"image": "ghcr.io/emanuelturtula/trading-bot:latest"},
         {"revision": "main"},
@@ -151,15 +152,57 @@ def test_first_deploy_writes_current_manifest_and_uses_prod_port(
     assert (tmp_path / "prod" / "secrets.env").exists()
 
 
-def test_beta_uses_port_8082_and_project_name(
+def test_prod_keeps_its_compose_project_so_the_data_volume_survives(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    docker = FakeDocker(healthy_images={IMAGE}, labels=labels(version="v0.2.0-beta.aaaaaaa"))
+    docker = FakeDocker(healthy_images={IMAGE}, labels=labels())
     install(monkeypatch, docker)
-    deploy_prod(tmp_path, environment="beta", version="v0.2.0-beta.aaaaaaa")
+    deploy_prod(tmp_path)
     compose_calls = [c for c in docker.commands if c[:2] == ["docker", "compose"]]
-    assert all(c[3] == "trading-bot-beta" for c in compose_calls)
-    assert dp.PORTS["beta"] == "8082"
+    assert compose_calls
+    assert all(c[3] == "trading-bot-prod" for c in compose_calls)
+    assert dp.PORTS == {"prod": "8081"}
+
+
+def test_default_root_is_trading_bot_in_the_home_directory() -> None:
+    assert Path.home() / "trading-bot" == dp.DEFAULT_ROOT
+    assert Path.home() / "trading-bot-deploy" == dp.LEGACY_ROOT
+
+
+def test_legacy_root_is_moved_and_manifest_paths_are_rebased(tmp_path: Path) -> None:
+    legacy = tmp_path / "trading-bot-deploy"
+    root = tmp_path / "trading-bot"
+    previous = seed_previous(legacy, backup=str(legacy / "prod" / "attempts" / "x" / "db"))
+    (legacy / "prod" / "secrets.env").write_text("TB_SOMETHING=kept\n", encoding="utf-8")
+
+    assert dp.migrate_legacy_root(legacy, root) is True
+
+    assert not legacy.exists()
+    assert (root / "prod" / "secrets.env").read_text(encoding="utf-8") == "TB_SOMETHING=kept\n"
+    current = dp.read_json(root / "prod" / "current.json")
+    for key in ("compose", "secrets_env_file", "attempt", "backup"):
+        assert current[key].startswith(str(root.resolve()) + os.sep), key
+    assert Path(current["compose"]).is_file()
+    assert {k: v for k, v in current.items() if k not in dp.MANIFEST_PATHS} == {
+        k: v for k, v in previous.items() if k not in dp.MANIFEST_PATHS
+    }
+
+
+def test_migration_is_a_no_op_without_a_legacy_root(tmp_path: Path) -> None:
+    root = tmp_path / "trading-bot"
+    root.mkdir()
+    assert dp.migrate_legacy_root(tmp_path / "trading-bot-deploy", root) is False
+    assert list(root.iterdir()) == []
+
+
+def test_migration_refuses_when_both_roots_exist(tmp_path: Path) -> None:
+    legacy = tmp_path / "trading-bot-deploy"
+    root = tmp_path / "trading-bot"
+    legacy.mkdir()
+    root.mkdir()
+    with pytest.raises(dp.DeploymentError, match="Both"):
+        dp.migrate_legacy_root(legacy, root)
+    assert legacy.exists()
 
 
 @pytest.mark.parametrize(
@@ -240,12 +283,12 @@ def test_secrets_file_is_created_private_and_loose_permissions_are_refused(tmp_p
 
 
 def test_existing_secrets_file_is_never_rewritten(tmp_path: Path) -> None:
-    path = tmp_path / "beta" / "secrets.env"
+    path = tmp_path / "prod" / "secrets.env"
     path.parent.mkdir(parents=True)
     path.write_text("TB_SOMETHING=kept\n", encoding="utf-8")
     if os.name == "posix":
         path.chmod(0o600)
-    dp.prepare_secrets_env_file(tmp_path, "beta")
+    dp.prepare_secrets_env_file(tmp_path, "prod")
     assert path.read_text(encoding="utf-8") == "TB_SOMETHING=kept\n"
 
 

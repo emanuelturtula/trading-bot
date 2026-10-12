@@ -54,7 +54,7 @@ src/trading_bot/
   api/  dashboard/     REST /api/v1/* and HTMX dashboard (mandatory auth)
   persistence/         models, repositories, Alembic migrations
 tests/  unit/ integration/ deploy/ scripts/ fixtures/
-deploy/                compose.yml + deploy.py (runs on the Raspberry)
+deploy/                compose.yml + deploy.py (runs on the Raspberry, root ~/trading-bot)
 scripts/               check.py, secret_scan.py, next_version.py, remote_deploy.py
 docs/                  ARCHITECTURE, ROADMAP, DEPLOYMENT, specs/
 ```
@@ -65,7 +65,7 @@ docs/                  ARCHITECTURE, ROADMAP, DEPLOYMENT, specs/
 - Strict typing (mypy strict). `Protocol` for ports (data providers, notifiers, repositories); concrete implementations are injected in `main.py`.
 - Network errors with retries + backoff in `data/` and `notifications/`; never in `domain/`.
 - Tests without network: recorded OHLCV fixtures in `tests/fixtures/`; external clients mocked. Minimum coverage 85%.
-- Telegram messages: ticker, timeframe, rule, close price, indicator values, chart, the `[BETA]` prefix outside prod, and the disclaimer "Not financial advice."
+- Telegram messages: ticker, timeframe, rule, close price, indicator values, chart, the `[BETA]` prefix outside prod (only local `dev` runs today), and the disclaimer "Not financial advice."
 
 ## Feature workflow
 
@@ -74,19 +74,19 @@ Every feature, fix or change in `src/`, `tests/`, `deploy/`, `scripts/` or `.git
 1. Create the branch `feature/<slug>` from `origin/main`.
 2. Write the spec `docs/specs/NNN-<slug>.md` from `_TEMPLATE.md` (acceptance criteria, design, test plan). Product questions go to the user before implementing.
 3. Implement with TDD within the approved design.
-4. Run the full gate (`scripts/check.py`), commit and push → CI + **beta deploy (port 8082)**, verify `/health`, open the PR with the evidence.
+4. Run the full gate (`scripts/check.py`), commit and push, open the PR and wait for CI green on it. There is no beta environment: the first deploy is prod, after the merge.
 5. **Merge only with explicit user approval**, always as a squash merge (the only method the repository allows): `gh pr merge <n> --squash --subject "<type>: <description> (#<n>)" --body "<body>"`. The squash commit is the only commit of the PR that reaches `main`, so its subject must be a Conventional Commit describing the whole PR (`feat` if it adds any feature, `!` if any change is breaking): it drives the version bump. Stacked PRs and CodeQL details in [Deploy](docs/DEPLOYMENT.md#merging-pull-requests). Main → **prod deploy (port 8081)** + tag + GitHub Release.
 
-**Exception — Dependabot PRs (light path).** If the change is only the Dependabot bump (`Dockerfile`, `pyproject.toml`/`uv.lock` or action SHAs), with no code or config changes, skip the spec: branch `feature/deps-<slug>` from `origin/main` → cherry-pick of the Dependabot commit (or the same bump in a commit of its own, `build(deps)`/`ci(deps)`) → `scripts/check.py` → push, beta 8082 and `/health` verified → PR that references the Dependabot one, which is closed with a comment → merge only with explicit user approval. Security updates go through the same path, with priority. If it breaks tests or requires code/config: full workflow. Details in [Deploy](docs/DEPLOYMENT.md#dependabot-prs).
+**Exception — Dependabot PRs (light path).** If the change is only the Dependabot bump (`Dockerfile`, `pyproject.toml`/`uv.lock` or action SHAs), with no code or config changes, skip the spec: branch `feature/deps-<slug>` from `origin/main` → cherry-pick of the Dependabot commit (or the same bump in a commit of its own, `build(deps)`/`ci(deps)`) → `scripts/check.py` → push → PR that references the Dependabot one, which is closed with a comment → merge only with explicit user approval. Security updates go through the same path, with priority. If it breaks tests or requires code/config: full workflow. Details in [Deploy](docs/DEPLOYMENT.md#dependabot-prs).
 
 ## Git, versioning and delivery
 
 - Branches: `feature/<slug>`. Never push to `main` (protected).
 - Commits: Conventional Commits in English (`feat:`, `fix:`, `refactor:`, `test:`, `docs:`, `ci:`, `build:`, `chore:`; `!` or `BREAKING CHANGE:` for breaking).
-- Automatic SemVer version (`scripts/next_version.py`): feat → minor, anything else → patch, breaking → major (minor while < 1.0). Beta: `vX.Y.Z-beta.<sha7>`; prod: `vX.Y.Z`.
-- Pipeline: `ci.yml` (gitleaks → lint/mypy → tests → docker arm64 on PR) · `delivery.yml` (version → arm64 image on GHCR → beta/prod deploy → release) · `remote-deploy.yml` (Tailscale OIDC + SSH → `deploy/deploy.py`).
+- Automatic SemVer version (`scripts/next_version.py`): feat → minor, anything else → patch, breaking → major (minor while < 1.0). Releases: `vX.Y.Z`.
+- Pipeline: `ci.yml` (gitleaks → lint/mypy → tests → docker arm64 on PR) · `delivery.yml` on `main` only (version → arm64 image on GHCR → prod deploy → release) · `remote-deploy.yml` (Tailscale OIDC + SSH → `deploy/deploy.py`).
 - The deploy on the Pi validates the digest and OCI labels, waits for the healthcheck and rolls back automatically. Details and setup in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
-- Dependabot: its PRs are not merged directly (they do not deploy to beta, which is a required check); they are brought into `feature/deps-<slug>` following the exception in "Feature workflow". Python is pinned to 3.12: Dependabot ignores its minor/major jumps and upgrading the version is an explicit feature (never the light path).
+- Dependabot: its PRs are not merged directly; they are brought into `feature/deps-<slug>` following the exception in "Feature workflow". Python is pinned to 3.12: Dependabot ignores its minor/major jumps and upgrading the version is an explicit feature (never the light path).
 
 ## Active protections (do not disable)
 

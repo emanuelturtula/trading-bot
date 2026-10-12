@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Deploy an immutable trading-bot image on the Raspberry Pi using Docker Compose.
 
-Runs on the Pi (stdlib only). State lives under ``<root>/<environment>/``:
+Runs on the Pi (stdlib only). Production is the only environment; state lives under
+``<root>/<environment>/`` with ``<root>`` defaulting to ``~/trading-bot``:
 
-    deploy.lock                 host-wide lock shared by beta and prod
+    deploy.lock                 host-wide lock (one deployment at a time)
     <env>/secrets.env           operator-managed secrets (chmod 600, never read here)
     <env>/current.json          last healthy deployment (written atomically)
     <env>/attempts/<id>/        compose.yml, request.json, previous.json,
@@ -14,7 +15,9 @@ Safety properties:
 * image OCI labels must match the requested revision and version;
 * older workflow runs can never replace a newer deployment (rerun protection);
 * the new container must be healthy and run the exact digest, otherwise the
-  previous deployment is restored.
+  previous deployment is restored;
+* a root left by an older release in ``~/trading-bot-deploy`` is moved to the new
+  default root once, with the paths recorded in ``current.json`` rewritten.
 """
 
 from __future__ import annotations
@@ -37,15 +40,15 @@ from typing import Any
 REPOSITORY = "emanuelturtula/trading-bot"
 IMAGE = re.compile(rf"ghcr\.io/{re.escape(REPOSITORY)}@sha256:[0-9a-f]{{64}}")
 REVISION = re.compile(r"[0-9a-f]{40}")
-VERSIONS = {
-    "beta": re.compile(r"v\d+\.\d+\.\d+-beta\.[0-9a-f]{7}"),
-    "prod": re.compile(r"v\d+\.\d+\.\d+"),
-}
+VERSIONS = {"prod": re.compile(r"v\d+\.\d+\.\d+")}
 RUN_URL = re.compile(rf"https://github\.com/{re.escape(REPOSITORY)}/actions/runs/[1-9][0-9]*")
-PORTS = {"beta": "8082", "prod": "8081"}
+PORTS = {"prod": "8081"}
 DATABASE = "/app/data/trading_bot.db"
 WAIT_TIMEOUT_SECONDS = "180"
 KEEP_ATTEMPTS = 10
+DEFAULT_ROOT = Path.home() / "trading-bot"
+LEGACY_ROOT = Path.home() / "trading-bot-deploy"
+MANIFEST_PATHS = ("compose", "secrets_env_file", "attempt", "backup")
 
 Manifest = dict[str, Any]
 
@@ -116,13 +119,42 @@ def validate(
     source_run_url: str,
 ) -> None:
     if environment not in PORTS:
-        raise DeploymentError("Environment must be beta or prod")
+        raise DeploymentError("Environment must be prod")
     if not IMAGE.fullmatch(image) or not REVISION.fullmatch(revision):
         raise DeploymentError("A repository-scoped image digest and full commit SHA are required")
     if not VERSIONS[environment].fullmatch(version):
         raise DeploymentError(f"Version {version!r} is not valid for {environment}")
     if type(run_number) is not int or run_number < 1 or not RUN_URL.fullmatch(source_run_url):
         raise DeploymentError("Workflow run evidence is required")
+
+
+def migrate_legacy_root(legacy: Path, root: Path) -> bool:
+    """Move the deploy root of an older release to ``root``, once.
+
+    The compose project name, and therefore the ``data`` volume, does not depend on the
+    root, so only the files move. ``current.json`` stores absolute paths (compose file,
+    secrets file, attempt, backup) that rollback and backup rely on: they are rebased.
+    Returns whether a migration happened.
+    """
+    legacy = Path(legacy).expanduser().resolve()
+    root = Path(root).expanduser().resolve()
+    if not legacy.is_dir():
+        return False
+    if root.exists():
+        raise DeploymentError(
+            f"Both {legacy} and {root} exist; keep only the deploy root in {root} and retry"
+        )
+    with deployment_lock(legacy):
+        legacy.rename(root)
+    prefix = f"{legacy}{os.sep}"
+    for current in root.glob("*/current.json"):
+        manifest = read_json(current)
+        for key in MANIFEST_PATHS:
+            value = manifest.get(key)
+            if isinstance(value, str) and value.startswith(prefix):
+                manifest[key] = str(root / value[len(prefix) :])
+        write_json(current, manifest)
+    return True
 
 
 def prepare_secrets_env_file(root: Path, environment: str) -> Path:
@@ -334,9 +366,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", required=True)
     parser.add_argument("--run-number", type=int, required=True)
     parser.add_argument("--source-run-url", required=True)
-    parser.add_argument("--root", type=Path, default=Path.home() / "trading-bot-deploy")
+    parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     args = parser.parse_args(argv)
     try:
+        if args.root == DEFAULT_ROOT and migrate_legacy_root(LEGACY_ROOT, DEFAULT_ROOT):
+            print(f"Moved {LEGACY_ROOT} to {DEFAULT_ROOT}", file=sys.stderr)
         result = deploy(**vars(args))
     except (DeploymentError, subprocess.SubprocessError, OSError, ValueError) as error:
         print(str(error), file=sys.stderr)

@@ -9,8 +9,10 @@ failure is logged by class name and the following steps still run.
 A failure while starting closes whatever was already built and propagates (AC3): the FastAPI
 lifespan never yields, uvicorn exits non-zero and the deploy rolls back.
 
-The builders of the calendar, the provider and the notifier's sender are injectable so tests
-run without the network and without the 100-year calendar.
+When Telegram is configured, the command poller (spec 018) starts last and stops first.
+
+The builders of the calendar, the provider, the notifier's sender and the poller's update source
+are injectable so tests run without the network and without the 100-year calendar.
 """
 
 from __future__ import annotations
@@ -47,6 +49,9 @@ from trading_bot.scheduler.policy import SchedulerPolicy
 from trading_bot.scheduler.runner import TimeframeRunner
 from trading_bot.scheduler.service import SchedulerService
 from trading_bot.scheduler.slots import skip_unpublished_hours
+from trading_bot.telegram_bot.commands import CommandHandler
+from trading_bot.telegram_bot.poller import BotUpdateSource, TelegramPoller, UpdateSource
+from trading_bot.telegram_bot.unit_of_work import sql_command_unit_of_work
 
 __all__ = ["ClosableProvider", "Runtime", "RuntimeNotifier"]
 
@@ -68,6 +73,7 @@ class RuntimeNotifier(Protocol):
 CalendarBuilder = Callable[[], MarketCalendar]
 ProviderBuilder = Callable[[MarketCalendar, Path], ClosableProvider]
 SenderBuilder = Callable[[SecretStr], MessageSender]
+UpdateSourceBuilder = Callable[[SecretStr], UpdateSource]
 
 
 def _build_calendar() -> MarketCalendar:
@@ -88,15 +94,18 @@ class Runtime:
         build_calendar: CalendarBuilder = _build_calendar,
         build_provider: ProviderBuilder = _build_provider,
         build_sender: SenderBuilder = BotMessageSender,
+        build_update_source: UpdateSourceBuilder = BotUpdateSource,
     ) -> None:
         self._settings = settings
         self._build_calendar = build_calendar
         self._build_provider = build_provider
         self._build_sender = build_sender
+        self._build_update_source = build_update_source
         self._stack: AsyncExitStack | None = None
         self._database: Database | None = None
         self._notifier: RuntimeNotifier | None = None
         self._service: SchedulerService | None = None
+        self._poller: TelegramPoller | None = None
         self._logger = logging.getLogger(_LOGGER_NAME)
 
     @property
@@ -116,6 +125,11 @@ class Runtime:
         if self._service is None:
             raise RuntimeError("the runtime is not started")
         return self._service
+
+    @property
+    def poller(self) -> TelegramPoller | None:
+        """The command poller, or ``None`` when Telegram is not configured."""
+        return self._poller
 
     async def start(self) -> None:
         if self._stack is not None:
@@ -142,6 +156,7 @@ class Runtime:
         self._database = None
         self._notifier = None
         self._service = None
+        self._poller = None
 
     async def _start(self, stack: AsyncExitStack) -> None:
         settings = self._settings
@@ -195,6 +210,26 @@ class Runtime:
         self._push(stack, "scheduler", stop_scheduler)
         service.start()
         self._service = service
+
+        token = settings.telegram_bot_token
+        if isinstance(notifier, TelegramNotifier) and token is not None:
+            handler = CommandHandler(
+                unit_of_work=sql_command_unit_of_work(database),
+                provider=provider,
+                next_fire_times=service.next_fire_times,
+                production=settings.environment == "prod",
+                environment=settings.environment,
+                version=settings.version,
+                display_tz=settings.display_zone,
+            )
+            poller = TelegramPoller(
+                source=self._build_update_source(token),
+                handler=handler,
+                allowed_chat_ids=settings.telegram_chat_ids,
+            )
+            self._push(stack, "telegram poller", poller.aclose)
+            poller.start()
+            self._poller = poller
         self._logger.info(
             "started: environment %s, %s notifier", settings.environment, _kind(notifier)
         )

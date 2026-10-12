@@ -103,7 +103,7 @@ While `DEPLOY_ENABLED` is not `true`, the pipeline builds the image and reports 
 
 ### 4. Application secrets (on the Pi)
 
-Create a different bot per environment with @BotFather. On the Pi:
+Create a different bot per environment with @BotFather (`/newbot`), for example one named `<your name> trading beta` and one `<your name> trading`. **Beta and prod must never share a token**: a token allows one poller, and two processes polling it both log `409 Conflict` and answer nothing. On the Pi:
 
 ```sh
 mkdir -p ~/trading-bot-deploy/beta ~/trading-bot-deploy/prod
@@ -119,7 +119,9 @@ EOF
 chmod 600 ~/trading-bot-deploy/beta/secrets.env
 ```
 
-Every chat in `TB_TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated) receives each signal; to find your chat id, send any message to the bot and read `message.chat.id` from `https://api.telegram.org/bot<token>/getUpdates` in a browser (never paste the token anywhere else). Without a token or chat ids the bot still starts and only logs its signals.
+Every chat in `TB_TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated) receives each signal and is the only one whose commands (`/add`, `/status`, `/pause` ...) the bot answers; messages from any other chat are ignored. To find your chat id, **before** starting the container with the token, send any message to the bot and read `message.chat.id` from `https://api.telegram.org/bot<token>/getUpdates` in a browser (never paste the token anywhere else; once the bot runs it consumes the updates and that page stays empty). Without a token or chat ids the bot still starts, only logs its signals and answers no command.
+
+Check it from the phone after a restart: `/status` answers with the version and `[BETA]` in beta. If it does not, `docker compose --project-name trading-bot-beta logs app` shows one line explaining why (`409 Conflict`, rejected token, Telegram unreachable); the bot keeps retrying on its own.
 
 Repeat for `prod/secrets.env` with the production bot token. `deploy.py` never reads this file; it only creates it empty if it is missing and refuses to deploy if its permissions are more open than 600. Changes apply on restart: `docker compose --project-name trading-bot-beta restart app` (or `trading-bot-prod`).
 

@@ -45,6 +45,7 @@ _SQL_MODULE = "engine/sql_unit_of_work.py"
 _SQL_PREFIXES = (
     "sqlalchemy",
     "trading_bot.persistence.database",
+    "trading_bot.persistence.owner",  # the engine reads every user's configuration (spec 024)
     "trading_bot.persistence.repositories",
 )
 _FORBIDDEN_EVERYWHERE = (
@@ -187,6 +188,7 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "notifications/log_notifier.py",
         "notifications/message.py",
         "notifications/notifier.py",
+        "notifications/routing.py",
         "notifications/telegram.py",
     }
 

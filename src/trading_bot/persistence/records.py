@@ -26,6 +26,7 @@ class StoredTicker:
     timeframe: Timeframe
     enabled: bool
     created_at: datetime
+    user_id: int  # the owner (spec 024)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -37,6 +38,7 @@ class StoredRule:
     enabled: bool
     created_at: datetime
     updated_at: datetime
+    user_id: int  # the owner (spec 024)
 
     @property
     def name(self) -> str:

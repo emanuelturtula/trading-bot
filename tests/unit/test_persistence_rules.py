@@ -49,7 +49,9 @@ def test_add_stores_a_disabled_rule_with_both_timestamps_from_the_clock(
     with database.session() as session:
         stored = repositories(session, clock=frozen_clock(START)).rules.add(rule)
 
-    assert stored == StoredRule(id=1, rule=rule, enabled=False, created_at=START, updated_at=START)
+    assert stored == StoredRule(
+        id=1, rule=rule, enabled=False, created_at=START, updated_at=START, user_id=1
+    )
     assert stored.name == "Daily breakout"
 
 

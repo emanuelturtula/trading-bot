@@ -44,7 +44,7 @@ def test_invalid_usernames_are_refused(text: str) -> None:
 def test_add_get_list_and_count(database: Database) -> None:
     with database.session() as session:
         repository = SqlUserRepository(session, clock=frozen_clock(NOW))
-        assert repository.count() == 0
+        assert repository.count() == 1  # migration 0005 creates the owner of existing data
         admin = repository.add("Emi", is_admin=True, password_hash=HASH)
         other = repository.add("ana")
 
@@ -56,13 +56,13 @@ def test_add_get_list_and_count(database: Database) -> None:
         assert not other.is_admin
         assert other.password_hash is None
         assert not other.can_log_in
-        assert repository.count() == 2
-        assert repository.count_active_admins() == 1
+        assert repository.count() == 3
+        assert repository.count_active_admins() == 2
         assert repository.get(admin.id) == admin
         assert repository.get(999) is None
         assert repository.get_by_username(" EMI ") == admin
         assert repository.get_by_username("nobody") is None
-        assert [user.username for user in repository.list_all()] == ["ana", "emi"]
+        assert [user.username for user in repository.list_all()] == ["admin", "ana", "emi"]
         assert HASH not in repr(admin)
 
 
@@ -72,7 +72,7 @@ def test_a_duplicate_username_is_refused_and_the_session_stays_usable(database: 
         repository.add("ana")
         with pytest.raises(DuplicateUsernameError):
             repository.add("ANA")
-        assert repository.count() == 1
+        assert repository.count() == 2
 
 
 def test_an_access_link_sets_the_password_once(database: Database) -> None:
@@ -121,7 +121,7 @@ def test_a_disabled_user_cannot_use_a_link_or_log_in(database: Database) -> None
         disabled = repository.set_active(user.id, False)
         assert not disabled.active
         assert not disabled.can_log_in
-        assert repository.count_active_admins() == 0
+        assert repository.count_active_admins() == 1  # only the migration's admin
         assert repository.invited("c" * 64) is None
         assert repository.set_active(user.id, False) == disabled
         assert repository.set_active(user.id, True).active

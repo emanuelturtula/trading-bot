@@ -23,7 +23,8 @@ from trading_bot.persistence.migrator import (
 from trading_bot.persistence.models import Base
 
 PREVIOUS = "0003"
-HEAD = "0004"
+HEAD = "0005"
+THIS = "0004"
 TIMESTAMP = "2026-01-02 03:04:05.000000"
 EXISTING_QUERIES = (
     "SELECT id, symbol, timeframe, enabled, created_at FROM tickers ORDER BY id",
@@ -80,12 +81,13 @@ def seed(engine: Engine) -> None:
         )
 
 
-def test_0004_is_the_head_and_follows_0003() -> None:
+def test_0004_follows_0003_and_0005_follows_it() -> None:
     script = ScriptDirectory.from_config(alembic_config())
 
     assert script.get_heads() == [HEAD]
     assert head_revision() == HEAD
-    assert script.get_revision(HEAD).down_revision == PREVIOUS
+    assert script.get_revision(THIS).down_revision == PREVIOUS
+    assert script.get_revision(HEAD).down_revision == THIS
 
 
 def test_upgrading_a_0003_database_adds_an_empty_users_table(tmp_path: Path) -> None:
@@ -95,7 +97,7 @@ def test_upgrading_a_0003_database_adds_an_empty_users_table(tmp_path: Path) -> 
         seed(engine)
         before = existing_rows(engine)
 
-        assert run_migrations(engine) == HEAD
+        move_to(engine, THIS)
 
         assert existing_rows(engine) == before
         assert "users" in table_names(engine)
@@ -105,6 +107,7 @@ def test_upgrading_a_0003_database_adds_an_empty_users_table(tmp_path: Path) -> 
                 "SELECT sql FROM sqlite_master WHERE name = 'users'"
             ).scalar()
         rendered = str(CreateTable(Base.metadata.tables["users"]).compile(dialect=engine.dialect))
+        # 0005 changes tickers and rules, never the users table
         assert " ".join(str(stored).split()) == " ".join(rendered.split())
     finally:
         engine.dispose()
@@ -113,7 +116,7 @@ def test_upgrading_a_0003_database_adds_an_empty_users_table(tmp_path: Path) -> 
 def test_downgrade_to_0003_drops_only_the_users(tmp_path: Path) -> None:
     engine = fresh_engine(tmp_path)
     try:
-        run_migrations(engine)
+        move_to(engine, THIS)
         seed(engine)
         with engine.begin() as connection:
             connection.exec_driver_sql(

@@ -116,7 +116,7 @@ class SqlSignalRepository:
         if not isinstance(signal, Signal):
             raise TypeError(f"signal must be a Signal, got {type(signal).__name__}")
         rule_id = _rule_id(signal.rule_id)
-        ticker_id = self._ticker_id(signal.ticker, signal.timeframe)
+        ticker_id = self._ticker_id(signal.ticker, signal.timeframe, rule_id)
         rule_name = self._rule_name(rule_id, signal.timeframe)
         row = SignalRow(
             ticker_id=ticker_id,
@@ -275,11 +275,17 @@ class SqlSignalRepository:
         row = self._session.execute(statement).first()
         return None if row is None else _record_of(row)
 
-    def _ticker_id(self, symbol: str, timeframe: Timeframe) -> int:
+    def _ticker_id(self, symbol: str, timeframe: Timeframe, rule_id: int) -> int:
+        """The ticker of the rule's owner: two users may watch the same symbol (spec 024)."""
+        owner = self._session.execute(
+            select(RuleRow.user_id).where(RuleRow.id == rule_id)
+        ).scalar_one_or_none()
         statement = select(TickerRow.id).where(
             TickerRow.symbol == symbol, TickerRow.timeframe == timeframe
         )
-        found = self._session.execute(statement).scalar_one_or_none()
+        if owner is not None:  # an unknown rule is reported by ``_rule_name`` once found
+            statement = statement.where(TickerRow.user_id == owner)
+        found = self._session.execute(statement.order_by(TickerRow.id).limit(1)).scalar()
         if found is None:
             raise UntrackedTickerError(symbol, timeframe)
         return int(found)

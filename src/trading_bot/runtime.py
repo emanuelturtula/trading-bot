@@ -43,8 +43,10 @@ from trading_bot.engine.sql_unit_of_work import sql_unit_of_work
 from trading_bot.instance_lock import InstanceLock, InstanceLockError
 from trading_bot.notifications.log_notifier import LogNotifier
 from trading_bot.notifications.notifier import SignalNotification
+from trading_bot.notifications.routing import OwnerRouter
 from trading_bot.notifications.telegram import BotMessageSender, MessageSender, TelegramNotifier
 from trading_bot.persistence.database import Database, open_database
+from trading_bot.persistence.owner import default_owner_id
 from trading_bot.scheduler.policy import SchedulerPolicy
 from trading_bot.scheduler.runner import TimeframeRunner
 from trading_bot.scheduler.service import SchedulerService
@@ -196,7 +198,11 @@ class Runtime:
 
         should_run = skip_unpublished_hours(calendar)
         unit_of_work = sql_unit_of_work(database)
-        engine = SignalEngine(provider=provider, unit_of_work=unit_of_work, notifier=notifier)
+        with database.session() as session:
+            owner_id = default_owner_id(session)
+        engine = SignalEngine(
+            provider=provider, unit_of_work=unit_of_work, notifier=OwnerRouter(notifier, owner_id)
+        )
         runner = TimeframeRunner(
             engine=engine,
             calendar=calendar,

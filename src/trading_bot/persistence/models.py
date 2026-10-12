@@ -18,6 +18,7 @@ from datetime import datetime
 from sqlalchemy import (
     CheckConstraint,
     Float,
+    ForeignKey,
     ForeignKeyConstraint,
     Index,
     String,
@@ -50,11 +51,12 @@ _STATE_KEYS = ", ".join(f"'{member.value}'" for member in StateKey)
 
 
 class TickerRow(Base):
-    """A watched symbol on one timeframe. ``(symbol, timeframe)`` is its natural key."""
+    """A user's watched symbol on one timeframe; ``(user_id, symbol, timeframe)`` is its natural
+    key (spec 024, D1), so two users may watch the same symbol."""
 
     __tablename__ = "tickers"
     __table_args__ = (
-        UniqueConstraint("symbol", "timeframe"),
+        UniqueConstraint("user_id", "symbol", "timeframe"),
         # The composite foreign key of ``ticker_rules`` needs this key on the parent, which is
         # what makes the D11 timeframe rule a schema invariant.
         UniqueConstraint("id", "timeframe"),
@@ -69,6 +71,7 @@ class TickerRow(Base):
     timeframe: Mapped[Timeframe] = mapped_column(TimeframeType)
     enabled: Mapped[bool]
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
 
 
 class RuleRow(Base):
@@ -81,7 +84,8 @@ class RuleRow(Base):
 
     __tablename__ = "rules"
     __table_args__ = (
-        UniqueConstraint("name"),
+        # Rule names are unique per user (spec 024, D1).
+        UniqueConstraint("user_id", "name"),
         UniqueConstraint("id", "timeframe"),
         CheckConstraint(f"timeframe IN ({_TIMEFRAME_CODES})", name="timeframe"),
         CheckConstraint(f"signal IN ({_SIDE_CODES})", name="signal"),
@@ -96,6 +100,7 @@ class RuleRow(Base):
     enabled: Mapped[bool]
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
 
 
 class TickerRuleRow(Base):

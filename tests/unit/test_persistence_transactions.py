@@ -82,7 +82,9 @@ def write_lock_is_free(data_dir: Path) -> bool:
 
 def insert_ticker(connection: Connection, symbol: str) -> None:
     connection.exec_driver_sql(
-        "INSERT INTO tickers (symbol, timeframe, enabled, created_at) VALUES (?, '1d', 1, ?)",
+        # User 1 is the administrator migration 0005 creates (spec 024).
+        "INSERT INTO tickers (symbol, timeframe, enabled, created_at, user_id)"
+        " VALUES (?, '1d', 1, ?, 1)",
         (symbol, TIMESTAMP),
     )
 
@@ -263,8 +265,8 @@ def test_a_deferred_reader_that_writes_after_a_commit_fails_with_busy_snapshot(
         with handle.session() as session:
             session.execute(
                 text(
-                    "INSERT INTO tickers (symbol, timeframe, enabled, created_at)"
-                    " VALUES ('AAPL', '1d', 1, :created_at)"
+                    "INSERT INTO tickers (symbol, timeframe, enabled, created_at, user_id)"
+                    " VALUES ('AAPL', '1d', 1, :created_at, 1)"
                 ),
                 {"created_at": TIMESTAMP},
             )
@@ -294,8 +296,8 @@ def test_a_session_that_reads_then_writes_cannot_be_overtaken(
 
         session.execute(
             text(
-                "INSERT INTO tickers (symbol, timeframe, enabled, created_at)"
-                " VALUES ('MSFT', '1d', 1, :created_at)"
+                "INSERT INTO tickers (symbol, timeframe, enabled, created_at, user_id)"
+                " VALUES ('MSFT', '1d', 1, :created_at, 1)"
             ),
             {"created_at": TIMESTAMP},
         )

@@ -27,8 +27,9 @@ from trading_bot.persistence.migrator import (
 from trading_bot.persistence.models import Base
 
 PREVIOUS = "0002"
-HEAD = "0004"  # spec 023 added ``users`` on top of this revision
+HEAD = "0005"  # specs 023 and 024 built on this revision
 THIS = "0003"
+NEXT = "0004"
 REVISION_ID = re.compile(r"^[0-9]{4}$")
 MIGRATOR_LOGGER = "trading_bot.persistence.migrator"
 CONFIGURATION_TABLES = ["rules", "ticker_rules", "tickers"]
@@ -159,7 +160,7 @@ def test_0003_follows_0002_and_0004_follows_it() -> None:
     assert script.get_heads() == [HEAD]
     assert head_revision() == HEAD
     assert script.get_revision(THIS).down_revision == PREVIOUS
-    assert script.get_revision(HEAD).down_revision == THIS
+    assert script.get_revision(NEXT).down_revision == THIS
     assert REVISION_ID.match(THIS)
 
 
@@ -177,7 +178,7 @@ def test_an_empty_database_is_upgraded_to_0003(
         assert current_revision(engine) == HEAD
         assert stored_revisions(engine) == [HEAD]
         assert table_names(engine) == ALL_TABLES
-        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0004"]
+        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0005"]
     finally:
         engine.dispose()
 
@@ -193,7 +194,7 @@ def test_a_second_run_is_a_no_op(tmp_path: Path, caplog: pytest.LogCaptureFixtur
 
         assert stored_revisions(engine) == [HEAD]
         assert table_names(engine) == ALL_TABLES
-        assert migrator_messages(caplog) == ["database schema already at revision 0004"]
+        assert migrator_messages(caplog) == ["database schema already at revision 0005"]
     finally:
         engine.dispose()
 
@@ -250,7 +251,7 @@ def test_the_upgrade_creates_the_indexes_the_models_declare(tmp_path: Path) -> N
 def test_downgrade_to_0002_drops_exactly_the_two_tables(tmp_path: Path) -> None:
     engine = fresh_engine(tmp_path)
     try:
-        run_migrations(engine)
+        migrate_to(engine, THIS)  # later revisions add owners to the seeded rows
         with engine.begin() as connection:
             seed_configuration(connection)
             seed_history(connection)
@@ -269,7 +270,7 @@ def test_downgrade_to_0002_drops_exactly_the_two_tables(tmp_path: Path) -> None:
 def test_downgrade_to_base_then_upgrade_head_returns_to_0003(tmp_path: Path) -> None:
     engine = fresh_engine(tmp_path)
     try:
-        run_migrations(engine)
+        migrate_to(engine, THIS)  # later revisions add owners to the seeded rows
         with engine.begin() as connection:
             seed_configuration(connection)
             seed_history(connection)
@@ -290,7 +291,7 @@ def test_downgrade_to_base_then_upgrade_head_returns_to_0003(tmp_path: Path) -> 
 def test_upgrade_head_after_a_downgrade_to_0002_restores_empty_tables(tmp_path: Path) -> None:
     engine = fresh_engine(tmp_path)
     try:
-        run_migrations(engine)
+        migrate_to(engine, THIS)  # later revisions add owners to the seeded rows
         with engine.begin() as connection:
             seed_configuration(connection)
             seed_history(connection)

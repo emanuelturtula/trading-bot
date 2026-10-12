@@ -26,6 +26,7 @@ from trading_bot.domain.rules.schema import Rule, parse_rule
 from trading_bot.domain.signals import Side, Signal
 from trading_bot.persistence.clock import Clock
 from trading_bot.persistence.engine import create_database_engine, database_path
+from trading_bot.persistence.owner import Owner
 from trading_bot.persistence.records import StoredRule, StoredTicker
 from trading_bot.persistence.repositories.assignments import SqlAssignmentRepository
 from trading_bot.persistence.repositories.bot_state import SqlBotStateRepository
@@ -60,13 +61,15 @@ SAMPLE_CLOSE = datetime(2024, 1, 3, 5, 0, tzinfo=UTC)
 SAMPLE_VALUES: Mapping[str, float] = {"rsi(length=14).value": 28.4, "close.value": 187.5}
 
 
-def repositories(session: Session, *, clock: Clock | None = None) -> Repositories:
-    """Build the five repositories over ``session``, sharing one clock."""
+def repositories(
+    session: Session, *, clock: Clock | None = None, owner: Owner = None
+) -> Repositories:
+    """Build the five repositories over ``session``, sharing one clock, for one owner."""
     ticks = clock if clock is not None else fixed_clock(DEFAULT_START)
     return Repositories(
-        tickers=SqlTickerRepository(session, clock=ticks),
-        rules=SqlRuleRepository(session, clock=ticks),
-        assignments=SqlAssignmentRepository(session, clock=ticks),
+        tickers=SqlTickerRepository(session, clock=ticks, owner=owner),
+        rules=SqlRuleRepository(session, clock=ticks, owner=owner),
+        assignments=SqlAssignmentRepository(session, clock=ticks, owner=owner),
         signals=SqlSignalRepository(session, clock=ticks),
         state=SqlBotStateRepository(session, clock=ticks),
     )

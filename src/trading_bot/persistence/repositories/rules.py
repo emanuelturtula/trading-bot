@@ -5,6 +5,9 @@ This is the one module of ``persistence/`` allowed to import ``trading_bot.domai
 deliberate and confined here, so ``Base``, the engine and the models stay importable by the
 Telegram and API layers without the analysis stack.
 
+Every read and write is limited to the repository's owner (spec 024): another user's rule is
+reported as missing, and names are unique per user.
+
 An invalid rule is never persisted: the document is serialized with ``dump_rule`` and re-parsed
 before the row is flushed, and a mismatch raises ``StoredRuleError`` without writing anything.
 """
@@ -28,6 +31,7 @@ from trading_bot.persistence.errors import (
     UnknownRuleError,
 )
 from trading_bot.persistence.models import RuleRow, TickerRuleRow
+from trading_bot.persistence.owner import Owner, OwnerScope
 from trading_bot.persistence.records import StoredRule
 
 __all__ = ["SqlRuleRepository", "dump_rule_document", "load_rule_document"]
@@ -65,9 +69,12 @@ def load_rule_document(rule_id: int | None, document: str) -> Rule:
 class SqlRuleRepository:
     """``RuleRepository`` over one session; build one per unit of work."""
 
-    def __init__(self, session: Session, *, clock: Clock = system_clock) -> None:
+    def __init__(
+        self, session: Session, *, clock: Clock = system_clock, owner: Owner = None
+    ) -> None:
         self._session = session
         self._clock = clock
+        self._owner = OwnerScope(session, owner)
 
     def add(self, rule: Rule, *, enabled: bool = False) -> StoredRule:
         document = self._serialized(rule)
@@ -75,6 +82,7 @@ class SqlRuleRepository:
             raise DuplicateRuleNameError(rule.name)
         now = to_utc(self._clock())
         row = RuleRow(
+            user_id=self._owner.user_id,
             name=rule.name,
             signal=rule.signal,
             timeframe=rule.timeframe,
@@ -88,7 +96,7 @@ class SqlRuleRepository:
         return _to_record(row, rule)
 
     def get(self, rule_id: int) -> StoredRule | None:
-        row = self._session.get(RuleRow, rule_id)
+        row = self._owned(rule_id)
         return None if row is None else _to_record(row)
 
     def get_by_name(self, name: str) -> StoredRule | None:
@@ -105,7 +113,7 @@ class SqlRuleRepository:
         return self._listed(statement)
 
     def replace(self, rule_id: int, rule: Rule, *, enabled: bool | None = None) -> StoredRule:
-        row = self._session.get(RuleRow, rule_id)
+        row = self._owned(rule_id)
         if row is None:
             raise UnknownRuleError(rule_id)
         document = self._serialized(rule, rule_id)
@@ -128,7 +136,7 @@ class SqlRuleRepository:
         return _to_record(row, rule)
 
     def set_enabled(self, rule_id: int, enabled: bool) -> StoredRule:
-        row = self._session.get(RuleRow, rule_id)
+        row = self._owned(rule_id)
         if row is None:
             raise UnknownRuleError(rule_id)
         if row.enabled != enabled:
@@ -138,7 +146,7 @@ class SqlRuleRepository:
         return _to_record(row)
 
     def delete(self, rule_id: int) -> bool:
-        row = self._session.get(RuleRow, rule_id)
+        row = self._owned(rule_id)
         if row is None:
             return False
         # The assignments go with it through the database cascade (D86).
@@ -157,10 +165,15 @@ class SqlRuleRepository:
             raise StoredRuleError(rule_id, (_ROUND_TRIP_PROBLEM,))
         return document
 
+    def _owned(self, rule_id: int) -> RuleRow | None:
+        row = self._session.get(RuleRow, rule_id)
+        return row if row is not None and self._owner.allows(row.user_id) else None
+
     def _row_by_name(self, name: str) -> RuleRow | None:
-        return self._session.execute(
-            select(RuleRow).where(RuleRow.name == name)
-        ).scalar_one_or_none()
+        statement = select(RuleRow).where(
+            RuleRow.user_id == self._owner.user_id, RuleRow.name == name
+        )
+        return self._session.execute(statement).scalar_one_or_none()
 
     def _assignment_count(self, rule_id: int) -> int:
         statement = (
@@ -169,7 +182,9 @@ class SqlRuleRepository:
         return int(self._session.execute(statement).scalar_one())
 
     def _listed(self, statement: Select[tuple[RuleRow]]) -> tuple[StoredRule, ...]:
-        ordered = statement.order_by(RuleRow.name)
+        if not self._owner.everyone:
+            statement = statement.where(RuleRow.user_id == self._owner.user_id)
+        ordered = statement.order_by(RuleRow.name, RuleRow.user_id)
         return tuple(_to_record(row) for row in self._session.execute(ordered).scalars())
 
 
@@ -181,4 +196,5 @@ def _to_record(row: RuleRow, rule: Rule | None = None) -> StoredRule:
         enabled=row.enabled,
         created_at=to_utc(row.created_at),
         updated_at=to_utc(row.updated_at),
+        user_id=row.user_id,
     )

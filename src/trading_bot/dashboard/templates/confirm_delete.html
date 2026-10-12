@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Delete{% endblock %}
+{% block content %}
+<h1>Delete {{ kind }} {{ subject }}?</h1>
+<div class="panel">
+  <p>This also deletes {{ assignments }} assignment{{ '' if assignments == 1 else 's' }} and
+  {{ signals }} recorded signal{{ '' if signals == 1 else 's' }}. It cannot be undone, except by restoring a backup.</p>
+  {% if kind == "ticker" %}<p class="muted">To keep the history, stop watching it instead.</p>
+  {% else %}<p class="muted">To keep the history, disable it instead.</p>{% endif %}
+  <div class="actions">
+    <form class="inline" method="post" action="{{ prefix }}{{ action }}">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="danger">Delete</button>
+    </form>
+    <a class="button" href="{{ prefix }}{{ back }}">Cancel</a>
+  </div>
+</div>
+{% endblock %}

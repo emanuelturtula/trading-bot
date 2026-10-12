@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Log in{% endblock %}
+{% block content %}
+<h1>Log in</h1>
+<div class="panel">
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  <form method="post" action="{{ prefix }}/login" class="row">
+    <input type="password" name="password" autocomplete="current-password" placeholder="Password" required autofocus>
+    <button type="submit" class="primary">Log in</button>
+  </form>
+</div>
+{% endblock %}

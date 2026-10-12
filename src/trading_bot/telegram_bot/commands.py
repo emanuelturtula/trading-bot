@@ -34,6 +34,7 @@ from trading_bot.telegram_bot.unit_of_work import (
     CommandUnitOfWork,
     in_command_unit_of_work,
 )
+from trading_bot.watchlist import WatchOutcome, unwatch_ticker, watch_ticker
 
 __all__ = ["BETA_PREFIX", "HELP_TEXT", "CommandHandler", "NextFireTimes", "ParsedCommand", "parse"]
 
@@ -41,6 +42,11 @@ BETA_PREFIX: Final = "[BETA]"
 _DEFAULT_TIMEFRAME: Final = Timeframe.D1
 _LOGGER_NAME: Final = "trading_bot.telegram_bot.commands"
 _MAX_ARGUMENT_ECHO: Final = 32
+_WATCH_VERBS: Final = {
+    WatchOutcome.ADDED: "Watching",
+    WatchOutcome.ALREADY_WATCHED: "Already watching",
+    WatchOutcome.REENABLED: "Watching again",
+}
 
 HELP_TEXT: Final = (
     "<b>Commands</b>\n"
@@ -225,24 +231,14 @@ def _resume(repositories: CommandRepositories) -> str:
 def _add_ticker(
     repositories: CommandRepositories, symbol: str, name: str, timeframe: Timeframe
 ) -> str:
-    existing = repositories.tickers.get_by_symbol(symbol, timeframe)
-    if existing is None:
-        stored = repositories.tickers.add(symbol, timeframe, enabled=True)
-        verb = "Watching"
-    elif existing.enabled:
-        stored = existing
-        verb = "Already watching"
-    else:
-        stored = repositories.tickers.set_enabled(existing.id, True)
-        verb = "Watching again"
-    for rule in repositories.rules.list_all():
-        if rule.rule.timeframe is timeframe:
-            repositories.assignments.assign(stored.id, rule.id)  # assigning twice is a no-op
-    assigned = repositories.assignments.rules_for_ticker(stored.id)
-    enabled = sum(1 for rule in assigned if rule.enabled)
+    result = watch_ticker(
+        repositories.tickers, repositories.rules, repositories.assignments, symbol, timeframe
+    )
+    verb = _WATCH_VERBS[result.outcome]
+    assigned, enabled = result.assigned_rules, result.enabled_rules
     text = (
-        f"{verb} <b>{_escape(stored.symbol)}</b> ({_escape(name)}) on {timeframe.value} "
-        f"with {len(assigned)} rule{'s' if len(assigned) != 1 else ''} ({enabled} enabled)."
+        f"{verb} <b>{_escape(result.ticker.symbol)}</b> ({_escape(name)}) on {timeframe.value} "
+        f"with {assigned} rule{'s' if assigned != 1 else ''} ({enabled} enabled)."
     )
     if enabled == 0:
         text += f"\nNo enabled {timeframe.value} rule yet: no signal will be sent for it."
@@ -252,21 +248,14 @@ def _add_ticker(
 def _disable_ticker(
     repositories: CommandRepositories, symbol: str, timeframe: Timeframe | None
 ) -> str:
-    matches = [
-        ticker
-        for ticker in repositories.tickers.list_all()
-        if ticker.symbol == symbol and (timeframe is None or ticker.timeframe is timeframe)
-    ]
-    if not matches:
+    result = unwatch_ticker(repositories.tickers, symbol, timeframe)
+    if not result.matches:
         where = f" on {timeframe.value}" if timeframe else ""
         return f"{_escape(symbol)} is not watched{where}."
-    changed = [ticker for ticker in matches if ticker.enabled]
-    for ticker in changed:
-        repositories.tickers.set_enabled(ticker.id, False)
-    if not changed:
-        return f"{_escape(symbol)} was already stopped ({_timeframes(matches)})."
+    if not result.disabled:
+        return f"{_escape(symbol)} was already stopped ({_timeframes(result.matches)})."
     return (
-        f"Stopped watching {_escape(symbol)} ({_timeframes(changed)}). "
+        f"Stopped watching {_escape(symbol)} ({_timeframes(result.disabled)}). "
         "Its signal history is kept; /add brings it back."
     )
 
@@ -289,7 +278,7 @@ def _list_tickers(repositories: CommandRepositories) -> str:
 def _list_rules(repositories: CommandRepositories) -> str:
     rules = repositories.rules.list_all()
     if not rules:
-        return "No rule is stored yet. Rules are loaded with the management CLI."
+        return "No rule is stored yet. Create one from the dashboard or the management CLI."
     lines = ["<b>Rules</b>"]
     for stored in rules:
         tickers = repositories.assignments.tickers_for_rule(stored.id)

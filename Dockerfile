@@ -35,6 +35,8 @@ RUN ["python", "-c", "from curl_cffi import requests; requests.Session(impersona
 RUN ["python", "-c", "import trading_bot.scheduler.service; raise SystemExit(0)"]
 # Fail the build if the migrations or the command line are missing from the installed wheel, if the migrations cannot be applied, or if they do not create the configuration, signal and state tables (throwaway database under /tmp, never /app/data).
 RUN ["python", "-c", "import shutil, subprocess, sys, tempfile; from pathlib import Path; from sqlalchemy import inspect; from trading_bot.persistence.database import open_database; from trading_bot.persistence.migrator import current_revision, head_revision; d = tempfile.mkdtemp(); db = open_database(Path(d)); c = db.engine.connect(); mode = c.exec_driver_sql('PRAGMA journal_mode').scalar(); c.close(); tables = set(inspect(db.engine).get_table_names()); cli = subprocess.run([sys.executable, '-m', 'trading_bot.cli', '--help'], capture_output=True).returncode; ok = current_revision(db.engine) == head_revision() and mode == 'wal' and {'tickers', 'rules', 'ticker_rules', 'signals', 'bot_state'} <= tables and cli == 0; db.dispose(); shutil.rmtree(d, ignore_errors=True); raise SystemExit(0 if ok else 1)"]
+# Fail the build if the dashboard templates are missing from the installed wheel or do not compile (spec 020).
+RUN ["python", "-c", "from trading_bot.config import Settings; from trading_bot.dashboard.routes import Dashboard; env = Dashboard(Settings(_env_file=None), None).templates.env; names = env.list_templates(); [env.get_template(name) for name in names]; raise SystemExit(0 if 'rule_form.html' in names and 'login.html' in names else 1)"]
 USER app
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=6s --start-period=20s --retries=3 \

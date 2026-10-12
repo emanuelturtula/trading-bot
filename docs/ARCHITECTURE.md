@@ -48,7 +48,7 @@ The user decides whether to trade. **There is no order execution layer** and one
 | `scheduler/` | APScheduler (`AsyncIOScheduler`) behind a pure schedule function: one job per timeframe with a custom calendar-driven trigger, fired at the **real** candle close plus `TB_CANDLE_CLOSE_DELAY_SECONDS`; the startup catch-up, the misfire window and the bounded retry of unpublished candles | One service per process, `max_instances=1` and `coalesce=True`; exactly once per close (`bot_state`); market hours by construction, never an `is_open` gate; no `Exception` escapes a job. |
 | `notifications/` | `Notifier` (Protocol), `SignalNotification` and `NotificationError`, shipped with the engine (#14); `TelegramNotifier` implements them (#17, #18) | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk; `notification.candles` is read-only. |
 | `telegram_bot/` | Commands `/add /remove /list /rules /status /pause /resume /help` (library-free handlers) and the long-polling `TelegramPoller` (#19, #20) | Only chats in `TB_TELEGRAM_ALLOWED_CHAT_IDS`, checked before anything else. |
-| `api/`, `dashboard/` | REST `/api/v1/tickers`, `/rules`, `/signals`; Jinja2 + HTMX dashboard (tickers, rule builder, history, charts) | Mandatory auth (password hash + signed session cookie). `/health` is the only public endpoint. |
+| `dashboard/` | Server-rendered configuration dashboard under `/dashboard/`: tickers, rule editor, assignments, pause (spec 020). REST `/api/v1/*`, history and charts are still to come (F6) | Mandatory auth (scrypt password hash + HMAC-signed session cookie + CSRF tokens + login throttle). `/health` is the only public endpoint. |
 | `persistence/` | Synchronous SQLAlchemy 2 + Alembic on SQLite at `TB_DATA_DIR/trading_bot.db`: the engine and its pragmas, the `Database` handle and its sessions, the declarative metadata, the `UtcDateTime` column type, the packaged migrations, the configuration tables, the signal history and the bot state, behind the five repository `Protocol`s; `cli/` manages the configuration and reads the history from a command of its own | Migrations run at startup, before anything else; WAL, `foreign_keys=ON`, a busy timeout and `synchronous=FULL` on every connection; sessions begin `BEGIN IMMEDIATE`; the signal key is a unique constraint; backups before each deploy. |
 
 ## Process
@@ -827,7 +827,7 @@ The bot is managed from the phone (spec [018](specs/018-telegram-commands.md), i
 
 - **`TelegramPoller`** (`poller.py`) is its own `getUpdates` loop, not `telegram.ext.Application`: a 30 s long poll asking only for `message` updates. It drops every message from a chat outside `TB_TELEGRAM_ALLOWED_CHAT_IDS` before parsing it, logging one `INFO` line without the chat id, user or text. `BotUpdateSource` is the python-telegram-bot adapter and maps the library's errors onto `PollError` (`transient`, `conflict`, `rejected_token`), raised `from None`.
 - **`CommandHandler`** (`commands.py`) is library-free: text in, HTML reply out (or `None` for a command addressed to another bot). Every database access is one unit of work (`unit_of_work.py`) in a worker thread. User text is HTML-escaped and echoed truncated to 32 characters; every reply starts with `[BETA]` outside `prod`. An unexpected error is logged by class name and answered with a fixed sentence.
-- **Commands.** `/add TICKER [1h|4h|1d]` validates the symbol with the provider, defaults to `1d`, stores it enabled (or re-enables it) and assigns every stored rule of that timeframe. `/remove TICKER [timeframe]` disables it and keeps its assignments and signals; deleting stays a CLI action. `/list`, `/rules`, `/status` (version, pause, last and next run per timeframe in `TB_DISPLAY_TIMEZONE`), `/pause`, `/resume`, `/help`. Rules are not created from Telegram.
+- **Commands.** `/add TICKER [1h|4h|1d]` validates the symbol with the provider, defaults to `1d`, stores it enabled (or re-enables it) and assigns every stored rule of that timeframe. `/remove TICKER [timeframe]` disables it and keeps its assignments and signals; deleting is done from the dashboard or the CLI. `/list`, `/rules`, `/status` (version, pause, last and next run per timeframe in `TB_DISPLAY_TIMEZONE`), `/pause`, `/resume`, `/help`. Rules are not created from Telegram but from the [dashboard](#dashboard). `/add` and `/remove` share `trading_bot/watchlist.py` with the dashboard, so both front ends behave the same.
 
 | Situation | Behaviour |
 |-----------|-----------|
@@ -837,6 +837,25 @@ The bot is managed from the phone (spec [018](specs/018-telegram-commands.md), i
 | A reply fails | Logged by kind and dropped: a reply is not a signal |
 
 Each failure streak is logged once and its end once ("recovered"), so `/health` and the scheduler never depend on Telegram. **Offsets:** the poller advances its offset before handling a batch, and stopping lets the command being handled finish (up to 10 s), then makes one short `getUpdates` call that confirms it. A clean restart never runs a command twice; a crash in the middle of a command may. Commands sent while the bot was down are handled when it starts.
+
+## Dashboard
+
+A browser front end for the configuration, served by the same process and port as `/health` (spec [020](specs/020-config-dashboard.md)). `install_dashboard` in `dashboard/routes.py` mounts it under `/dashboard/`; `/` redirects there.
+
+- **Pages.** Overview (running or paused, Pause and Resume, counts, last run per timeframe); Tickers (add like `/add`, stop like `/remove`, watch again, delete after a confirmation page that counts the assignments and signals that go with it); one page per ticker to tick which rules of its timeframe run on it; Rules (enable, disable, delete) and a JSON editor to create or edit one, prefilled with a valid example and showing the indicator catalog. The server validates every document with `parse_rule`, the same entry point as `config import`, and lists each problem with its path; a duplicate name or a timeframe change on an assigned rule is explained and nothing is written.
+- **Rendering.** Jinja2 templates with autoescaping, plain HTML forms and POST-redirect-GET; no JavaScript and no frontend build. The result of an action travels to the next page in a short-lived flash cookie. Every database access is one unit of work (`dashboard/unit_of_work.py`) in a worker thread, like the Telegram commands.
+- **Enabled only when configured.** It needs `TB_DASHBOARD_PASSWORD_HASH` (from `python -m trading_bot.dashboard.password`) and `TB_SESSION_SECRET` (at least 32 characters). Without a valid pair every dashboard URL answers `503` and the startup log says why, without echoing either value; the bot itself starts normally.
+
+| Protection | How |
+|------------|-----|
+| Password | `scrypt:<n>:<r>:<p>:<salt>:<hash>` (stdlib `hashlib.scrypt`, n=2^14, r=8, p=1), checked in constant time in a worker thread. The format has no `$`, so Compose does not interpolate it |
+| Session | Cookie `tb_session` = `<expiry>.<nonce>.<HMAC-SHA256>`, `HttpOnly`, `SameSite=Strict`, path `/dashboard`, 7 days, `Secure` over HTTPS. The MAC key derives from the session secret **and** the password hash: changing either logs everyone out |
+| CSRF | Every change is a `POST` with a hidden token (a MAC of the session nonce); a missing or wrong one is refused with `403` |
+| Brute force | 5 failed logins per client within 15 minutes, then `429` until the window passes (in memory: one process) |
+| Headers | `Cache-Control: no-store`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and a CSP without `script-src` |
+| Forms | `application/x-www-form-urlencoded` only, at most 256 KiB |
+
+It is served over plain HTTP: reach it from the LAN or the tailnet, never expose port 8081 to the internet.
 
 ## Runtime
 
@@ -851,6 +870,8 @@ Each failure streak is logged once and its end once ("recovered"), so `/health` 
 | `TelegramNotifier` or `LogNotifier` | `aclose()` |
 | `SignalEngine`, `TimeframeRunner`, `SchedulerService` (policy from `TB_*`, `skip_unpublished_hours` injected into both) | `service.aclose()`, then up to 10 s more if a run is still in flight |
 | `TelegramPoller`, only with a token and chat ids | stopped first: the command in flight finishes, its offset is confirmed |
+
+The dashboard reads `runtime.database` and `runtime.provider` (to validate a new ticker) and owns nothing of its own.
 
 - **One process per data directory.** The lock is an exclusive, non-blocking `flock`, released by the kernel even if the process dies, so there is never a stale lock. A second process on the same volume logs one `ERROR` naming the lock file and exits (`CLAUDE.md` rule 7).
 - **A failed start never yields.** Whatever was already built is closed in reverse order and the exception propagates, so uvicorn exits non-zero, the container never becomes healthy and the deploy rolls back.
@@ -1273,8 +1294,8 @@ with database.session() as session:
 
 ### Configuration CLI
 
-`trading_bot/cli/` manages that configuration from the Raspberry Pi before Telegram and the
-dashboard exist: `python -m trading_bot.cli`, run with `docker exec` (see
+`trading_bot/cli/` manages that configuration from the Raspberry Pi, alongside Telegram and the
+[dashboard](#dashboard): `python -m trading_bot.cli`, run with `docker exec` (see
 [Deploy](DEPLOYMENT.md#operations)). It is a process of its own, wired into nothing, built on
 `argparse` and the repositories above.
 
@@ -1350,8 +1371,8 @@ Applied by revision `0003` (details in [Signals and bot state](#signals-and-bot-
 | `TB_SCHEDULER_MISFIRE_GRACE_SECONDS` | Operational, not a secret. How late a missed fire may still run, `[60, 3600]`, default `900`. It is also the startup catch-up window: there is no backfill, so a candle older than this is never evaluated |
 | `TB_TELEGRAM_BOT_TOKEN` | Secret. A different bot per environment |
 | `TB_TELEGRAM_ALLOWED_CHAT_IDS` | Authorized chats (comma-separated) |
-| `TB_DASHBOARD_PASSWORD_HASH` | Secret. Hash of the dashboard password |
-| `TB_SESSION_SECRET` | Secret. Session cookie signing |
+| `TB_DASHBOARD_PASSWORD_HASH` | Secret. scrypt hash of the dashboard password, printed by `python -m trading_bot.dashboard.password`. Without it the dashboard is disabled |
+| `TB_SESSION_SECRET` | Secret. Signs the dashboard session cookies; at least 32 characters. Changing it logs every session out |
 
 ## Decisions
 

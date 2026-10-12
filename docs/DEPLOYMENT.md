@@ -22,26 +22,30 @@ There is no beta environment (removed in spec [019](specs/019-remove-beta-rename
 
 `deploy/deploy.py` (on the Pi):
 
-- moves the deploy root of older releases (`~/trading-bot-deploy`) to `~/trading-bot` once, rebasing the paths in `current.json` (see [Layout](#layout-on-the-raspberry));
+- copies the state of older releases (`~/trading-bot-deploy/prod`) into `~/trading-bot` once (see [Layout](#layout-on-the-raspberry));
 - takes a host lock (two deploys never run in parallel);
 - rejects runs older than the deployed one (an old rerun does not overwrite a new one);
 - runs `docker pull` by digest and verifies the OCI labels `revision` and `version`;
-- backs up the SQLite database of the current container;
-- `docker compose up --wait` and verifies that the exact digest is running with a `healthy` healthcheck;
-- if it fails, restores the previous deploy; if there was none, stops the container and keeps the volume;
-- writes `current.json` only if the deploy ended up healthy and keeps the last 10 attempts.
+- backs up the SQLite database of the current container to `backups/`;
+- `docker compose up --wait` with the new compose file staged as `compose.next.yml`, and verifies that the exact digest is running with a `healthy` healthcheck;
+- if it fails, restores the previous deploy with the untouched `compose.yml`; if there was none, stops the container and keeps the volume; the error is in the job log;
+- only if the deploy ended up healthy, replaces `compose.yml` and `deploy.py`, writes `current.json` and keeps the last 10 backups.
 
 ## Layout on the Raspberry
 
 ```
 ~/trading-bot/                        (chmod 700)
+  compose.yml          compose file of the running deploy
+  deploy.py            deploy script used by the running deploy
+  secrets.env (600)    application secrets, written by you
+  current.json         last healthy deploy (image, version, run, backup)
+  backups/<timestamp>.sqlite3   database copy taken before each deploy (last 10)
   deploy.lock
-  prod/  secrets.env (600)  current.json  attempts/<id>/{compose.yml,request.json,previous.json,database.sqlite3,result.json}
 ```
 
 Compose project: `trading-bot-prod` (8081 → 8000) with its `data` volume. The volume belongs to the compose project, not to the folder, so the database is not inside `~/trading-bot`.
 
-**Migration from `~/trading-bot-deploy`.** Older releases used `~/trading-bot-deploy`. The first deploy of this release moves that folder to `~/trading-bot` and rewrites the absolute paths in `current.json`, so backup and rollback keep working; do not move it by hand. If both folders exist, the deploy stops before touching anything with `Both ... exist`: keep only the deploy root in `~/trading-bot` and re-run the failed job.
+**Migration from `~/trading-bot-deploy`.** Older releases used `~/trading-bot-deploy/{beta,prod}/` with an `attempts/` folder per deploy. The first deploy of this release copies `prod/secrets.env`, the running compose file, `current.json` (with its paths rewritten) and every `attempts/*/database.sqlite3` into `~/trading-bot`, so backup and rollback keep working; do not move anything by hand. The old folder is never deleted by the deploy: once the new deploy is healthy, remove it with `rm -rf ~/trading-bot-deploy`. If `~/trading-bot` already holds something else (a clone, for example), the deploy stops before touching anything with `... is not a deploy root`: move it away and re-run the failed job.
 
 ## Initial setup (only once)
 
@@ -109,17 +113,17 @@ While `DEPLOY_ENABLED` is not `true`, the pipeline builds the image on `main` an
 Create the bot with @BotFather (`/newbot`), for example one named `<your name> trading`. **A token must never be shared with another running process** (for example a local `dev` run): a token allows one poller, and two processes polling it both log `409 Conflict` and answer nothing. Use a separate bot for local development. On the Pi:
 
 ```sh
-mkdir -p ~/trading-bot/prod
+mkdir -p ~/trading-bot
 chmod 700 ~/trading-bot
 umask 077
-cat > ~/trading-bot/prod/secrets.env <<'EOF'
+cat > ~/trading-bot/secrets.env <<'EOF'
 TB_TELEGRAM_BOT_TOKEN=<bot token>
 TB_TELEGRAM_ALLOWED_CHAT_IDS=<chat id>
 #TB_DISPLAY_TIMEZONE=<IANA zone, default Europe/Madrid>
 TB_DASHBOARD_PASSWORD_HASH=<hash>
 TB_SESSION_SECRET=<long random value>
 EOF
-chmod 600 ~/trading-bot/prod/secrets.env
+chmod 600 ~/trading-bot/secrets.env
 ```
 
 Every chat in `TB_TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated) receives each signal and is the only one whose commands (`/add`, `/status`, `/pause` ...) the bot answers; messages from any other chat are ignored. To find your chat id, **before** starting the container with the token, send any message to the bot and read `message.chat.id` from `https://api.telegram.org/bot<token>/getUpdates` in a browser (never paste the token anywhere else; once the bot runs it consumes the updates and that page stays empty). Without a token or chat ids the bot still starts, only logs its signals and answers no command.
@@ -165,10 +169,10 @@ uv run pre-commit install
 
 - Status: `curl http://<DEPLOY_HOST>:8081/health` from the LAN or the tailnet.
 - Logs: `docker compose --project-name trading-bot-prod logs -f app`.
-- Last deploy: `~/trading-bot/prod/current.json`; history in `attempts/`.
+- Last deploy: `~/trading-bot/current.json`; the job log of each `delivery.yml` run explains a failed deploy.
 - Manual rollback: re-running the workflow of the previous commit is not allowed (run ordering protection). Revert with a PR (`git revert`) and merge.
 - Database: the SQLite file lives in the `data` volume at `/app/data/trading_bot.db`, exactly the path the deploy backs up; the schema is migrated at startup, so a container that serves `/health` has already been migrated.
-- Restoring the database: the backup taken before each deploy is kept in `attempts/<id>/database.sqlite3`, and from the second deploy onwards `current.json` records the `backup` it took (the first deploy reports none, because there was no database yet).
+- Restoring the database: the backup taken before each deploy is kept in `~/trading-bot/backups/<timestamp>.sqlite3` (the last 10), and from the second deploy onwards `current.json` records the `backup` it took (the first deploy reports none, because there was no database yet).
 
 ### Managing the configuration
 

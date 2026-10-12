@@ -8,13 +8,13 @@ caller never has to touch ``definition_json``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from trading_bot.domain.rules.schema import Rule
 from trading_bot.domain.timeframe import Timeframe
 
-__all__ = ["Assignment", "StoredRule", "StoredTicker"]
+__all__ = ["Assignment", "StoredRule", "StoredTicker", "StoredUser"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -52,3 +52,21 @@ class Assignment:
     rule_id: int
     timeframe: Timeframe
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StoredUser:
+    """A dashboard account (spec 023). ``repr`` leaves the password hash out."""
+
+    id: int
+    username: str
+    password_hash: str | None = field(repr=False)
+    is_admin: bool
+    active: bool
+    invite_expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+    @property
+    def can_log_in(self) -> bool:
+        return self.active and self.password_hash is not None

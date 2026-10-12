@@ -11,6 +11,8 @@ from trading_bot.dashboard.auth import (
     LoginThrottle,
     SessionSigner,
     hash_password,
+    link_digest,
+    new_link_token,
     parse_password_hash,
     verify_password,
 )
@@ -79,10 +81,11 @@ def test_malformed_hashes_are_rejected_without_echo(text: str) -> None:
 
 
 def test_session_round_trip_and_csrf() -> None:
-    signer = SessionSigner(SECRET, HASH)
-    token = signer.issue()
+    signer = SessionSigner(SECRET)
+    token = signer.issue(7, HASH)
 
-    nonce = signer.verify(token)
+    assert SessionSigner.user_id(token) == 7
+    nonce = signer.verify(token, HASH)
 
     assert nonce is not None
     csrf = signer.csrf_token(nonce)
@@ -95,37 +98,61 @@ def test_session_round_trip_and_csrf() -> None:
 
 def test_session_expires() -> None:
     clock = Clock()
-    signer = SessionSigner(SECRET, HASH, lifetime_seconds=60, clock=clock)
-    token = signer.issue()
+    signer = SessionSigner(SECRET, lifetime_seconds=60, clock=clock)
+    token = signer.issue(1, HASH)
 
     clock.now += 59
-    assert signer.verify(token) is not None
+    assert signer.verify(token, HASH) is not None
     clock.now += 1
-    assert signer.verify(token) is None
+    assert signer.verify(token, HASH) is None
 
 
 def test_tampered_or_foreign_sessions_are_rejected() -> None:
-    signer = SessionSigner(SECRET, HASH)
-    token = signer.issue()
-    expiry, nonce, mac = token.split(".")
+    signer = SessionSigner(SECRET)
+    token = signer.issue(1, HASH)
+    expiry, user, nonce, mac = token.split(".")
 
-    assert signer.verify(f"{int(expiry) + 3600}.{nonce}.{mac}") is None
-    assert signer.verify(f"{expiry}.other.{mac}") is None
-    assert signer.verify(f"{expiry}.{nonce}.{mac[:-2]}") is None
-    for garbage in (None, "", "a.b", "a.b.c.d", "x" * 300, f"never.{nonce}.{mac}"):
-        assert signer.verify(garbage) is None
+    assert signer.verify(f"{int(expiry) + 3600}.{user}.{nonce}.{mac}", HASH) is None
+    assert signer.verify(f"{expiry}.2.{nonce}.{mac}", HASH) is None  # another user's id
+    assert signer.verify(f"{expiry}.{user}.other.{mac}", HASH) is None
+    assert signer.verify(f"{expiry}.{user}.{nonce}.{mac[:-2]}", HASH) is None
+    for garbage in (
+        None,
+        "",
+        "a.b.c",
+        "a.b.c.d.e",
+        "x" * 300,
+        f"never.{user}.{nonce}.{mac}",
+        f"{expiry}.-1.{nonce}.{mac}",
+        f"{expiry}.{'9' * 19}.{nonce}.{mac}",
+    ):
+        assert signer.verify(garbage, HASH) is None
+    for malformed in (None, "", "a.b.c", "1.x.n.m", "1.-1.n.m", "1." + "9" * 19 + ".n.m"):
+        assert SessionSigner.user_id(malformed) is None
 
 
-def test_rotating_the_secret_or_the_password_invalidates_sessions() -> None:
-    token = SessionSigner(SECRET, HASH).issue()
+def test_rotating_the_secret_or_changing_the_password_invalidates_sessions() -> None:
+    token = SessionSigner(SECRET).issue(1, HASH)
 
-    assert SessionSigner("j" * 40, HASH).verify(token) is None
-    assert SessionSigner(SECRET, hash_password(PASSWORD)).verify(token) is None
+    assert SessionSigner("j" * 40).verify(token, HASH) is None
+    assert SessionSigner(SECRET).verify(token, hash_password(PASSWORD)) is None
 
 
 def test_a_short_session_secret_is_refused() -> None:
     with pytest.raises(ValueError, match="at least 32"):
-        SessionSigner("k" * 31, HASH)
+        SessionSigner("k" * 31)
+
+
+def test_access_link_tokens_are_random_and_only_their_digest_is_kept() -> None:
+    token, digest = new_link_token()
+    other, other_digest = new_link_token()
+
+    assert token != other
+    assert digest != other_digest
+    assert len(token) >= 40
+    assert digest == link_digest(token)
+    assert len(digest) == 64
+    assert token not in digest
 
 
 def test_throttle_blocks_after_five_failures_within_the_window() -> None:

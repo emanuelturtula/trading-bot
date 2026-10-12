@@ -1,4 +1,4 @@
-"""The five repository ports (spec 013, Design 7; spec 014, Design 7, 9; D69, D91).
+"""The repository ports (spec 013, Design 7; spec 014, Design 7, 9; D69, D91; spec 023).
 
 Synchronous ``Protocol``s, mirroring ``MarketDataProvider``: the port is a ``Protocol`` and the
 implementation is injected. Implementations take a ``Session`` rather than the ``Database``, so
@@ -16,13 +16,13 @@ anyway.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Protocol
 
 from trading_bot.domain.rules.schema import Rule
 from trading_bot.domain.signals import Signal
 from trading_bot.domain.timeframe import Timeframe
-from trading_bot.persistence.records import Assignment, StoredRule, StoredTicker
+from trading_bot.persistence.records import Assignment, StoredRule, StoredTicker, StoredUser
 from trading_bot.persistence.signal_records import (
     DEFAULT_PAGE_SIZE,
     RecordOutcome,
@@ -38,6 +38,7 @@ __all__ = [
     "RuleRepository",
     "SignalRepository",
     "TickerRepository",
+    "UserRepository",
 ]
 
 
@@ -182,3 +183,31 @@ class BotStateRepository(Protocol):
     def record_run(self, timeframe: Timeframe, scheduled_at: datetime) -> LastRun:
         """Record a completed run, monotonically: an earlier or repeated report writes nothing."""
         ...
+
+
+class UserRepository(Protocol):
+    """The dashboard accounts (spec 023)."""
+
+    def count(self) -> int: ...
+
+    def count_active_admins(self) -> int: ...
+
+    def get(self, user_id: int) -> StoredUser | None: ...
+
+    def get_by_username(self, username: str) -> StoredUser | None: ...
+
+    def list_all(self) -> tuple[StoredUser, ...]: ...
+
+    def add(
+        self, username: str, *, is_admin: bool = False, password_hash: str | None = None
+    ) -> StoredUser: ...
+
+    def set_password(self, user_id: int, password_hash: str) -> StoredUser: ...
+
+    def issue_invite(self, user_id: int, digest: str, lifetime: timedelta) -> StoredUser: ...
+
+    def invited(self, digest: str) -> StoredUser | None: ...
+
+    def redeem_invite(self, digest: str, password_hash: str) -> StoredUser | None: ...
+
+    def set_active(self, user_id: int, active: bool) -> StoredUser: ...

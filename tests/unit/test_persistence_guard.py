@@ -163,6 +163,7 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "migrations/versions/0001_baseline.py",
         "migrations/versions/0002_configuration_tables.py",
         "migrations/versions/0003_signals_and_bot_state.py",
+        "migrations/versions/0004_users.py",
         "repositories/__init__.py",
         "repositories/assignments.py",
         "repositories/bot_state.py",
@@ -170,6 +171,7 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "repositories/rules.py",
         "repositories/signals.py",
         "repositories/tickers.py",
+        "repositories/users.py",
     }
 
 
@@ -241,6 +243,7 @@ def test_a_revision_is_self_contained_and_imports_no_application_type() -> None:
         "0001_baseline.py",
         "0002_configuration_tables.py",
         "0003_signals_and_bot_state.py",
+        "0004_users.py",
     ]
     for path in revisions:
         imported = {

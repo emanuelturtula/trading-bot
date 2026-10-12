@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Final, Literal
@@ -14,6 +15,10 @@ Environment = Literal["dev", "beta", "prod"]
 
 # The zone signals are presented in (spec 017, U3). Storage and scheduling stay in UTC (rule 6).
 DEFAULT_DISPLAY_TIMEZONE: Final = "America/Argentina/Buenos_Aires"
+# Same rule as ``persistence.repositories.users.normalize_username``, which this module cannot
+# import without loading the persistence layer.
+_USERNAME: Final = re.compile(r"[a-z0-9][a-z0-9._-]{2,31}")
+_HEADER_NAME: Final = re.compile(r"[a-z0-9-]{1,64}")
 
 
 class Settings(BaseSettings):
@@ -53,8 +58,15 @@ class Settings(BaseSettings):
     telegram_allowed_chat_ids: str = ""
     # IANA zone used only to present instants to the user (spec 017, U3).
     display_timezone: str = DEFAULT_DISPLAY_TIMEZONE
+    # The first administrator's password hash, used only while there is no user (spec 023, D2).
     dashboard_password_hash: SecretStr | None = None
     session_secret: SecretStr | None = None
+    # The username that first administrator gets (spec 023, D2).
+    admin_username: str = "admin"
+    # A request header holding the browser's address, set by a proxy in front of the app, such
+    # as ``CF-Connecting-IP`` behind Cloudflare. Empty: the address of the TCP peer. Only set it
+    # when every request comes through that proxy, or the header could be forged (spec 023, D6).
+    client_ip_header: str = ""
 
     @field_validator("data_dir", mode="before")
     @classmethod
@@ -72,6 +84,22 @@ class Settings(BaseSettings):
     def _check_chat_ids(cls, value: str) -> str:
         """Accept an empty value or comma-separated integers; normalize the spacing."""
         return ",".join(str(chat_id) for chat_id in _parse_chat_ids(value))
+
+    @field_validator("admin_username", mode="after")
+    @classmethod
+    def _check_admin_username(cls, value: str) -> str:
+        username = value.strip().lower()
+        if not _USERNAME.fullmatch(username):
+            raise ValueError("admin_username must have 3-32 characters of a-z 0-9 . _ -")
+        return username
+
+    @field_validator("client_ip_header", mode="after")
+    @classmethod
+    def _check_client_ip_header(cls, value: str) -> str:
+        header = value.strip().lower()
+        if header and not _HEADER_NAME.fullmatch(header):
+            raise ValueError("client_ip_header must be an HTTP header name")
+        return header
 
     @field_validator("display_timezone", mode="after")
     @classmethod

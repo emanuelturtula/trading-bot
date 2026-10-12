@@ -844,14 +844,16 @@ A browser front end for the configuration, served by the same process and port a
 
 - **Pages.** Overview (running or paused, Pause and Resume, counts, last run per timeframe); Tickers (add like `/add`, stop like `/remove`, watch again, delete after a confirmation page that counts the assignments and signals that go with it); one page per ticker to tick which rules of its timeframe run on it; Rules (enable, disable, delete) and a JSON editor to create or edit one, prefilled with a valid example and showing the indicator catalog. The server validates every document with `parse_rule`, the same entry point as `config import`, and lists each problem with its path; a duplicate name or a timeframe change on an assigned rule is explained and nothing is written.
 - **Rendering.** Jinja2 templates with autoescaping, plain HTML forms and POST-redirect-GET; no JavaScript and no frontend build. The result of an action travels to the next page in a short-lived flash cookie. Every database access is one unit of work (`dashboard/unit_of_work.py`) in a worker thread, like the Telegram commands.
-- **Enabled only when configured.** It needs `TB_DASHBOARD_PASSWORD_HASH` (from `python -m trading_bot.dashboard.password`) and `TB_SESSION_SECRET` (at least 32 characters). Without a valid pair every dashboard URL answers `503` and the startup log says why, without echoing either value; the bot itself starts normally.
+- **Enabled only when configured.** It needs `TB_SESSION_SECRET` (at least 32 characters). Without it every dashboard URL answers `503` and the startup log says why, without echoing the value; the bot itself starts normally.
+- **Accounts** (spec [023](specs/023-dashboard-users.md)). A `users` table holds usernames, scrypt hashes, an administrator flag and an active flag. While it is empty, the first login creates the administrator from `TB_DASHBOARD_PASSWORD_HASH` (from `python -m trading_bot.dashboard.password`) and `TB_ADMIN_USERNAME`. Administrators invite people from the Users page: each gets a one-time access link (72 hours; only its SHA-256 digest is stored, and the token is redacted from the access log) to choose a password. A new link is also the password reset, and disabling a user logs them out at once. The Account page changes one's own password.
 
 | Protection | How |
 |------------|-----|
 | Password | `scrypt:<n>:<r>:<p>:<salt>:<hash>` (stdlib `hashlib.scrypt`, n=2^14, r=8, p=1), checked in constant time in a worker thread. The format has no `$`, so Compose does not interpolate it |
-| Session | Cookie `tb_session` = `<expiry>.<nonce>.<HMAC-SHA256>`, `HttpOnly`, `SameSite=Strict`, path `/dashboard`, 7 days, `Secure` over HTTPS. The MAC key derives from the session secret **and** the password hash: changing either logs everyone out |
+| Session | Cookie `tb_session` = `<expiry>.<user id>.<nonce>.<HMAC-SHA256>`, `HttpOnly`, `SameSite=Strict`, path `/dashboard`, 7 days, `Secure` over HTTPS. The MAC key derives from the session secret and the MAC covers the user's password hash: a new secret logs everyone out, a password change or reset logs that user out. Every request reloads the user, so a disabled one is out at once |
 | CSRF | Every change is a `POST` with a hidden token (a MAC of the session nonce); a missing or wrong one is refused with `403` |
-| Brute force | 5 failed logins per client within 15 minutes, then `429` until the window passes (in memory: one process) |
+| Brute force | 5 failed logins or access-link attempts per client address, and 10 failed logins per username, within 15 minutes, then `429` until the window passes (in memory: one process). `TB_CLIENT_IP_HEADER` names the proxy header with the browser's address. An unknown username costs the same scrypt verification as a wrong password |
+| Roles | The Users pages answer `403` to a user who is not an administrator |
 | Headers | `Cache-Control: no-store`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and a CSP without `script-src` |
 | Forms | `application/x-www-form-urlencoded` only, at most 256 KiB |
 
@@ -1371,7 +1373,9 @@ Applied by revision `0003` (details in [Signals and bot state](#signals-and-bot-
 | `TB_SCHEDULER_MISFIRE_GRACE_SECONDS` | Operational, not a secret. How late a missed fire may still run, `[60, 3600]`, default `900`. It is also the startup catch-up window: there is no backfill, so a candle older than this is never evaluated |
 | `TB_TELEGRAM_BOT_TOKEN` | Secret. A different bot per environment |
 | `TB_TELEGRAM_ALLOWED_CHAT_IDS` | Authorized chats (comma-separated) |
-| `TB_DASHBOARD_PASSWORD_HASH` | Secret. scrypt hash of the dashboard password, printed by `python -m trading_bot.dashboard.password`. Without it the dashboard is disabled |
+| `TB_DASHBOARD_PASSWORD_HASH` | Secret. scrypt hash of the first administrator's password, printed by `python -m trading_bot.dashboard.password`. Used only while there is no user |
+| `TB_ADMIN_USERNAME` | Not a secret. Username of that first administrator, default `admin` |
+| `TB_CLIENT_IP_HEADER` | Not a secret. Header with the browser's address set by a proxy in front of the app (`CF-Connecting-IP` behind Cloudflare); empty uses the TCP peer. Set it only when every request goes through that proxy |
 | `TB_SESSION_SECRET` | Secret. Signs the dashboard session cookies; at least 32 characters. Changing it logs every session out |
 
 ## Decisions

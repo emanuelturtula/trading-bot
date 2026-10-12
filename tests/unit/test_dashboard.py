@@ -12,84 +12,17 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
-import httpx
 import pytest
-from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from tests.fixtures.dashboard import ADMIN, HASH, PASSWORD, SECRET, Browser, make_app
 from tests.fixtures.repositories import sample_rule
-from tests.fixtures.runtime import ClosableFakeProvider, offline_runtime
-from trading_bot.config import Settings
-from trading_bot.dashboard.auth import hash_password
 from trading_bot.dashboard.routes import SECURITY_HEADERS, SESSION_COOKIE
-from trading_bot.dashboard.unit_of_work import DashboardRepositories, sql_dashboard_unit_of_work
+from trading_bot.dashboard.unit_of_work import DashboardRepositories
 from trading_bot.data.errors import ProviderFailure, ProviderUnavailableError
 from trading_bot.data.tickers import AssetType, Exchange, TickerInfo
 from trading_bot.domain.rules.schema import dump_rule
 from trading_bot.domain.timeframe import Timeframe
-from trading_bot.main import create_app
-
-# Built at runtime (CLAUDE.md rule 2): no secret-shaped literal in the repository.
-PASSWORD = "-".join(["correct", "horse", "battery", "staple"])
-SECRET = "k" * 40
-HASH = hash_password(PASSWORD)
-CSRF = re.compile(r'name="csrf" value="([^"]+)"')
-
-
-def make_app(data_dir: Path, **overrides: object) -> FastAPI:
-    values: dict[str, object] = {
-        "data_dir": data_dir,
-        "environment": "prod",
-        "dashboard_password_hash": HASH,
-        "session_secret": SECRET,
-    }
-    values.update(overrides)
-    settings = Settings(_env_file=None, **values)  # type: ignore[arg-type]
-    return create_app(settings, build_runtime=offline_runtime)
-
-
-class Browser:
-    """A ``TestClient`` with the helpers a signed-in user needs."""
-
-    def __init__(self, client: TestClient) -> None:
-        self.client = client
-
-    @property
-    def app(self) -> FastAPI:
-        app = self.client.app
-        assert isinstance(app, FastAPI)
-        return app
-
-    @property
-    def provider(self) -> ClosableFakeProvider:
-        provider = self.app.state.runtime.provider
-        assert isinstance(provider, ClosableFakeProvider)
-        return provider
-
-    def login(self, password: str = PASSWORD) -> httpx.Response:
-        return self.client.post("/dashboard/login", data={"password": password})
-
-    def get(self, path: str) -> httpx.Response:
-        return self.client.get(path)
-
-    def csrf(self) -> str:
-        match = CSRF.search(self.client.get("/dashboard/").text)
-        assert match is not None
-        return match.group(1)
-
-    def post(self, path: str, data: dict[str, str | list[str]] | None = None) -> httpx.Response:
-        payload: dict[str, str | list[str]] = {"csrf": self.csrf()}
-        payload.update(data or {})
-        return self.client.post(path, data=payload)
-
-    def follow(self, response: httpx.Response) -> httpx.Response:
-        assert response.status_code == 303, response.text
-        return self.client.get(response.headers["location"])
-
-    def repositories[T](self, work: object) -> T:
-        unit_of_work = sql_dashboard_unit_of_work(self.app.state.runtime.database)
-        with unit_of_work() as repositories:
-            return work(repositories)  # type: ignore[operator, no-any-return]
 
 
 @pytest.fixture
@@ -199,19 +132,18 @@ def test_nothing_is_reachable_without_a_session(browser: Browser) -> None:
 
 
 def test_a_forged_session_cookie_is_refused(browser: Browser) -> None:
-    browser.client.cookies.set(SESSION_COOKIE, "9999999999.nonce.mac", path="/dashboard")
+    browser.login()
+    browser.client.cookies.clear()
+    for forged in ("9999999999.nonce.mac", "9999999999.1.nonce.mac"):
+        browser.client.cookies.set(SESSION_COOKIE, forged, path="/dashboard")
+        assert browser.get("/dashboard/").status_code == 303
 
     assert browser.get("/dashboard/").status_code == 303
 
 
 @pytest.mark.parametrize(
     "overrides",
-    [
-        {"dashboard_password_hash": None},
-        {"session_secret": None},
-        {"dashboard_password_hash": "scrypt:not-a-hash"},
-        {"session_secret": "short"},
-    ],
+    [{"session_secret": None}, {"session_secret": "short"}],
 )
 def test_the_dashboard_is_disabled_without_valid_secrets(
     tmp_path: Path, overrides: dict[str, object], caplog: pytest.LogCaptureFixture
@@ -224,11 +156,25 @@ def test_the_dashboard_is_disabled_without_valid_secrets(
             assert client.get("/health").status_code == 200
             assert client.get("/dashboard/").status_code == 503
             assert client.get("/dashboard/login").status_code == 503
-            assert client.post("/dashboard/login", data={"password": PASSWORD}).status_code == 503
+            login = {"username": ADMIN, "password": PASSWORD}
+            assert client.post("/dashboard/login", data=login).status_code == 503
             assert client.post("/dashboard/pause", data={}).status_code == 503
             assert "The dashboard is disabled" in client.get("/dashboard/rules").text
         finally:
             root.removeHandler(caplog.handler)
+
+
+@pytest.mark.parametrize(
+    "overrides", [{"dashboard_password_hash": None}, {"dashboard_password_hash": "scrypt:x"}]
+)
+def test_without_users_and_without_a_first_password_nobody_can_log_in(
+    tmp_path: Path, overrides: dict[str, object]
+) -> None:
+    with TestClient(make_app(tmp_path, **overrides), follow_redirects=False) as client:
+        assert client.get("/dashboard/").status_code == 303
+        assert client.get("/dashboard/login").status_code == 503
+        login = {"username": ADMIN, "password": PASSWORD}
+        assert client.post("/dashboard/login", data=login).status_code == 503
 
 
 def test_disabled_reason_is_logged_without_the_value(tmp_path: Path) -> None:
@@ -249,7 +195,7 @@ def test_disabled_reason_is_logged_without_the_value(tmp_path: Path) -> None:
 
     messages = [record.getMessage() for record in records]
     assert messages == [
-        "dashboard disabled: TB_DASHBOARD_PASSWORD_HASH is not a valid hash;"
+        "TB_DASHBOARD_PASSWORD_HASH is not a valid hash and is ignored;"
         " generate it with python -m trading_bot.dashboard.password"
     ]
     assert all("!!!!" not in message for message in messages)
@@ -278,7 +224,7 @@ def test_wrong_password(browser: Browser) -> None:
     response = browser.login("nope")
 
     assert response.status_code == 401
-    assert "Wrong password." in response.text
+    assert "Wrong username or password." in response.text
     assert SESSION_COOKIE not in response.headers.get("set-cookie", "")
     assert browser.get("/dashboard/").status_code == 303
 

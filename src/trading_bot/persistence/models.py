@@ -1,6 +1,7 @@
 """The ORM models of the application (spec 012, Design 5; spec 013, Design 3; spec 014, 3).
 
-The three configuration tables, the signal history and the bot state. **Every model must be
+The three configuration tables, the signal history, the bot state and the dashboard users
+(spec 023). **Every model must be
 defined here or imported by this module**, because ``migrations/env.py`` reads
 ``Base.metadata`` through it and ``--autogenerate`` only compares what is imported. Timestamp
 columns always use ``UtcDateTime`` (``types.py``).
@@ -31,7 +32,15 @@ from trading_bot.persistence.base import Base
 from trading_bot.persistence.state import StateKey
 from trading_bot.persistence.types import SideType, StateKeyType, TimeframeType, UtcDateTime
 
-__all__ = ["Base", "BotStateRow", "RuleRow", "SignalRow", "TickerRow", "TickerRuleRow"]
+__all__ = [
+    "Base",
+    "BotStateRow",
+    "RuleRow",
+    "SignalRow",
+    "TickerRow",
+    "TickerRuleRow",
+    "UserRow",
+]
 
 # Built from the enumerations, so adding a member changes the rendered DDL and fails the
 # golden-DDL assertion until a migration is written (spec 013, Design 3).
@@ -164,4 +173,30 @@ class BotStateRow(Base):
 
     key: Mapped[StateKey] = mapped_column(StateKeyType, primary_key=True)
     value: Mapped[datetime] = mapped_column(UtcDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class UserRow(Base):
+    """A dashboard account (spec 023, D1).
+
+    ``password_hash`` is ``NULL`` until the person opens their access link and picks a password.
+    Only the SHA-256 digest of an access link is stored, never the link itself (D3).
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint("username"),
+        UniqueConstraint("invite_digest"),
+        # A user id will own tickers, rules and a bot: a reused id would hand them over.
+        {"sqlite_autoincrement": True},
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(32))
+    password_hash: Mapped[str | None] = mapped_column(Text)
+    is_admin: Mapped[bool]
+    active: Mapped[bool]
+    invite_digest: Mapped[str | None] = mapped_column(String(64))
+    invite_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)

@@ -2,8 +2,10 @@
 
 ``install_dashboard(app, settings)`` mounts everything under ``/dashboard/``. Pages are rendered
 on the server with Jinja2 (autoescaping on), every change is a ``POST`` form followed by a
-redirect, and no page carries a script (D1). Access goes through ``_Gate``: a valid session
-cookie, and a valid CSRF token on every ``POST`` (AC2, AC6).
+redirect, and no page carries a script (D1). Access goes through ``page`` and ``action``: a valid
+session cookie of an active user, and a valid CSRF token on every ``POST`` (AC2, AC6). Spec 023
+adds the accounts: a login per user, access links instead of a shared password, and the user
+pages only an administrator reaches.
 
 The database and the provider come from the running ``Runtime`` (``app.state.runtime``); every
 read or write is one unit of work in a worker thread (D7).
@@ -16,10 +18,10 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, tzinfo
+from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
 from typing import Final
-from urllib.parse import parse_qs, quote, unquote
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -32,9 +34,13 @@ from trading_bot.dashboard.auth import (
     LoginThrottle,
     PasswordHash,
     SessionSigner,
+    hash_password,
+    link_digest,
+    new_link_token,
     parse_password_hash,
     verify_password,
 )
+from trading_bot.dashboard.password import MIN_LENGTH as MIN_PASSWORD_LENGTH
 from trading_bot.dashboard.unit_of_work import (
     DashboardRepositories,
     DashboardUnitOfWork,
@@ -56,9 +62,11 @@ from trading_bot.domain.timeframe import Timeframe
 from trading_bot.persistence.errors import (
     AssignedTimeframeError,
     DuplicateRuleNameError,
+    DuplicateUsernameError,
     TimeframeMismatchError,
 )
-from trading_bot.persistence.records import StoredRule, StoredTicker
+from trading_bot.persistence.records import StoredRule, StoredTicker, StoredUser
+from trading_bot.persistence.repositories.users import normalize_username
 from trading_bot.watchlist import WatchOutcome, unwatch_ticker, watch_ticker
 
 __all__ = ["PREFIX", "TEMPLATES_DIR", "Dashboard", "install_dashboard"]
@@ -67,6 +75,9 @@ PREFIX: Final = "/dashboard"
 SESSION_COOKIE: Final = "tb_session"
 FLASH_COOKIE: Final = "tb_flash"
 MAX_FORM_BYTES: Final = 256 * 1024  # a rule document is capped at 64 KiB before encoding
+MAX_PASSWORD_LENGTH: Final = 1024  # characters; bounds the work one form can ask scrypt for
+# How long an access link stays valid (spec 023, D3).
+LINK_LIFETIME: Final = timedelta(hours=72)
 _FORM_TYPE: Final = "application/x-www-form-urlencoded"
 _LOGGER_NAME: Final = "trading_bot.dashboard"
 TEMPLATES_DIR: Final = Path(__file__).with_name("templates")
@@ -108,32 +119,39 @@ _WATCH_VERBS: Final = {
 
 @dataclass(frozen=True, slots=True)
 class _Credentials:
-    password: PasswordHash
     signer: SessionSigner
+    # The first administrator's password hash, used only while the users table is empty (D2).
+    bootstrap_hash: str | None
+    admin_username: str
 
 
 def _credentials(settings: Settings, logger: logging.Logger) -> _Credentials | None:
     """The dashboard keys, or ``None`` (with one log line) when it must stay disabled (AC1)."""
-    hash_value, secret = settings.dashboard_password_hash, settings.session_secret
-    if hash_value is None or secret is None:
-        logger.warning(
-            "dashboard disabled: TB_DASHBOARD_PASSWORD_HASH and TB_SESSION_SECRET are required"
-        )
+    secret = settings.session_secret
+    if secret is None:
+        logger.warning("dashboard disabled: TB_SESSION_SECRET is required")
         return None
     # Fixed messages only: nothing derived from either value reaches a log line (AC18).
-    try:
-        password = parse_password_hash(hash_value.get_secret_value())
-    except InvalidPasswordHashError:
-        logger.error(
-            "dashboard disabled: TB_DASHBOARD_PASSWORD_HASH is not a valid hash;"
-            " generate it with python -m trading_bot.dashboard.password"
-        )
-        return None
     if len(secret.get_secret_value()) < MIN_SESSION_SECRET_LENGTH:
         logger.error("dashboard disabled: TB_SESSION_SECRET must have at least 32 characters")
         return None
-    signer = SessionSigner(secret.get_secret_value(), hash_value.get_secret_value().strip())
-    return _Credentials(password=password, signer=signer)
+    bootstrap: str | None = None
+    hash_value = settings.dashboard_password_hash
+    if hash_value is not None:
+        try:
+            parse_password_hash(hash_value.get_secret_value())
+        except InvalidPasswordHashError:
+            logger.error(
+                "TB_DASHBOARD_PASSWORD_HASH is not a valid hash and is ignored;"
+                " generate it with python -m trading_bot.dashboard.password"
+            )
+        else:
+            bootstrap = hash_value.get_secret_value().strip()
+    return _Credentials(
+        signer=SessionSigner(secret.get_secret_value()),
+        bootstrap_hash=bootstrap,
+        admin_username=settings.admin_username,
+    )
 
 
 class _FormError(Exception):
@@ -181,6 +199,11 @@ class Dashboard:
         self._settings = settings
         self._credentials = credentials
         self._throttle = LoginThrottle()
+        # Per account as well (spec 023, D6): behind a proxy without ``TB_CLIENT_IP_HEADER``
+        # every browser shares one address, and a botnet has many.
+        self._account_throttle = LoginThrottle(limit=10)
+        # Verified against when the username is unknown, so a miss costs what a hit costs.
+        self._decoy: PasswordHash | None = None
         self._templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
         self._templates.env.globals["prefix"] = PREFIX
         self._templates.env.filters["local"] = self._local
@@ -213,6 +236,7 @@ class Dashboard:
             "production": self._settings.environment == "prod",
             "csrf": self._signer.csrf_token(nonce) if nonce and self._credentials else "",
             "signed_in": nonce is not None,
+            "user": getattr(request.state, "user", None) if nonce is not None else None,
             "flash": _read_flash(request),
             "active": _section(request.url.path),
             "zone": self._settings.display_timezone,
@@ -247,24 +271,35 @@ class Dashboard:
         provider: MarketDataProvider = request.app.state.runtime.provider
         return provider
 
-    def _session(self, request: Request) -> str | None:
+    async def _session(self, request: Request) -> str | None:
+        """The session nonce of an active user, who is stored in ``request.state.user``."""
         if self._credentials is None:
             return None
-        return self._signer.verify(request.cookies.get(SESSION_COOKIE))
-
-    # --- access -----------------------------------------------------------------------------
+        token = request.cookies.get(SESSION_COOKIE)
+        user_id = SessionSigner.user_id(token)
+        if user_id is None:
+            return None
+        user = await self._work(request, lambda repositories: repositories.users.get(user_id))
+        if user is None or not user.can_log_in or user.password_hash is None:
+            return None
+        nonce = self._signer.verify(token, user.password_hash)
+        if nonce is not None:
+            request.state.user = user
+        return nonce
 
     def page(
-        self, handler: Callable[[Request, str], Awaitable[Response]]
+        self, handler: Callable[[Request, str], Awaitable[Response]], *, admin: bool = False
     ) -> Callable[[Request], Awaitable[Response]]:
-        """A ``GET`` page: disabled -> 503, no session -> login."""
+        """A ``GET`` page: disabled -> 503, no session -> login, not an admin -> 403."""
 
         async def endpoint(request: Request) -> Response:
             if self._credentials is None:
                 return self._disabled(request)
-            nonce = self._session(request)
+            nonce = await self._session(request)
             if nonce is None:
                 return _redirect("/login")
+            if admin and not _user(request).is_admin:
+                return self._forbidden(request, nonce)
             try:
                 return await handler(request, nonce)
             except _NotFoundError:
@@ -273,14 +308,15 @@ class Dashboard:
         return endpoint
 
     def action(
-        self, handler: Callable[[Request, str, Form], Awaitable[Response]]
+        self, handler: Callable[[Request, str, Form], Awaitable[Response]], *, admin: bool = False
     ) -> Callable[[Request], Awaitable[Response]]:
-        """A ``POST`` action: disabled -> 503, no session -> login, bad CSRF token -> 403."""
+        """A ``POST`` action: disabled -> 503, no session -> login, bad CSRF token or not an
+        admin -> 403."""
 
         async def endpoint(request: Request) -> Response:
             if self._credentials is None:
                 return self._disabled(request)
-            nonce = self._session(request)
+            nonce = await self._session(request)
             if nonce is None:
                 return _redirect("/login")
             try:
@@ -291,12 +327,17 @@ class Dashboard:
                 return self._error(
                     request, 403, "The form expired. Reload the page and try again.", nonce
                 )
+            if admin and not _user(request).is_admin:
+                return self._forbidden(request, nonce)
             try:
                 return await handler(request, nonce, form)
             except _NotFoundError:
                 return self._not_found(request, nonce)
 
         return endpoint
+
+    def _forbidden(self, request: Request, nonce: str) -> HTMLResponse:
+        return self._error(request, 403, "Only an administrator can do that.", nonce)
 
     def _disabled(self, request: Request) -> HTMLResponse:
         return self._render(request, "disabled.html", status_code=503)
@@ -314,14 +355,23 @@ class Dashboard:
     async def login_page(self, request: Request) -> Response:
         if self._credentials is None:
             return self._disabled(request)
-        if self._session(request) is not None:
+        if await self._session(request) is not None:
             return _redirect("/")
+        if not await self._has_users(request):
+            return self._disabled(request)
         return self._render(request, "login.html")
 
+    async def _has_users(self, request: Request) -> bool:
+        """Whether someone can log in: a user exists, or the first one can be created (D2)."""
+        if self._credentials is not None and self._credentials.bootstrap_hash is not None:
+            return True
+        return await self._work(request, lambda repositories: repositories.users.count() > 0)
+
     async def login(self, request: Request) -> Response:
-        if self._credentials is None:
+        credentials = self._credentials
+        if credentials is None:
             return self._disabled(request)
-        client = request.client.host if request.client else "unknown"
+        client = self._client(request)
         if self._throttle.blocked(client):
             self._logger.warning("dashboard login refused: too many failed attempts")
             return self._render(
@@ -334,20 +384,78 @@ class Dashboard:
             form = await _read_form(request)
         except _FormError as error:
             return self._render(request, "login.html", {"error": error.message}, status_code=400)
-        password = _field(form, "password")
-        # scrypt takes tens of milliseconds by design: keep it off the event loop.
-        if not await asyncio.to_thread(verify_password, password, self._credentials.password):
+        username = _field(form, "username").strip().lower()[:64]
+        password = _field(form, "password")[:MAX_PASSWORD_LENGTH]
+        if self._account_throttle.blocked(username):
             self._throttle.record_failure(client)
+            self._logger.warning("dashboard login refused: too many failed attempts on an account")
+            return self._render(
+                request,
+                "login.html",
+                {"error": "Too many failed attempts. Wait 15 minutes and try again."},
+                status_code=429,
+            )
+
+        def read(repositories: DashboardRepositories) -> tuple[StoredUser | None, int]:
+            self._bootstrap(repositories, credentials)
+            return repositories.users.get_by_username(username), repositories.users.count()
+
+        user, count = await self._work(request, read)
+        if count == 0:
+            return self._disabled(request)
+        stored = _stored_hash(user)
+        # scrypt takes tens of milliseconds by design: keep it off the event loop.
+        matches = await asyncio.to_thread(verify_password, password, stored or self._decoy_hash())
+        if user is None or stored is None or not matches:
+            self._throttle.record_failure(client)
+            self._account_throttle.record_failure(username)
             self._logger.warning("dashboard login failed")
             return self._render(
-                request, "login.html", {"error": "Wrong password."}, status_code=401
+                request,
+                "login.html",
+                {"error": "Wrong username or password.", "username": username},
+                status_code=401,
             )
         self._throttle.reset(client)
-        self._logger.info("dashboard login")
-        response = _redirect("/")
+        self._account_throttle.reset(username)
+        self._logger.info("dashboard login: user %d", user.id)
+        return self._signed_in(request, _redirect("/"), user)
+
+    async def logout(self, request: Request, nonce: str, form: Form) -> Response:
+        response = _redirect("/login")
+        response.delete_cookie(SESSION_COOKIE, path=PREFIX)
+        return response
+
+    def _client(self, request: Request) -> str:
+        """The browser's address: the configured proxy header, else the TCP peer (D6)."""
+        header = self._settings.client_ip_header
+        if header:
+            value = request.headers.get(header, "").split(",")[0].strip()
+            if value:
+                return value[:64]
+        return request.client.host if request.client else "unknown"
+
+    def _bootstrap(self, repositories: DashboardRepositories, credentials: _Credentials) -> None:
+        """Create the first administrator from ``TB_DASHBOARD_PASSWORD_HASH`` (spec 023, D2)."""
+        if credentials.bootstrap_hash is None or repositories.users.count() > 0:
+            return
+        user = repositories.users.add(
+            credentials.admin_username, is_admin=True, password_hash=credentials.bootstrap_hash
+        )
+        self._logger.info("dashboard: created the first administrator, user %d", user.id)
+
+    def _decoy_hash(self) -> PasswordHash:
+        if self._decoy is None:
+            self._decoy = parse_password_hash(hash_password(new_link_token()[0]))
+        return self._decoy
+
+    def _signed_in(self, request: Request, response: Response, user: StoredUser) -> Response:
+        """``response`` with a fresh session cookie for ``user``."""
+        if user.password_hash is None:  # pragma: no cover - callers pass a user who can log in
+            raise RuntimeError("the user has no password")
         response.set_cookie(
             SESSION_COOKIE,
-            self._signer.issue(),
+            self._signer.issue(user.id, user.password_hash),
             max_age=self._signer.lifetime_seconds,
             path=PREFIX,
             httponly=True,
@@ -356,10 +464,160 @@ class Dashboard:
         )
         return response
 
-    async def logout(self, request: Request, nonce: str, form: Form) -> Response:
-        response = _redirect("/login")
-        response.delete_cookie(SESSION_COOKIE, path=PREFIX)
-        return response
+    # --- access links and the account (spec 023) ---------------------------------------------
+
+    async def invite_page(self, request: Request) -> Response:
+        if self._credentials is None:
+            return self._disabled(request)
+        client = self._client(request)
+        if self._throttle.blocked(client):
+            return self._render(request, "invite.html", {"blocked": True}, status_code=429)
+        token = str(request.path_params["token"])
+        user = await self._work(
+            request, lambda repositories: repositories.users.invited(link_digest(token))
+        )
+        if user is None:
+            self._throttle.record_failure(client)
+            return self._render(request, "invite.html", {"invalid": True}, status_code=404)
+        return self._render(request, "invite.html", {"username": user.username, "token": token})
+
+    async def accept_invite(self, request: Request) -> Response:
+        if self._credentials is None:
+            return self._disabled(request)
+        client = self._client(request)
+        if self._throttle.blocked(client):
+            return self._render(request, "invite.html", {"blocked": True}, status_code=429)
+        token = str(request.path_params["token"])
+        digest = link_digest(token)
+        try:
+            form = await _read_form(request)
+        except _FormError as error:
+            return self._render(request, "error.html", {"message": error.message}, status_code=400)
+        user = await self._work(request, lambda repositories: repositories.users.invited(digest))
+        if user is None:
+            self._throttle.record_failure(client)
+            return self._render(request, "invite.html", {"invalid": True}, status_code=404)
+        problem = _password_problem(_field(form, "password"), _field(form, "repeat"))
+        if problem is not None:
+            context = {"username": user.username, "token": token, "error": problem}
+            return self._render(request, "invite.html", context, status_code=422)
+        new_hash = await asyncio.to_thread(hash_password, _field(form, "password"))
+        redeemed = await self._work(
+            request, lambda repositories: repositories.users.redeem_invite(digest, new_hash)
+        )
+        if redeemed is None:  # the link was used or revoked in between
+            return self._render(request, "invite.html", {"invalid": True}, status_code=404)
+        self._logger.info("dashboard: user %d set a password with an access link", redeemed.id)
+        welcome = f"Welcome, {redeemed.username}. Your password is set."
+        return self._signed_in(request, _redirect("/", flash=welcome), redeemed)
+
+    async def account_page(self, request: Request, nonce: str) -> Response:
+        return self._render(request, "account.html", {}, nonce=nonce)
+
+    async def change_password(self, request: Request, nonce: str, form: Form) -> Response:
+        user = _user(request)
+        stored = _stored_hash(user)
+        current = _field(form, "current")[:MAX_PASSWORD_LENGTH]
+        if stored is None or not await asyncio.to_thread(verify_password, current, stored):
+            return self._render(
+                request,
+                "account.html",
+                {"error": "The current password is wrong."},
+                status_code=422,
+                nonce=nonce,
+            )
+        problem = _password_problem(_field(form, "password"), _field(form, "repeat"))
+        if problem is not None:
+            return self._render(
+                request, "account.html", {"error": problem}, status_code=422, nonce=nonce
+            )
+        new_hash = await asyncio.to_thread(hash_password, _field(form, "password"))
+        updated = await self._work(
+            request, lambda repositories: repositories.users.set_password(user.id, new_hash)
+        )
+        # The old cookie is bound to the old hash: issue a new one so this browser stays in.
+        response = _redirect("/account", flash="Password changed. Other sessions are logged out.")
+        return self._signed_in(request, response, updated)
+
+    # --- users (administrators only, spec 023) -----------------------------------------------
+
+    async def users_page(self, request: Request, nonce: str) -> Response:
+        users = await self._work(request, lambda repositories: repositories.users.list_all())
+        return self._render(request, "users.html", {"users": users}, nonce=nonce)
+
+    async def invite_user(self, request: Request, nonce: str, form: Form) -> Response:
+        try:
+            username = normalize_username(_field(form, "username"))
+        except ValueError as error:
+            return await self._users_error(request, nonce, str(error))
+        is_admin = _field(form, "is_admin") == "on"
+        token, digest = new_link_token()
+
+        def work(repositories: DashboardRepositories) -> StoredUser:
+            user = repositories.users.add(username, is_admin=is_admin)
+            return repositories.users.issue_invite(user.id, digest, LINK_LIFETIME)
+
+        try:
+            user = await self._work(request, work)
+        except DuplicateUsernameError:
+            return await self._users_error(request, nonce, f"{username} already exists.")
+        self._logger.info("dashboard: user %d invited by user %d", user.id, _user(request).id)
+        return await self._link_page(request, nonce, user, token)
+
+    async def new_link(self, request: Request, nonce: str, form: Form) -> Response:
+        user_id = _path_id(request, "user_id")
+        if user_id == _user(request).id:
+            return await self._users_error(
+                request, nonce, "Change your own password from Account instead."
+            )
+        token, digest = new_link_token()
+
+        def work(repositories: DashboardRepositories) -> StoredUser:
+            if repositories.users.get(user_id) is None:
+                raise _NotFoundError
+            return repositories.users.issue_invite(user_id, digest, LINK_LIFETIME)
+
+        user = await self._work(request, work)
+        self._logger.info("dashboard: new access link for user %d", user.id)
+        return await self._link_page(request, nonce, user, token)
+
+    async def enable_user(self, request: Request, nonce: str, form: Form) -> Response:
+        return await self._switch_user(request, nonce, active=True)
+
+    async def disable_user(self, request: Request, nonce: str, form: Form) -> Response:
+        return await self._switch_user(request, nonce, active=False)
+
+    async def _switch_user(self, request: Request, nonce: str, *, active: bool) -> Response:
+        user_id = _path_id(request, "user_id")
+        if user_id == _user(request).id and not active:
+            return await self._users_error(request, nonce, "You cannot disable your own account.")
+
+        def work(repositories: DashboardRepositories) -> str:
+            user = repositories.users.get(user_id)
+            if user is None:
+                raise _NotFoundError
+            repositories.users.set_active(user_id, active)
+            if active:
+                return f"{user.username} is enabled."
+            return f"{user.username} is disabled and can no longer log in."
+
+        return _redirect("/users", flash=await self._work(request, work))
+
+    async def _link_page(
+        self, request: Request, nonce: str, user: StoredUser, token: str
+    ) -> Response:
+        link = _origin(request) + f"{PREFIX}/invite/{token}"
+        context = {
+            "invited": user,
+            "link": link,
+            "hours": int(LINK_LIFETIME.total_seconds() // 3600),
+        }
+        return self._render(request, "user_link.html", context, nonce=nonce)
+
+    async def _users_error(self, request: Request, nonce: str, message: str) -> Response:
+        users = await self._work(request, lambda repositories: repositories.users.list_all())
+        context = {"users": users, "error": message}
+        return self._render(request, "users.html", context, status_code=422, nonce=nonce)
 
     # --- overview and pause -----------------------------------------------------------------
 
@@ -775,6 +1033,7 @@ def install_dashboard(app: FastAPI, settings: Settings) -> None:
     dashboard = Dashboard(settings, _credentials(settings, logging.getLogger(_LOGGER_NAME)))
     pages: list[tuple[str, Callable[[Request, str], Awaitable[Response]]]] = [
         ("/", dashboard.overview),
+        ("/account", dashboard.account_page),
         ("/tickers", dashboard.tickers_page),
         ("/tickers/{ticker_id:int}", dashboard.ticker_page),
         ("/tickers/{ticker_id:int}/delete", dashboard.delete_ticker_page),
@@ -785,6 +1044,7 @@ def install_dashboard(app: FastAPI, settings: Settings) -> None:
     ]
     actions: list[tuple[str, Callable[[Request, str, Form], Awaitable[Response]]]] = [
         ("/logout", dashboard.logout),
+        ("/account/password", dashboard.change_password),
         ("/pause", dashboard.pause),
         ("/resume", dashboard.resume),
         ("/tickers", dashboard.add_ticker),
@@ -800,10 +1060,23 @@ def install_dashboard(app: FastAPI, settings: Settings) -> None:
     ]
     app.add_api_route(PREFIX + "/login", dashboard.login_page, methods=["GET"])
     app.add_api_route(PREFIX + "/login", dashboard.login, methods=["POST"])
+    app.add_api_route(PREFIX + "/invite/{token}", dashboard.invite_page, methods=["GET"])
+    app.add_api_route(PREFIX + "/invite/{token}", dashboard.accept_invite, methods=["POST"])
     for path, page in pages:
         app.add_api_route(PREFIX + path, dashboard.page(page), methods=["GET"])
     for path, action in actions:
         app.add_api_route(PREFIX + path, dashboard.action(action), methods=["POST"])
+    app.add_api_route(
+        PREFIX + "/users", dashboard.page(dashboard.users_page, admin=True), methods=["GET"]
+    )
+    admin_actions: list[tuple[str, Callable[[Request, str, Form], Awaitable[Response]]]] = [
+        ("/users", dashboard.invite_user),
+        ("/users/{user_id:int}/link", dashboard.new_link),
+        ("/users/{user_id:int}/enable", dashboard.enable_user),
+        ("/users/{user_id:int}/disable", dashboard.disable_user),
+    ]
+    for path, action in admin_actions:
+        app.add_api_route(PREFIX + path, dashboard.action(action, admin=True), methods=["POST"])
 
     async def root() -> RedirectResponse:
         return RedirectResponse(PREFIX + "/", status_code=303)
@@ -849,9 +1122,47 @@ def _read_flash(request: Request) -> dict[str, str] | None:
     return {"level": level, "text": text}
 
 
+def _origin(request: Request) -> str:
+    """Where the browser reached the dashboard: the ``Origin`` of the ``POST`` when it is a
+    plain HTTP(S) origin (a tunnel that terminates TLS hides the real scheme and host from the
+    app), else the request's own base URL."""
+    origin = request.headers.get("origin", "").strip()
+    parts = urlsplit(origin)
+    if parts.scheme in ("http", "https") and parts.netloc and not parts.path and len(origin) < 256:
+        return f"{parts.scheme}://{parts.netloc}"
+    return str(request.base_url).rstrip("/")
+
+
+def _user(request: Request) -> StoredUser:
+    """The signed-in user the gate stored on the request."""
+    user: StoredUser = request.state.user
+    return user
+
+
+def _stored_hash(user: StoredUser | None) -> PasswordHash | None:
+    """The parsed hash of a user who may log in, or ``None``."""
+    if user is None or not user.can_log_in or user.password_hash is None:
+        return None
+    try:
+        return parse_password_hash(user.password_hash)
+    except InvalidPasswordHashError:
+        return None
+
+
+def _password_problem(password: str, repeat: str) -> str | None:
+    """Why a new password is refused, or ``None`` (spec 023, D3)."""
+    if len(password) < MIN_PASSWORD_LENGTH:
+        return f"Use at least {MIN_PASSWORD_LENGTH} characters."
+    if len(password) > MAX_PASSWORD_LENGTH:
+        return f"Use at most {MAX_PASSWORD_LENGTH} characters."
+    if password != repeat:
+        return "The two passwords do not match."
+    return None
+
+
 def _section(path: str) -> str:
     """The navigation entry a page belongs to, for ``aria-current`` (#12)."""
-    for section in ("tickers", "rules"):
+    for section in ("tickers", "rules", "users", "account"):
         if path.startswith(f"{PREFIX}/{section}"):
             return section
     return "overview" if path == PREFIX + "/" else ""

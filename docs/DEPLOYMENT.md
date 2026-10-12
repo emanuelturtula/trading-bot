@@ -112,11 +112,14 @@ umask 077
 cat > ~/trading-bot-deploy/beta/secrets.env <<'EOF'
 TB_TELEGRAM_BOT_TOKEN=<beta bot token>
 TB_TELEGRAM_ALLOWED_CHAT_IDS=<chat id>
+#TB_DISPLAY_TIMEZONE=<IANA zone, default Europe/Madrid>
 TB_DASHBOARD_PASSWORD_HASH=<hash>
 TB_SESSION_SECRET=<long random value>
 EOF
 chmod 600 ~/trading-bot-deploy/beta/secrets.env
 ```
+
+Every chat in `TB_TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated) receives each signal; to find your chat id, send any message to the bot and read `message.chat.id` from `https://api.telegram.org/bot<token>/getUpdates` in a browser (never paste the token anywhere else). Without a token or chat ids the bot still starts and only logs its signals.
 
 Repeat for `prod/secrets.env` with the production bot token. `deploy.py` never reads this file; it only creates it empty if it is missing and refuses to deploy if its permissions are more open than 600. Changes apply on restart: `docker compose --project-name trading-bot-beta restart app` (or `trading-bot-prod`).
 

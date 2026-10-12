@@ -117,3 +117,55 @@ def test_both_scheduler_settings_are_documented_in_the_env_example() -> None:
 
     assert "#TB_CANDLE_CLOSE_DELAY_SECONDS=120" in lines
     assert "#TB_SCHEDULER_MISFIRE_GRACE_SECONDS=900" in lines
+
+
+# --- Telegram recipients and the display zone (spec 017, U1, U3) -----------------------------
+
+
+def test_chat_ids_are_parsed_in_order_without_duplicates() -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        telegram_allowed_chat_ids=" 12, -1001234567890 ,12,, ",
+    )
+
+    assert settings.telegram_chat_ids == (12, -1001234567890)
+    assert settings.telegram_allowed_chat_ids == "12,-1001234567890"
+
+
+def test_no_chat_ids_by_default() -> None:
+    assert Settings(_env_file=None).telegram_chat_ids == ()  # type: ignore[call-arg]
+
+
+def test_a_malformed_chat_id_is_rejected_without_echoing_the_value() -> None:
+    with pytest.raises(ValueError, match="comma-separated integers") as caught:
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            telegram_allowed_chat_ids="12,notanumber77",
+        )
+
+    assert "notanumber77" not in str(caught.value)
+
+
+def test_the_display_zone_defaults_to_madrid_and_is_validated() -> None:
+    assert Settings(_env_file=None).display_zone.key == "Europe/Madrid"  # type: ignore[call-arg]
+    assert (
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            display_timezone="America/Argentina/Buenos_Aires",
+        ).display_zone.key
+        == "America/Argentina/Buenos_Aires"
+    )
+    with pytest.raises(ValueError, match="IANA"):
+        Settings(_env_file=None, display_timezone="Mars/Olympus")  # type: ignore[call-arg]
+
+
+def test_a_validation_error_never_echoes_a_secret_value() -> None:
+    with pytest.raises(ValueError) as caught:
+        Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            telegram_bot_token=FAKE_TOKEN,  # type: ignore[arg-type]
+            environment="staging",  # type: ignore[arg-type]
+        )
+
+    assert "staging" not in str(caught.value)
+    assert FAKE_TOKEN not in str(caught.value)

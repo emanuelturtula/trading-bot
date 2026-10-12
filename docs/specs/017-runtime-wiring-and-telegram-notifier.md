@@ -1,6 +1,6 @@
 # 017 — Runtime wiring and the Telegram signal notifier
 
-- **Status:** draft (product questions Q1–Q5 open, see "Product questions")
+- **Status:** approved (Q1–Q5 answered on 2026-10-12, see "User decisions")
 - **Branch:** `feature/runtime-wiring-telegram`
 - **Spec author:** tech-lead
 - **Expected commit type:** feat
@@ -73,8 +73,9 @@ first real signal reaches the user's phone from beta.
 - [ ] **AC12:** `scripts/check.py` is green (ruff, format, mypy strict, tests with coverage ≥ 85%,
   gitleaks); no test reaches the network.
 - [ ] **AC13:** `docs/ARCHITECTURE.md` describes the runtime wiring and the notifier;
-  `docs/ROADMAP.md` marks F4 completed; `docs/DEPLOYMENT.md` lists the new `secrets.env`
-  variables with placeholders only.
+  `docs/DEPLOYMENT.md` and `.env.example` list the new variable with placeholders only.
+  `docs/ROADMAP.md` marks F4 completed in a follow-up once this is in production, as earlier
+  phases did.
 
 ## Design
 
@@ -106,25 +107,62 @@ first real signal reaches the user's phone from beta.
 | `src/trading_bot/notifications/message.py` | developer | New: pure `format_signal_message` |
 | `src/trading_bot/notifications/log_notifier.py` | developer | New: `LogNotifier` (Q2) |
 | `tests/unit/...`, `tests/integration/...` | tester | §Test plan |
-| `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/DEPLOYMENT.md` | developer | AC13 |
+| `docs/ARCHITECTURE.md`, `docs/DEPLOYMENT.md`, `.env.example` | developer | AC13 |
+| `tests/unit/test_engine_guard.py` | tester | Allow `telegram` and `pydantic` in `notifications/telegram.py` only |
+| `tests/unit/test_persistence_startup.py` | tester | Run the lifespan with the offline runtime; the lock file sits next to the database |
 
 ### 2. Interfaces
 
 ```python
 class TelegramNotifier:  # implements notifications.notifier.Notifier
-    def __init__(self, *, token: SecretStr, chat_ids: Sequence[int], environment: Environment,
-                 display_tz: ZoneInfo, calendar: MarketCalendar,
-                 sender: MessageSender | None = None,  # tests inject a fake; default wraps telegram.Bot
-                 sleep: Sleep = asyncio.sleep) -> None: ...
+    def __init__(
+        self,
+        *,
+        sender: MessageSender,
+        chat_ids: Sequence[int],
+        production: bool,
+        display_tz: tzinfo,
+        calendar: MarketCalendar,
+        sleep: Sleep = asyncio.sleep,
+    ) -> None: ...
     async def notify(self, notification: SignalNotification) -> None: ...
     async def aclose(self) -> None: ...
 
-def format_signal_message(notification: SignalNotification, *, environment: Environment,
-                          display_tz: ZoneInfo, calendar: MarketCalendar) -> str: ...
+
+class BotMessageSender:  # the only python-telegram-bot code; maps its errors (D3)
+    def __init__(self, token: SecretStr) -> None: ...
+
+
+def format_signal_message(
+    notification: SignalNotification,
+    *,
+    production: bool,
+    display_tz: tzinfo,
+    calendar: MarketCalendar,
+) -> str: ...
+
+
+class Runtime:  # trading_bot/runtime.py; builders are injectable for tests
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        build_calendar=...,
+        build_provider=...,
+        build_sender=BotMessageSender,
+    ) -> None: ...
+    async def start(self) -> None: ...
+    async def aclose(self) -> None: ...
 ```
 
-`MessageSender` is a one-method `Protocol` (`send_message(chat_id, text) -> None`) so the retry
-policy is tested without the library. The token only ever appears inside the request URL that
+`production` is a boolean rather than the `Environment` type because `notifications/` may not
+import `trading_bot.config` (spec 015 guard). `MessageSender` is a two-method `Protocol`
+(`send_message(chat_id, text)`, `aclose()`) that raises only `TransientSendError` (with an
+optional `retry_after`) or `PermanentSendError`, so the retry policy is tested without the
+library. `Bot.initialize` is never called: on a rejected token it raises an error whose message
+embeds the token.
+
+The token only ever appears inside the request URL that
 python-telegram-bot builds; **`httpx` logs every request URL at `INFO`**, token included, so
 `configure_logging` pins the `httpx` and `telegram` loggers to `WARNING`, and a test asserts that
 no record carrying the fake token reaches a handler. The `RedactingFilter` masking token-shaped
@@ -149,7 +187,7 @@ Not financial advice.
 |----------|------|--------|---------|
 | `TB_TELEGRAM_BOT_TOKEN` | `SecretStr \| None` | yes (already exists) | none |
 | `TB_TELEGRAM_ALLOWED_CHAT_IDS` | comma-separated integers, parsed and validated | no, but never logged | empty (already exists) |
-| `TB_DISPLAY_TIMEZONE` | IANA zone name, validated with `zoneinfo` | no | Q3 |
+| `TB_DISPLAY_TIMEZONE` | IANA zone name, validated with `zoneinfo` | no | `Europe/Madrid` (U3) |
 
 ## Test plan
 
@@ -192,7 +230,19 @@ Not financial advice.
 
 ## User decisions
 
-_Pending._
+The user accepted every recommendation on **2026-10-12**.
+
+- **U1 — Recipients:** every chat in `TB_TELEGRAM_ALLOWED_CHAT_IDS` receives each signal; no
+  second variable. **Turned down:** `TB_TELEGRAM_SIGNAL_CHAT_IDS`.
+- **U2 — No token configured:** the app starts with `LogNotifier` (one `WARNING` at startup, one
+  `INFO` line per signal, never the chat ids) in every environment. The same applies when the
+  token is set but the chat list is empty. **Turned down:** refusing to start in `beta` and `prod`.
+- **U3 — Display time zone:** `TB_DISPLAY_TIMEZONE`, default `Europe/Madrid`, overridable per
+  environment. Q3 offered two zones without a recommendation; Madrid was picked because spec 016
+  (U6) already reasons in Spanish local time, and the user can change it in `secrets.env` or the
+  compose environment.
+- **U4 — Branch:** `feature/runtime-wiring-telegram`, so every push deploys to beta (port 8082).
+- **U5 — One PR** for #16 and #17 (D1).
 
 ## Review checklist (tech-lead)
 

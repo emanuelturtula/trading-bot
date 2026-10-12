@@ -9,6 +9,9 @@ from collections.abc import Iterable
 REDACTED = "[REDACTED]"
 # Telegram bot tokens: "<bot id>:<secret>". Matches the token shape, not a literal token.
 TELEGRAM_TOKEN_PATTERN = re.compile(r"\b\d{6,12}:[A-Za-z0-9_-]{30,}\b")
+# Libraries that log request URLs at INFO or DEBUG. A Bot API URL carries the bot token in its
+# path, so these loggers never go below WARNING, whatever the configured level (spec 017, §2).
+QUIET_LOGGERS = ("httpx", "httpcore", "telegram")
 
 
 class RedactingFilter(logging.Filter):
@@ -38,3 +41,5 @@ def configure_logging(level: str, secrets: Iterable[str] = ()) -> None:
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(level)
+    for name in QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)

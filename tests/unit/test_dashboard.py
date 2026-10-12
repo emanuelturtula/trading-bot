@@ -10,6 +10,7 @@ import json
 import logging
 import re
 from collections.abc import Iterator
+from html.parser import HTMLParser
 from pathlib import Path
 
 import httpx
@@ -111,6 +112,30 @@ def signed_in(browser: Browser) -> Browser:
         )
     )
     return browser
+
+
+_OWN_SCRIPTS = (
+    (("type", "application/json"), ("id", "builder-data")),
+    (("src", "/dashboard/static/builder.js"), ("defer", None)),
+)
+
+
+class _ScriptTags(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.found: list[tuple[tuple[str, str | None], ...]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "script":  # the parser lowercases tag names
+            self.found.append(tuple(attrs))
+
+
+def assert_only_own_scripts(body: str) -> None:
+    """Pages run only the dashboard's own files: every script tag is data or a static file."""
+    parser = _ScriptTags()
+    parser.feed(body)
+    for attrs in parser.found:
+        assert attrs in _OWN_SCRIPTS, attrs
 
 
 def add_rule(
@@ -327,7 +352,10 @@ def test_security_headers_on_every_dashboard_response(signed_in: Browser) -> Non
         response = signed_in.get(path)
         for name, value in SECURITY_HEADERS.items():
             assert response.headers[name] == value, (path, name)
-    assert "script-src" not in SECURITY_HEADERS["Content-Security-Policy"]
+    assert "script-src 'self';" in SECURITY_HEADERS["Content-Security-Policy"]
+    assert "unsafe" not in SECURITY_HEADERS["Content-Security-Policy"].replace(
+        "style-src 'unsafe-inline'", ""
+    )
     assert "x-frame-options" not in signed_in.get("/health").headers
 
 
@@ -341,7 +369,7 @@ def test_no_secret_reaches_a_page(signed_in: Browser) -> None:
         assert PASSWORD not in body
         assert HASH not in body
         assert SECRET not in body
-        assert "<script" not in body
+        assert_only_own_scripts(body)
 
 
 # --- overview and pause ----------------------------------------------------------------------
@@ -828,3 +856,22 @@ def test_session_cookie_is_secure_when_the_app_itself_serves_https(tmp_path: Pat
 
     assert response.status_code == 303
     assert "; secure" in response.headers["set-cookie"].lower()
+
+
+def test_rule_form_ships_the_builder(signed_in: Browser) -> None:
+    page = signed_in.get("/dashboard/rules/new").text
+    data = page.partition('id="builder-data">')[2].partition("<")[0]  # tojson escapes "<"
+    script = signed_in.get("/dashboard/static/builder.js")
+
+    assert "rsi_level" in [template["id"] for template in json.loads(data)["templates"]]
+    assert '<div id="builder" class="builder" hidden></div>' in page
+    assert script.status_code == 200
+    assert "javascript" in script.headers["content-type"]
+    assert script.headers["Content-Security-Policy"] == SECURITY_HEADERS["Content-Security-Policy"]
+    assert not re.search(r"innerHTML|outerHTML|insertAdjacentHTML|eval\(", script.text)
+    new_rule = re.search(
+        r'<textarea id="document" name="document"[^>]*>(.*?)</textarea>', page, re.S
+    )
+    assert new_rule is not None
+    conditions = json.loads(new_rule.group(1).replace("&#34;", '"'))["conditions"]
+    assert conditions["all"][0]["left"]["indicator"] == "rsi"  # opens on a template

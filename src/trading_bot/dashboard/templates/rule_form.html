@@ -1,5 +1,7 @@
 {% extends "base.html" %}
-{% block title %}{{ 'Edit rule' if stored else 'New rule' }}{% endblock %}
+{% block title %}{{ 'Edit rule' if stored else 'New rule' }}<script type="application/json" id="builder-data">{{ builder | tojson }}</script>
+<script src="{{ prefix }}/static/builder.js" defer></script>
+{% endblock %}
 {% block content %}
 <h1>{% if stored %}Edit rule <span class="muted">{{ stored.name }}</span>{% else %}New rule{% endif %}</h1>
 <div class="split">
@@ -14,8 +16,11 @@
     {% endif %}
     <form method="post" action="{{ prefix }}/rules{% if stored %}/{{ stored.id }}{% endif %}">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <label class="field" for="document">Rule document (JSON)</label>
-      <textarea id="document" name="document" spellcheck="false">{{ document }}</textarea>
+      <div id="builder" class="builder" hidden></div>
+      <div id="json-editor">
+        <label class="field" for="document">Rule document (JSON)</label>
+        <textarea id="document" name="document" spellcheck="false">{{ document }}</textarea>
+      </div>
       <p class="row">
         <label><input type="checkbox" name="enabled" {% if enabled %}checked{% endif %}> Enabled</label>
         {% if not stored %}
@@ -79,4 +84,6 @@
     </details>
   </div>
 </div>
+<script type="application/json" id="builder-data">{{ builder | tojson }}</script>
+<script src="{{ prefix }}/static/builder.js" defer></script>
 {% endblock %}

@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from trading_bot.config import Settings
@@ -35,6 +36,7 @@ from trading_bot.dashboard.auth import (
     parse_password_hash,
     verify_password,
 )
+from trading_bot.dashboard.builder import builder_payload, fill
 from trading_bot.dashboard.unit_of_work import (
     DashboardRepositories,
     DashboardUnitOfWork,
@@ -70,6 +72,7 @@ MAX_FORM_BYTES: Final = 256 * 1024  # a rule document is capped at 64 KiB before
 _FORM_TYPE: Final = "application/x-www-form-urlencoded"
 _LOGGER_NAME: Final = "trading_bot.dashboard"
 TEMPLATES_DIR: Final = Path(__file__).with_name("templates")
+STATIC_DIR: Final = Path(__file__).with_name("static")
 
 SECURITY_HEADERS: Final = {
     "Cache-Control": "no-store",
@@ -77,7 +80,7 @@ SECURITY_HEADERS: Final = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
+        "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; "
         "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
     ),
 }
@@ -86,16 +89,7 @@ NEW_RULE_TEMPLATE: Final[Mapping[str, object]] = {
     "name": "My new rule",
     "signal": "BUY",
     "timeframe": "1d",
-    "conditions": {
-        "all": [
-            {
-                "left": {"indicator": "rsi", "params": {"length": 14}},
-                "op": "crosses_below",
-                "right": {"value": 30},
-            },
-            {"left": {"price": "close"}, "op": ">", "right": {"indicator": "sma"}},
-        ]
-    },
+    "conditions": fill("rsi_level", {}),
     "cooldown_bars": 5,
 }
 
@@ -764,6 +758,7 @@ class Dashboard:
             "operators": [operator.value for operator in Operator],
             "prices": [price.value for price in PriceField],
             "timeframes": [timeframe.value for timeframe in Timeframe],
+            "builder": builder_payload(),
         }
         return self._render(
             request, "rule_form.html", context, status_code=422 if listed else 200, nonce=nonce
@@ -798,6 +793,8 @@ def install_dashboard(app: FastAPI, settings: Settings) -> None:
         ("/rules/{rule_id:int}/disable", dashboard.disable_rule),
         ("/rules/{rule_id:int}/delete", dashboard.delete_rule),
     ]
+    # Scripts of the pages (spec 026): public files shipped in the package, no secrets.
+    app.mount(PREFIX + "/static", StaticFiles(directory=STATIC_DIR), name="dashboard-static")
     app.add_api_route(PREFIX + "/login", dashboard.login_page, methods=["GET"])
     app.add_api_route(PREFIX + "/login", dashboard.login, methods=["POST"])
     for path, page in pages:

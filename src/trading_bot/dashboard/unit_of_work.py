@@ -84,7 +84,7 @@ def sql_dashboard_unit_of_work(
                 rules=SqlRuleRepository(session, clock=clock, owner=owner),
                 assignments=SqlAssignmentRepository(session, clock=clock, owner=owner),
                 state=SqlBotStateRepository(session, clock=clock),
-                signals=SqlSignalRepository(session, clock=clock),
+                signals=SqlSignalRepository(session, clock=clock, owner=owner),
                 users=SqlUserRepository(session, clock=clock),
             )
 

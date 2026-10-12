@@ -1,5 +1,7 @@
 {% extends "base.html" %}
-{% block title %}{{ ticker.symbol }} {{ ticker.timeframe.value }}{% endblock %}
+{% block title %}{{ ticker.symbol }} {{ ticker.timeframe.value }}<script src="{{ prefix }}/static/vendor/lightweight-charts-5.2.1.standalone.production.js" defer></script>
+<script src="{{ prefix }}/static/chart.js" defer></script>
+{% endblock %}
 {% block content %}
 <h1>{{ ticker.symbol }} <span class="muted">{{ ticker.timeframe.value }}</span></h1>
 <div class="panel">
@@ -9,6 +11,25 @@
     <button type="submit" class="badge {{ 'on' if ticker.enabled else 'off' }}" title="{{ 'Click to stop watching it' if ticker.enabled else 'Click to watch it again' }}">{{ 'Watched' if ticker.enabled else 'Stopped' }}</button>
   </form>
   <span>{{ signals }} signal{{ '' if signals == 1 else 's' }} recorded. Added {{ ticker.created_at | local }}.</span></div>
+</div>
+<h2>Chart</h2>
+<div class="panel">
+  <div id="chart" class="chart" data-src="{{ prefix }}/tickers/{{ ticker.id }}/chart.json"><p class="muted">Loading the chart…</p></div>
+  <p id="chart-legend" class="chart-legend muted"></p>
+  <noscript><p class="muted">The chart needs JavaScript.</p></noscript>
+</div>
+<h2>Recent signals</h2>
+<div class="panel table-wrap">
+  {% if recent %}
+  <table>
+    <tr><th>Candle</th><th>Rule</th><th>Side</th><th>Close</th><th class="hide-narrow">Telegram</th></tr>
+    {% set items = recent %}{% set with_ticker = false %}
+    {% include "_signal_rows.html" %}
+  </table>
+  {% if signals > recent | length %}<p><a href="{{ prefix }}/signals?ticker={{ ticker.id }}">All {{ signals }} signals</a></p>{% endif %}
+  {% else %}
+  <p class="muted">No signal yet. The chart above shows where its rules would have fired.</p>
+  {% endif %}
 </div>
 <h2>Rules evaluated on it</h2>
 <div class="panel">
@@ -37,4 +58,6 @@
   <a href="{{ prefix }}/tickers">Back to the tickers</a>
   <a class="button danger" href="{{ prefix }}/tickers/{{ ticker.id }}/delete">Delete this ticker</a>
 </div>
+<script src="{{ prefix }}/static/vendor/lightweight-charts-5.2.1.standalone.production.js" defer></script>
+<script src="{{ prefix }}/static/chart.js" defer></script>
 {% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Signals{% endblock %}
+{% block content %}
+<h1>Signals</h1>
+<form class="row" method="get" action="{{ prefix }}/signals" style="margin-bottom:12px">
+  <label class="field" for="ticker" style="margin:0">Ticker</label>
+  <select id="ticker" name="ticker">
+    <option value="">All tickers</option>
+    {% for ticker in tickers %}<option value="{{ ticker.id }}" {% if selected and selected.id == ticker.id %}selected{% endif %}>{{ ticker.symbol }} · {{ ticker.timeframe.value }}</option>{% endfor %}
+  </select>
+  <button type="submit">Show</button>
+</form>
+<div class="panel table-wrap">
+  {% if page.items %}
+  <table>
+    <tr><th>Candle</th><th>Ticker</th><th>Rule</th><th>Side</th><th>Close</th><th class="hide-narrow">Telegram</th></tr>
+    {% set items = page.items %}{% set with_ticker = true %}
+    {% include "_signal_rows.html" %}
+  </table>
+  {% if page.next_cursor %}
+  <p><a class="button" href="{{ prefix }}/signals?{% if selected %}ticker={{ selected.id }}&amp;{% endif %}before={{ page.next_cursor.candle_close_ts.timestamp() | int }}_{{ page.next_cursor.id }}">Older</a></p>
+  {% endif %}
+  {% else %}
+  <p class="muted">No signal yet{% if selected %} for {{ selected.symbol }}{% endif %}. A signal is recorded when an enabled rule fires on a closed candle of a watched ticker.</p>
+  {% endif %}
+</div>
+<p class="muted">Daily candles are named by their trading day; the others by their open time.</p>
+{% endblock %}

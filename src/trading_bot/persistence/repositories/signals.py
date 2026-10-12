@@ -38,6 +38,7 @@ from trading_bot.persistence.errors import (
     echo_name,
 )
 from trading_bot.persistence.models import RuleRow, SignalRow, TickerRow
+from trading_bot.persistence.owner import ALL_OWNERS, Owner, OwnerScope
 from trading_bot.persistence.signal_records import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
@@ -101,9 +102,14 @@ def _reject_constant(name: str) -> NoReturn:
 class SqlSignalRepository:
     """``SignalRepository`` over one session; build one per unit of work."""
 
-    def __init__(self, session: Session, *, clock: Clock = system_clock) -> None:
+    def __init__(
+        self, session: Session, *, clock: Clock = system_clock, owner: Owner = ALL_OWNERS
+    ) -> None:
+        """``owner`` limits the reads to that user's tickers (spec 027); the engine and the CLI
+        keep the default, every owner."""
         self._session = session
         self._clock = clock
+        self._owner = OwnerScope(session, owner)
 
     def record(self, signal: Signal) -> RecordOutcome:
         """Store the signal, or return the one already stored under its key (D112).
@@ -231,6 +237,10 @@ class SqlSignalRepository:
 
     def count(self, *, ticker_id: int | None = None, rule_id: int | None = None) -> int:
         statement = select(func.count()).select_from(SignalRow)
+        if not self._owner.everyone:
+            statement = statement.join(TickerRow, TickerRow.id == SignalRow.ticker_id).where(
+                TickerRow.user_id == self._owner.user_id
+            )
         if ticker_id is not None:
             statement = statement.where(SignalRow.ticker_id == ticker_id)
         if rule_id is not None:
@@ -239,11 +249,14 @@ class SqlSignalRepository:
 
     def _select(self) -> Select[tuple[SignalRow, str, str]]:
         """Every read joins the symbol and the rule's current name, so one query is enough."""
-        return (
+        statement = (
             select(SignalRow, TickerRow.symbol, RuleRow.name)
             .join(TickerRow, TickerRow.id == SignalRow.ticker_id)
             .join(RuleRow, RuleRow.id == SignalRow.rule_id)
         )
+        if not self._owner.everyone:
+            statement = statement.where(TickerRow.user_id == self._owner.user_id)
+        return statement
 
     def _filtered(
         self,

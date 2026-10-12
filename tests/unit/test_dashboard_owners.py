@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.fixtures.dashboard import Browser, make_app
-from tests.fixtures.repositories import sample_rule
+from tests.fixtures.repositories import sample_rule, sample_signal
 from trading_bot.dashboard.unit_of_work import DashboardRepositories, sql_dashboard_unit_of_work
 from trading_bot.data.tickers import AssetType, Exchange, TickerInfo
 from trading_bot.domain.rules.schema import dump_rule
@@ -138,3 +138,35 @@ def test_only_an_administrator_pauses_the_bot(users: Users) -> None:
     assert users.ana.post("/dashboard/pause").status_code == 403
     assert "/dashboard/pause" in users.admin.get("/dashboard/").text
     assert users.admin.post("/dashboard/pause").status_code == 303
+
+
+def test_signals_and_charts_belong_to_their_owner(users: Users) -> None:
+    """Spec 027, AC6: the history, the counts and the chart read only the user's own tickers."""
+    admin_ticker = users.ticker(users.admin_id)
+    admin_rule = users.rule(users.admin_id, "Mine")
+    ana_ticker = users.ticker(users.ana_id, "MSFT")
+    ana_rule = users.rule(users.ana_id, "Theirs")
+    for owner, ticker_id, rule_id in (
+        (users.admin_id, admin_ticker, admin_rule),
+        (users.ana_id, ana_ticker, ana_rule),
+    ):
+        users.work(owner, lambda r, t=ticker_id, u=rule_id: r.assignments.assign(t, u))
+        users.work(
+            ALL_OWNERS,
+            lambda r, t=ticker_id, u=rule_id: r.signals.record(
+                sample_signal(r.tickers.get(t), r.rules.get(u))  # type: ignore[arg-type]
+            ),
+        )
+
+    ana_page = users.ana.get("/dashboard/signals").text
+    admin_page = users.admin.get("/dashboard/signals").text
+
+    assert "<td>Theirs</td>" in ana_page
+    assert "<td>Mine</td>" not in ana_page
+    assert "<td>Mine</td>" in admin_page
+    assert "<td>Theirs</td>" not in admin_page
+    assert users.ana.get(f"/dashboard/tickers/{admin_ticker}/chart.json").status_code == 404
+    assert users.ana.get(f"/dashboard/signals?ticker={admin_ticker}").text.count("<td>Mine") == 0
+    assert users.work(users.ana_id, lambda r: r.signals.count()) == 1
+    assert users.work(users.ana_id, lambda r: r.signals.history().items[0].rule_name) == "Theirs"
+    assert users.work(ALL_OWNERS, lambda r: r.signals.count()) == 2

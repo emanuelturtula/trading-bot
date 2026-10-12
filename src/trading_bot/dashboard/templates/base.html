@@ -92,6 +92,12 @@ pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; 
 code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 label { cursor: pointer; }
 [hidden] { display: none !important; }
+.chart { height: 520px; position: relative; }
+.chart > p { margin: 0; padding: 12px 0; }
+.chart-legend { font-size: 13px; margin: 8px 0 0; }
+.chart-legend span { display: inline-block; margin-right: 14px; }
+.chart-legend i { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 4px; }
+@media (max-width: 640px) { .chart { height: 440px; } }
 input[type=number] { font: inherit; padding: 6px 8px; border-radius: 6px; width: 7em;
   border: 1px solid var(--line); background: var(--bg); color: var(--text); }
 button.small { font-size: 13px; padding: 3px 9px; }
@@ -120,6 +126,7 @@ button.link-button { border: 0; background: none; color: var(--accent); padding:
       <a href="{{ prefix }}/" {% if active == "overview" %}aria-current="page"{% endif %}>Overview</a>
       <a href="{{ prefix }}/tickers" {% if active == "tickers" %}aria-current="page"{% endif %}>Tickers</a>
       <a href="{{ prefix }}/rules" {% if active == "rules" %}aria-current="page"{% endif %}>Rules</a>
+      <a href="{{ prefix }}/signals" {% if active == "signals" %}aria-current="page"{% endif %}>Signals</a>
       {% if user and user.is_admin %}<a href="{{ prefix }}/users" {% if active == "users" %}aria-current="page"{% endif %}>Users</a>{% endif %}
       <a href="{{ prefix }}/account" {% if active == "account" %}aria-current="page"{% endif %}>{{ user.username if user else "Account" }}</a>
     </nav>

@@ -364,7 +364,12 @@ def test_overview_counts(signed_in: Browser) -> None:
     assert "Tickers watched" in text
     assert re.search(r"1 <span[^>]*>of 1</span>", text)
     assert re.search(r"1 <span[^>]*>of 2</span>", text)
-    assert text.count("<td>never</td>") == 3
+    # The startup catch-up may already have evaluated a timeframe, depending on the wall clock
+    # (market hours), so each row shows either "never" or a local timestamp.
+    rows = re.findall(
+        r"<tr><td>(1h|4h|1d)</td><td>(never|\d{4}-\d\d-\d\d \d\d:\d\d \S+)</td></tr>", text
+    )
+    assert [timeframe for timeframe, _ in rows] == ["1h", "4h", "1d"]
 
 
 # --- tickers ---------------------------------------------------------------------------------

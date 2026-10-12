@@ -1,4 +1,4 @@
-"""Revision ``0006``: the weekly timeframe (spec 027, AC5).
+"""Revision ``0006``: the weekly timeframe (spec 028, AC5).
 
 The upgrade runs on a ``0005`` database that already holds configuration, assignments, signals,
 state and deleted ids, as production does. Every row must survive with its id, the

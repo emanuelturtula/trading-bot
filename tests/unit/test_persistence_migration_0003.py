@@ -27,7 +27,7 @@ from trading_bot.persistence.migrator import (
 from trading_bot.persistence.models import Base
 
 PREVIOUS = "0002"
-HEAD = "0006"  # specs 023, 024 and 027 built on this revision
+HEAD = "0006"  # specs 023, 024 and 028 built on this revision
 THIS = "0003"
 NEXT = "0004"
 REVISION_ID = re.compile(r"^[0-9]{4}$")

@@ -199,7 +199,7 @@ def test_the_stored_ddl_matches_the_models(tmp_path: Path, table: str) -> None:
 
         stored = scalar(engine, f"SELECT sql FROM sqlite_master WHERE name = '{table}'")  # noqa: S608
         rendered = str(CreateTable(Base.metadata.tables[table]).compile(dialect=engine.dialect))
-        # Revision 0006 (spec 027) widened the timeframe check; 0005 stored the narrower one.
+        # Revision 0006 (spec 028) widened the timeframe check; 0005 stored the narrower one.
         rendered = rendered.replace("'1d', '1w'", "'1d'")
         assert " ".join(str(stored).split()) == " ".join(rendered.split())
     finally:

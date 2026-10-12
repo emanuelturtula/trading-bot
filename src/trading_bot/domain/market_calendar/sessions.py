@@ -6,7 +6,7 @@ they are pure (CLAUDE.md rule 3): whether the market is open, the session of a d
 grid of a timeframe, the next real candle close and the candles closed at an instant. They
 decide closedness and scheduling; signal identity keeps ``Timeframe.nominal_close`` (spec 004).
 
-A ``1w`` candle groups the sessions of one ISO week (Monday to Sunday in exchange time, spec 027):
+A ``1w`` candle groups the sessions of one ISO week (Monday to Sunday in exchange time, spec 028):
 it is labelled like the ``1d`` candle of its first session, opens with that session and closes
 with the last one, so a holiday week simply has fewer sessions.
 

@@ -1,5 +1,5 @@
 """Session-anchored ``4h`` and ``1w`` candles resampled from finer candles (spec 011, Design 5;
-D31, D57; spec 027).
+D31, D57; spec 028).
 
 ``resample_hourly_to_4h`` builds one ``4h`` row for every ``4h`` slot of the calendar grid that
 is closed at ``now`` and holds at least one hourly row: the open of its first row, the highest
@@ -8,7 +8,7 @@ the bars that exist). Each row comes with a report of the hourly slots it lacks,
 layer can apply its publication policy and log gaps; this module applies no policy and does not
 log.
 
-``resample_daily_to_1w`` does the same for ``1w`` slots from daily candles (spec 027): a week
+``resample_daily_to_1w`` does the same for ``1w`` slots from daily candles (spec 028): a week
 holds the daily rows of its sessions, and its report lists the session days without a row.
 
 The grid comes from the market calendar (spec 009), so DST changes, half days and late opens
@@ -84,7 +84,7 @@ def resample_hourly_to_4h(
 def resample_daily_to_1w(
     daily: pd.DataFrame, now: datetime, *, calendar: MarketCalendar
 ) -> ResampledCandles:
-    """The ``1w`` candles of every ``1w`` slot closed at ``now`` that holds daily rows (spec 027).
+    """The ``1w`` candles of every ``1w`` slot closed at ``now`` that holds daily rows (spec 028).
 
     The contract of ``resample_hourly_to_4h`` with ``1d`` rows and ``1w`` slots: each considered
     row must be a ``1d`` slot label, a week aggregates the rows of its sessions, and its report

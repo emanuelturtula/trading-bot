@@ -1,4 +1,4 @@
-"""Tests of the weekly timeframe (spec 027, AC1-AC4, AC6-AC7).
+"""Tests of the weekly timeframe (spec 028, AC1-AC4, AC6-AC7).
 
 The calendar grid of ``1w`` on the NYSE calendar, the daily-to-weekly resampling, its anti
 look-ahead property, the Yahoo provider path and the signal message. Expectations are literals

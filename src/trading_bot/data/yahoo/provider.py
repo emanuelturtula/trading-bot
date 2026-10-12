@@ -7,7 +7,7 @@ hourly bars on the session grid (``resample_hourly_to_4h``); the last ``4h`` slo
 ``now`` is withheld while its closing hourly bar is missing (``publishable_4h``), except for the
 truncated final half hour of an early-close session, which Yahoo never publishes
 (``is_unpublished_hour``). ``1w`` candles are built the same way from normalized daily bars
-(``resample_daily_to_1w``, spec 027); the last week is withheld while the daily bar of its last
+(``resample_daily_to_1w``, spec 028); the last week is withheld while the daily bar of its last
 session is missing. ``validate_ticker`` reads the chart metadata of a one-month daily
 request and applies the v1 instrument policy.
 
@@ -162,7 +162,7 @@ def publishable_4h(
 
 
 def publishable_1w(resampled: ResampledCandles, *, last: CandleSlot) -> pd.DataFrame:
-    """The resampled ``1w`` candles without an unpublished last week (spec 027).
+    """The resampled ``1w`` candles without an unpublished last week (spec 028).
 
     The row of ``last`` (the last ``1w`` slot closed at ``now``) is removed while the daily bar
     of its last session is missing; otherwise ``resampled.candles`` is returned.
@@ -273,7 +273,7 @@ class YFinanceProvider:
     def _build_resampled(
         self, frame: pd.DataFrame, request: CandleRequest, symbol: str
     ) -> pd.DataFrame:
-        """Design 10.2, steps 7.2 to 7.6, with the records of Design 10.5 (``1w``: spec 027)."""
+        """Design 10.2, steps 7.2 to 7.6, with the records of Design 10.5 (``1w``: spec 028)."""
         calendar = self._calendar
         target = request.timeframe
         source, _ = _SOURCES[target]

@@ -222,10 +222,13 @@ class Dashboard:
     # --- plumbing ---------------------------------------------------------------------------
 
     def _candle(self, signal: Signal) -> str:
-        """The candle a signal fired on: its trading day, or its local open time (spec 027)."""
+        """The candle a signal fired on: its trading day, the week of its first trading day, or its
+        local open time (specs 027 and 028)."""
         label = signal.candle_close_ts - signal.timeframe.duration
         if signal.timeframe is Timeframe.D1:
             return label.astimezone(EXCHANGE_ZONE).date().isoformat()
+        if signal.timeframe is Timeframe.W1:
+            return f"week of {label.astimezone(EXCHANGE_ZONE).date().isoformat()}"
         return self._local(label)
 
     def _local(self, instant: datetime | None) -> str:

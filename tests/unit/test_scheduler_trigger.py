@@ -177,7 +177,7 @@ def test_a_daily_slot_keeps_its_label_while_the_fire_follows_the_close(
 def test_the_weekly_candle_fires_after_the_last_session_of_the_week(
     calendar: MarketCalendar,
 ) -> None:
-    """Spec 027: the 2024-07-04 holiday week still closes on Friday; a Good Friday week on
+    """Spec 028: the 2024-07-04 holiday week still closes on Friday; a Good Friday week on
     Thursday."""
     fires = list(fire_sequence(calendar, Timeframe.W1, "2024-07-01T00:00", 2))
     easter = list(fire_sequence(calendar, Timeframe.W1, "2024-03-25T00:00", 1))

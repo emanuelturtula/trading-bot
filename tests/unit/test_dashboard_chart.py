@@ -19,6 +19,7 @@ from trading_bot.dashboard.chart import (
     chart_payload,
     fetch_lookback,
 )
+from trading_bot.domain.candle_resampling import resample_daily_to_1w
 from trading_bot.domain.rules.evaluator import evaluate_each
 from trading_bot.domain.rules.schema import parse_rule
 from trading_bot.domain.signals import Side, Signal
@@ -117,6 +118,29 @@ def test_daily_candles_are_the_last_window_named_by_trading_day() -> None:
     assert data["timeframe"] == "1d"
 
 
+def test_weekly_candles_are_named_by_their_first_trading_day_with_lines_and_markers() -> None:
+    """Spec 028: a 1w chart shows weeks like days, with the rule's indicators and markers."""
+    calendar = nyse_test_calendar()
+    daily = session_candles(calendar, Timeframe.D1, datetime(2021, 1, 4, tzinfo=UTC), END, seed=7)
+    candles = resample_daily_to_1w(daily, END, calendar=calendar).candles
+    rule = stored_rule(1, "RSI", fill("rsi_level", {"level": 45}), timeframe=Timeframe.W1)
+    label = candles.index[-3]
+
+    data = payload(
+        candles=candles,
+        timeframe=Timeframe.W1,
+        rules=(rule,),
+        signals=(recorded(9, rule, label, timeframe=Timeframe.W1),),
+    )
+
+    assert data["timeframe"] == "1w"
+    assert len(data["candles"]) == SHOWN_CANDLES[Timeframe.W1]
+    assert data["candles"][-1]["time"] == "2026-10-05"  # the week's Monday
+    assert data["lines"]
+    assert data["lines"][0]["points"]
+    assert {"time": "2026-09-21", "side": "BUY", "rule": "RSI", "recorded": True} in data["markers"]
+
+
 def test_a_short_history_shows_every_candle() -> None:
     candles = frame(Timeframe.D1).iloc[-30:]
 
@@ -204,6 +228,7 @@ def test_a_sell_rule_marks_sells() -> None:
     [
         (Timeframe.D1, (), 250),
         (Timeframe.H1, (), 300),
+        (Timeframe.W1, (), 156),
         (Timeframe.D1, (RSI.rule,), 250 + RSI.rule.stable_warmup()),
         (Timeframe.D1, (MACD.rule, RSI.rule), 250 + MACD.rule.stable_warmup()),
     ],

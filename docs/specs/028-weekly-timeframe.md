@@ -1,4 +1,4 @@
-# 027 — Weekly timeframe
+# 028 — Weekly timeframe
 
 - **Status:** approved (the user asked for a weekly option next to 1h, 4h and 1d; defaults below)
 - **Branch:** `feature/weekly-timeframe-djduwp`
@@ -60,6 +60,9 @@ The user wants to evaluate rules on weekly candles, not only on `1h`, `4h` and `
   `ticker_rules`, `signals` and `bot_state` with the wider `CHECK` constraints.
 - `notifications/message.py`: `week of <date>` for `1w`.
 - Telegram and dashboard texts list `1w`. No new configuration.
+- Dashboard chart (spec 027): a `1w` chart shows the last 156 weeks (three years), each named by
+  the date of its first session like daily candles, with the same indicator lines and markers; the
+  signal history shows `week of <date>`.
 
 ## Test plan
 

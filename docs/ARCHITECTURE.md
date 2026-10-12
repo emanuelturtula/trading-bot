@@ -170,7 +170,7 @@ Intraday candles are anchored at the session open and the last one is cut at the
 | 2024-01-02 (regular, EST) | 14:30→15:30, 15:30→16:30, 16:30→17:30, 17:30→18:30, 18:30→19:30, 19:30→20:30, 20:30→21:00 | 14:30→18:30, 18:30→21:00 | 05:00 (open 14:30) → 21:00 |
 | 2024-07-03 (half day, EDT) | 13:30→14:30, 14:30→15:30, 15:30→16:30, 16:30→17:00 | 13:30→17:00 | 04:00 (open 13:30) → 17:00 |
 
-The canonical label is the candle open for `1h` and `4h`, and 00:00 of the session date in New York for `1d` (the yfinance convention). A `1w` candle is one ISO week of sessions (Monday to Sunday, New York time): its label is the `1d` label of the week's first session, it opens with that session and closes with the week's last one, so holiday weeks need no special case (spec [027](specs/027-weekly-timeframe.md)). `candle_slot(timeframe, label)` matches labels exactly and raises `CandleLabelError` (a `ValueError`) for any other label inside the calendar, with the first `kind` that applies:
+The canonical label is the candle open for `1h` and `4h`, and 00:00 of the session date in New York for `1d` (the yfinance convention). A `1w` candle is one ISO week of sessions (Monday to Sunday, New York time): its label is the `1d` label of the week's first session, it opens with that session and closes with the week's last one, so holiday weeks need no special case (spec [028](specs/028-weekly-timeframe.md)). `candle_slot(timeframe, label)` matches labels exactly and raises `CandleLabelError` (a `ValueError`) for any other label inside the calendar, with the first `kind` that applies:
 
 | Kind | Meaning | Example (ET) |
 |------|---------|--------------|
@@ -375,7 +375,7 @@ The last `4h` slot closed at `now` is special (D58): `publishable_4h` withholds 
 | 2024-11-27T18:30Z | 18:30Z, 19:30Z, 20:30Z | 99 | 101 | 96 | 100 | 4700 | complete (its last hourly slot lasts 30 minutes) |
 | 2024-11-29T14:30Z | 14:30Z, 15:30Z, 16:30Z (half day) | 100 | 106 | 100 | 104 | 1800 | published: 17:30Z (12:30–13:00 ET) is never published |
 
-`1w` candles follow the same path from daily bars (spec 027): `resample_daily_to_1w` aggregates the daily rows of each closed week, and `publishable_1w` withholds the last closed week while the daily bar of its last session is missing.
+`1w` candles follow the same path from daily bars (spec 028): `resample_daily_to_1w` aggregates the daily rows of each closed week, and `publishable_1w` withholds the last closed week while the daily bar of its last session is missing.
 
 On the provider logger: `DEBUG` for a withheld candle, one `DEBUG` summary of earlier candles built from incomplete bars, and one `WARNING` when the returned last candle lacks bars Yahoo publishes.
 

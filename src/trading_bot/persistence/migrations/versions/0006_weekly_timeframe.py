@@ -4,7 +4,7 @@ Revision ID: 0006
 Revises: 0005
 Create Date: 2026-10-12
 
-Spec 027. The ``CHECK`` constraints of ``tickers``, ``rules`` and ``signals`` accept ``1w``, and
+Spec 028. The ``CHECK`` constraints of ``tickers``, ``rules`` and ``signals`` accept ``1w``, and
 the one of ``bot_state`` accepts ``last_run.1w``. SQLite cannot change a constraint in place, so
 the tables are rebuilt the way revision ``0005`` rebuilt ``tickers`` and ``rules``: the children
 (``ticker_rules`` and ``signals``) are copied aside and dropped first, so dropping a parent never

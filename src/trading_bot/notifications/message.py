@@ -5,7 +5,7 @@ comes from user data (ticker, rule name, indicator names) is HTML-escaped, becau
 sent with HTML parse mode.
 
 The candle is presented by its session date (``1d``), the date of its first session (``1w``,
-spec 027) or its real close in the display zone (``1h``, ``4h``), never by the nominal close
+spec 028) or its real close in the display zone (``1h``, ``4h``), never by the nominal close
 (spec 004 §5): for ``1d`` that one is midnight of the next day. The real close comes from the
 calendar slot whose label is the candle's open.
 """

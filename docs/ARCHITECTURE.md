@@ -852,7 +852,7 @@ A browser front end for the configuration, served by the same process and port a
 | Password | `scrypt:<n>:<r>:<p>:<salt>:<hash>` (stdlib `hashlib.scrypt`, n=2^14, r=8, p=1), checked in constant time in a worker thread. The format has no `$`, so Compose does not interpolate it |
 | Session | Cookie `tb_session` = `<expiry>.<user id>.<nonce>.<HMAC-SHA256>`, `HttpOnly`, `SameSite=Strict`, path `/dashboard`, 7 days, `Secure` over HTTPS. The MAC key derives from the session secret and the MAC covers the user's password hash: a new secret logs everyone out, a password change or reset logs that user out. Every request reloads the user, so a disabled one is out at once |
 | CSRF | Every change is a `POST` with a hidden token (a MAC of the session nonce); a missing or wrong one is refused with `403` |
-| Brute force | 5 failed logins or access-link attempts per client address, and 10 failed logins per username, within 15 minutes, then `429` until the window passes (in memory: one process). `TB_CLIENT_IP_HEADER` names the proxy header with the browser's address. An unknown username costs the same scrypt verification as a wrong password |
+| Brute force | 5 failed logins or access-link attempts per client address, and 10 failed logins per username, within 15 minutes, then `429` until the window passes (in memory: one process). `TB_CLIENT_IP_HEADER` names the proxy header with the browser's address, read only from peers in `TB_TRUSTED_PROXIES`. An unknown username costs the same scrypt verification as a wrong password |
 | Roles | The Users pages answer `403` to a user who is not an administrator |
 | Headers | `Cache-Control: no-store`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and a CSP without `script-src` |
 | Forms | `application/x-www-form-urlencoded` only, at most 256 KiB |
@@ -1375,7 +1375,8 @@ Applied by revision `0003` (details in [Signals and bot state](#signals-and-bot-
 | `TB_TELEGRAM_ALLOWED_CHAT_IDS` | Authorized chats (comma-separated) |
 | `TB_DASHBOARD_PASSWORD_HASH` | Secret. scrypt hash of the first administrator's password, printed by `python -m trading_bot.dashboard.password`. Used only while there is no user |
 | `TB_ADMIN_USERNAME` | Not a secret. Username of that first administrator, default `admin` |
-| `TB_CLIENT_IP_HEADER` | Not a secret. Header with the browser's address set by a proxy in front of the app (`CF-Connecting-IP` behind Cloudflare); empty uses the TCP peer. Set it only when every request goes through that proxy |
+| `TB_CLIENT_IP_HEADER` | Not a secret. Header with the browser's address set by a proxy in front of the app (`CF-Connecting-IP` behind Cloudflare); empty uses the TCP peer. Read only when the peer is in `TB_TRUSTED_PROXIES` |
+| `TB_TRUSTED_PROXIES` | Not a secret. Where a proxy connects from: comma-separated networks, `loopback` or `private`; default `loopback,private` |
 | `TB_SESSION_SECRET` | Secret. Signs the dashboard session cookies; at least 32 characters. Changing it logs every session out |
 
 ## Decisions

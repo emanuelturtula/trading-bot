@@ -27,7 +27,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from trading_bot.config import Settings
+from trading_bot.config import Settings, is_trusted_proxy
 from trading_bot.dashboard.auth import (
     MIN_SESSION_SECRET_LENGTH,
     InvalidPasswordHashError,
@@ -427,13 +427,15 @@ class Dashboard:
         return response
 
     def _client(self, request: Request) -> str:
-        """The browser's address: the configured proxy header, else the TCP peer (D6)."""
+        """The browser's address (D6): the configured proxy header when the TCP peer is a
+        trusted proxy, else the TCP peer itself."""
+        peer = request.client.host if request.client else "unknown"
         header = self._settings.client_ip_header
-        if header:
+        if header and is_trusted_proxy(peer, self._settings.trusted_proxy_networks):
             value = request.headers.get(header, "").split(",")[0].strip()
             if value:
                 return value[:64]
-        return request.client.host if request.client else "unknown"
+        return peer
 
     def _bootstrap(self, repositories: DashboardRepositories, credentials: _Credentials) -> None:
         """Create the first administrator from ``TB_DASHBOARD_PASSWORD_HASH`` (spec 023, D2)."""

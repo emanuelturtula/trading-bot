@@ -46,7 +46,7 @@ tickers, rules and Telegram bot (specs 024 and 025). Here, only the accounts.
 - [ ] **AC10:** 5 failed logins or link attempts per client address in 15 minutes, and 10 failed
   logins per username from any address, answer `429` until the window passes.
   `TB_CLIENT_IP_HEADER` (for example `CF-Connecting-IP`) names the header holding the browser's
-  address when a proxy is in front.
+  address when a proxy is in front; it is read only when the TCP peer is in `TB_TRUSTED_PROXIES`.
 - [ ] **AC11:** an access link shown to the administrator uses the scheme and host the browser
   used (its `Origin`), so it is right behind a tunnel that terminates TLS.
 - [ ] **AC12:** `scripts/check.py` is green.
@@ -73,11 +73,15 @@ tickers, rules and Telegram bot (specs 024 and 025). Here, only the accounts.
   change, a reset or a new secret ends sessions; the gate loads the user on each request and
   refuses a disabled one. CSRF tokens are unchanged (a MAC of the nonce).
 - **D6. Throttling.** In memory, as before (one process, rule 7): per client address and per
-  username. The address is the TCP peer unless `TB_CLIENT_IP_HEADER` is set; set it only when
-  every request goes through that proxy, or the header can be forged.
+  username. The address is the TCP peer, or the `TB_CLIENT_IP_HEADER` header when the peer is in
+  `TB_TRUSTED_PROXIES` (default: loopback and the private ranges, where `cloudflared` on the same
+  host or Docker network connects from). A browser reaching an open port directly arrives from a
+  public address, so its forged header is ignored.
 
-New configuration: `TB_ADMIN_USERNAME` (not a secret, default `admin`) and `TB_CLIENT_IP_HEADER`
-(not a secret, default empty). `TB_DASHBOARD_PASSWORD_HASH` is only needed until the first login.
+New configuration: `TB_ADMIN_USERNAME` (not a secret, default `admin`), `TB_CLIENT_IP_HEADER`
+(not a secret, default empty) and `TB_TRUSTED_PROXIES` (not a secret, comma-separated networks or
+the words `loopback` and `private`, default `loopback,private`). `TB_DASHBOARD_PASSWORD_HASH` is
+only needed until the first login.
 
 ## Test plan
 

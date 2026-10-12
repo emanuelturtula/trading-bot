@@ -157,7 +157,7 @@ Put both values in `~/trading-bot/secrets.env` as `TB_DASHBOARD_PASSWORD_HASH=..
 
 The first login creates the administrator: username `admin` (or the value of `TB_ADMIN_USERNAME`) with that password. From then on `TB_DASHBOARD_PASSWORD_HASH` is ignored and the password is changed on the Account page. The administrator invites other people from the Users page, which shows a one-time access link (valid 72 hours) to send them; with it they choose their own password. "New access link" is also how a forgotten password is reset. Until spec 024 ships, every account sees and edits the same tickers and rules.
 
-After 5 failed attempts from one address, or 10 on one username from anywhere, within 15 minutes, the login answers `429` until the 15 minutes pass. Behind a proxy every browser arrives from the proxy's address: set `TB_CLIENT_IP_HEADER` to the header carrying the real one (`CF-Connecting-IP` behind Cloudflare), but only when every request goes through that proxy, since anyone reaching the port directly could forge the header.
+After 5 failed attempts from one address, or 10 on one username from anywhere, within 15 minutes, the login answers `429` until the 15 minutes pass. Behind a proxy every browser arrives from the proxy's address: set `TB_CLIENT_IP_HEADER` to the header carrying the real one (`CF-Connecting-IP` behind Cloudflare). The header is only read on connections from `TB_TRUSTED_PROXIES` (default: loopback and the private ranges, which covers `cloudflared` on the Pi or on its Docker network), so a browser reaching an open port directly cannot forge it.
 
 The dashboard travels over plain HTTP: use it from the LAN or the tailnet only, and never forward port 8081 from the router.
 

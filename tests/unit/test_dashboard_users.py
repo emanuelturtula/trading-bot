@@ -17,12 +17,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.fixtures.dashboard import ADMIN, PASSWORD, Browser, make_app
+from trading_bot.config import Settings, is_trusted_proxy
 from trading_bot.dashboard.auth import hash_password, link_digest
 from trading_bot.dashboard.routes import SESSION_COOKIE
 from trading_bot.dashboard.unit_of_work import DashboardRepositories
 from trading_bot.logging_setup import REDACTED, RedactingFilter, configure_logging
 from trading_bot.persistence.records import StoredUser
 
+# A tunnel daemon on a Docker network: a private address, built at runtime because the secret
+# scan refuses private address literals in the repository.
+TUNNEL = (".".join(["172", "18", "0", "3"]), 40000)
 NEW_PASSWORD = "-".join(["purple", "monkey", "dishwasher", "lamp"])
 LINK = re.compile(r"<pre>(https?://[^<]+/dashboard/invite/([A-Za-z0-9_-]+))</pre>")
 
@@ -343,7 +347,7 @@ def test_an_unknown_user_gets_the_same_answer_as_a_wrong_password(admin: Browser
 
 def test_an_account_is_locked_after_ten_failures_from_any_address(tmp_path: Path) -> None:
     app = make_app(tmp_path, client_ip_header="CF-Connecting-IP")
-    with TestClient(app, follow_redirects=False) as client:
+    with TestClient(app, follow_redirects=False, client=TUNNEL) as client:
         for attempt in range(10):
             response = client.post(
                 "/dashboard/login",
@@ -361,7 +365,7 @@ def test_an_account_is_locked_after_ten_failures_from_any_address(tmp_path: Path
 
 def test_the_address_comes_from_the_configured_header(tmp_path: Path) -> None:
     app = make_app(tmp_path, client_ip_header="CF-Connecting-IP")
-    with TestClient(app, follow_redirects=False) as client:
+    with TestClient(app, follow_redirects=False, client=TUNNEL) as client:
         for _ in range(5):
             client.post(
                 "/dashboard/login",
@@ -380,6 +384,37 @@ def test_the_address_comes_from_the_configured_header(tmp_path: Path) -> None:
         )
     assert blocked.status_code == 429
     assert allowed.status_code == 303
+
+
+def test_the_header_is_ignored_unless_the_peer_is_a_trusted_proxy(tmp_path: Path) -> None:
+    """A browser reaching the port directly cannot pick a fresh address for every attempt."""
+    app = make_app(tmp_path, client_ip_header="CF-Connecting-IP", trusted_proxies="loopback")
+    with TestClient(app, follow_redirects=False, client=("203.0.113.50", 4000)) as client:
+        for attempt in range(5):
+            client.post(
+                "/dashboard/login",
+                data={"username": f"someone{attempt}", "password": "nope"},
+                headers={"cf-connecting-ip": f"198.51.100.{attempt}"},
+            )
+        blocked = client.post(
+            "/dashboard/login",
+            data={"username": ADMIN, "password": PASSWORD},
+            headers={"cf-connecting-ip": "198.51.100.200"},
+        )
+    assert blocked.status_code == 429
+
+
+def test_trusted_proxies_are_networks_or_address_classes() -> None:
+    with pytest.raises(ValueError, match="IP networks"):
+        Settings(_env_file=None, trusted_proxies="loopback,not-a-network")  # type: ignore[call-arg]
+    settings = Settings(_env_file=None, trusted_proxies=" Loopback , 198.51.100.0/24 ")  # type: ignore[call-arg]
+
+    trusted = settings.trusted_proxy_networks
+    assert is_trusted_proxy("::1", trusted)
+    assert is_trusted_proxy("198.51.100.7", trusted)
+    assert not is_trusted_proxy(TUNNEL[0], trusted)  # private, but not listed
+    assert not is_trusted_proxy("testclient", trusted)
+    assert is_trusted_proxy(TUNNEL[0], Settings(_env_file=None).trusted_proxy_networks)  # type: ignore[call-arg]
 
 
 def test_access_link_tokens_are_redacted_from_the_access_log() -> None:

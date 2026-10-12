@@ -91,6 +91,24 @@ textarea { width: 100%; min-height: 420px; font: 13px/1.45 ui-monospace, SFMono-
 pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; overflow-x: auto; font-size: 12px; }
 code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 label { cursor: pointer; }
+[hidden] { display: none !important; }
+input[type=number] { font: inherit; padding: 6px 8px; border-radius: 6px; width: 7em;
+  border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+button.small { font-size: 13px; padding: 3px 9px; }
+button.link-button { border: 0; background: none; color: var(--accent); padding: 0; text-decoration: underline; }
+.builder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+.builder-field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; cursor: default; }
+.builder-field > span { font-size: 13px; color: var(--muted); }
+.builder-grid .builder-field { margin-bottom: 0; }
+.builder-grid input[type=text], .builder-grid input[type=number] { width: auto; }
+.builder-mode { margin: 0 0 12px; text-align: right; }
+.builder-condition { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; padding: 10px; margin-bottom: 8px;
+  border: 1px solid var(--line); border-radius: 8px; }
+.builder-operand { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: flex-end; }
+.builder-operand .builder-field { margin: 0; }
+.builder-operand input[type=number] { width: 5.5em; }
+.builder-group { border-left: 3px solid var(--accent); padding-left: 10px; margin-bottom: 8px; }
+.builder-group-mode { font-weight: 600; margin: 4px 0 8px; }
 </style>
 </head>
 <body>

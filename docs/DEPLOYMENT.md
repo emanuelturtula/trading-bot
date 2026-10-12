@@ -155,7 +155,21 @@ python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
 
 Put both values in `~/trading-bot/secrets.env` as `TB_DASHBOARD_PASSWORD_HASH=...` and `TB_SESSION_SECRET=...` and recreate the container as shown above. The hash contains no `$`, so it can be pasted as is. If the startup log says `dashboard disabled: ...`, it names the variable to fix and never shows its value. Changing either value logs every open session out; sessions otherwise last 7 days. After 5 wrong passwords from one device within 15 minutes, that device has to wait out the 15 minutes.
 
-The dashboard travels over plain HTTP: use it from the LAN or the tailnet only, and never forward port 8081 from the router.
+On port 8081 the dashboard travels over plain HTTP: use that address from the LAN or the tailnet only, and never forward port 8081 from the router.
+
+#### Dashboard from anywhere (Cloudflare tunnel and client certificates)
+
+To reach it from your own devices anywhere (spec [021](specs/021-dashboard-behind-cloudflare.md)), publish it through the Cloudflare Tunnel that already runs on the Pi, behind the same client certificates (mTLS) you already use for another hostname of the zone. No new certificate is needed: a certificate from the account's Cloudflare Managed CA is accepted on every hostname listed in its mTLS hosts. In the Cloudflare dashboard:
+
+1. **Tunnel:** Zero Trust → Networks → Tunnels → your tunnel → Public hostnames → Add: `<DASHBOARD_HOST>` (a subdomain of your zone), type `HTTP`, URL `<origin>:8081`, where `<origin>` is the same one your existing hostname uses (`localhost` if `cloudflared` runs on the host, the Pi's LAN address if it runs in a container without host networking). If the tunnel is managed from a local `config.yml` instead, add the equivalent `ingress` entry before the final catch-all and restart `cloudflared`.
+2. **mTLS host:** SSL/TLS → Client Certificates → Hosts → Edit → add `<DASHBOARD_HOST>`.
+3. **WAF rule:** Security → WAF → Custom rules → edit the rule that blocks requests without a certificate so it covers both hostnames, then save it with action **Block**:
+
+   ```text
+   (http.host in {"<EXISTING_HOST>" "<DASHBOARD_HOST>"} and (not cf.tls_client_auth.cert_verified or cf.tls_client_auth.cert_revoked))
+   ```
+
+Then open `https://<DASHBOARD_HOST>/dashboard/`: the browser asks which certificate to use (pick the one you already installed), and then the dashboard asks for its password. Without a valid certificate Cloudflare answers `403` and nothing reaches the Pi. Behind the tunnel the session cookie is `Secure`. Every device going through the tunnel shares one login throttle: after 5 wrong passwords, wait 15 minutes or sign in from the LAN.
 
 ### 5. Repository protection
 

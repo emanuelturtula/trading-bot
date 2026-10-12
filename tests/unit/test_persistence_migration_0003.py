@@ -27,11 +27,20 @@ from trading_bot.persistence.migrator import (
 from trading_bot.persistence.models import Base
 
 PREVIOUS = "0002"
-HEAD = "0003"
+HEAD = "0004"  # spec 023 added ``users`` on top of this revision
+THIS = "0003"
 REVISION_ID = re.compile(r"^[0-9]{4}$")
 MIGRATOR_LOGGER = "trading_bot.persistence.migrator"
 CONFIGURATION_TABLES = ["rules", "ticker_rules", "tickers"]
-ALL_TABLES = ["alembic_version", "bot_state", "rules", "signals", "ticker_rules", "tickers"]
+ALL_TABLES = [
+    "alembic_version",
+    "bot_state",
+    "rules",
+    "signals",
+    "ticker_rules",
+    "tickers",
+    "users",
+]
 SIGNAL_INDEXES = ["ix_signals_candle_close_ts", "ix_signals_rule_id_candle_close_ts"]
 TIMESTAMP = "2026-01-02 03:04:05.000000"
 
@@ -144,13 +153,14 @@ def migrator_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
 # --- the revision chain --------------------------------------------------------------------
 
 
-def test_the_head_is_0003_and_it_follows_0002() -> None:
+def test_0003_follows_0002_and_0004_follows_it() -> None:
     script = ScriptDirectory.from_config(alembic_config())
 
     assert script.get_heads() == [HEAD]
     assert head_revision() == HEAD
-    assert script.get_revision(HEAD).down_revision == PREVIOUS
-    assert REVISION_ID.match(HEAD)
+    assert script.get_revision(THIS).down_revision == PREVIOUS
+    assert script.get_revision(HEAD).down_revision == THIS
+    assert REVISION_ID.match(THIS)
 
 
 # --- upgrade -------------------------------------------------------------------------------
@@ -167,7 +177,7 @@ def test_an_empty_database_is_upgraded_to_0003(
         assert current_revision(engine) == HEAD
         assert stored_revisions(engine) == [HEAD]
         assert table_names(engine) == ALL_TABLES
-        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0003"]
+        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0004"]
     finally:
         engine.dispose()
 
@@ -183,7 +193,7 @@ def test_a_second_run_is_a_no_op(tmp_path: Path, caplog: pytest.LogCaptureFixtur
 
         assert stored_revisions(engine) == [HEAD]
         assert table_names(engine) == ALL_TABLES
-        assert migrator_messages(caplog) == ["database schema already at revision 0003"]
+        assert migrator_messages(caplog) == ["database schema already at revision 0004"]
     finally:
         engine.dispose()
 

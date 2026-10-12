@@ -33,7 +33,7 @@ from trading_bot.persistence.repositories.tickers import SqlTickerRepository
 
 SRC = str(Path(trading_bot.__file__).resolve().parent.parent)
 BASELINE = "0001"
-HEAD = "0003"
+HEAD = "0004"
 
 SUBCOMMANDS = [
     ("tickers", "list"),
@@ -259,7 +259,7 @@ def test_a_missing_database_exits_three_and_creates_nothing(tmp_path: Path) -> N
 
     assert result.code == 3
     assert result.err == (
-        "error: the database schema is at revision none, but revision 0003 is required;"
+        "error: the database schema is at revision none, but revision 0004 is required;"
         " start the application first\n"
     )
     assert not data_dir.exists()
@@ -282,7 +282,7 @@ def test_an_unmigrated_database_exits_three_and_leaves_the_revision_untouched(
 
     assert result.code == 3
     assert "0001" in result.err
-    assert "0003" in result.err
+    assert "0004" in result.err
 
     engine = create_database_engine(database_path(data_dir), busy_timeout_ms=200)
     try:

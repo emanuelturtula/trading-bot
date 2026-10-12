@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Users{% endblock %}
+{% block content %}
+<h1>Users</h1>
+<div class="panel">
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  <form method="post" action="{{ prefix }}/users" class="row" style="align-items:flex-end">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <div>
+      <label class="field" for="username">Username</label>
+      <input type="text" id="username" name="username" autocapitalize="none" autocomplete="off" placeholder="e.g. ana" maxlength="32" required>
+    </div>
+    <label><input type="checkbox" name="is_admin"> Administrator</label>
+    <button type="submit" class="primary">Invite</button>
+  </form>
+  <p class="muted" style="margin:10px 0 0">Inviting gives you a one-time access link to send to the person, who chooses their own password with it. Usernames have 3 to 32 characters: letters, digits, '.', '_' or '-'.</p>
+</div>
+<div class="panel table-wrap">
+  <table>
+    <tr><th>Username</th><th>Role</th><th>State</th><th class="hide-narrow">Created</th><th></th></tr>
+    {% for item in users %}
+    <tr>
+      <td><strong>{{ item.username }}</strong>{% if item.id == user.id %} <span class="muted">(you)</span>{% endif %}</td>
+      <td>{{ "Administrator" if item.is_admin else "User" }}</td>
+      <td>
+        {% if not item.active %}<span class="badge off">Disabled</span>
+        {% elif item.password_hash is none %}<span class="badge off">Link pending</span>
+        {% else %}<span class="badge on">Active</span>{% endif %}
+      </td>
+      <td class="hide-narrow">{{ item.created_at | local }}</td>
+      <td class="end">
+        {% if item.id != user.id %}
+        <div class="actions" style="justify-content:flex-end">
+          <form class="inline" method="post" action="{{ prefix }}/users/{{ item.id }}/link">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" title="Logs the user out and replaces their password with a new access link">New access link</button>
+          </form>
+          {% if item.active %}
+          <form class="inline" method="post" action="{{ prefix }}/users/{{ item.id }}/disable">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit" class="danger">Disable</button>
+          </form>
+          {% else %}
+          <form class="inline" method="post" action="{{ prefix }}/users/{{ item.id }}/enable">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <button type="submit">Enable</button>
+          </form>
+          {% endif %}
+        </div>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endblock %}

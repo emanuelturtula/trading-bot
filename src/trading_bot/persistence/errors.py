@@ -24,6 +24,7 @@ __all__ = [
     "AssignedTimeframeError",
     "DuplicateRuleNameError",
     "DuplicateTickerError",
+    "DuplicateUsernameError",
     "PersistenceError",
     "SchemaMismatchError",
     "StoredRuleError",
@@ -33,6 +34,7 @@ __all__ = [
     "UnknownRuleError",
     "UnknownSignalError",
     "UnknownTickerError",
+    "UnknownUserError",
     "UntrackedTickerError",
 ]
 
@@ -79,6 +81,22 @@ class DuplicateRuleNameError(PersistenceError):
     def __init__(self, name: str) -> None:
         super().__init__(f"a rule named {echo_name(name)} already exists")
         self.name = name
+
+
+class DuplicateUsernameError(PersistenceError):
+    """Usernames are unique (spec 023, D1)."""
+
+    def __init__(self, username: str) -> None:
+        super().__init__(f"a user named {echo_name(username)} already exists")
+        self.username = username
+
+
+class UnknownUserError(PersistenceError):
+    """No user has that id."""
+
+    def __init__(self, user_id: int) -> None:
+        super().__init__(f"user {user_id} does not exist")
+        self.user_id = user_id
 
 
 class UnknownTickerError(PersistenceError):

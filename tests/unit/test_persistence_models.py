@@ -1,4 +1,4 @@
-"""The five tables and their DDL (spec 013, T1, AC1-AC4; spec 014, T1, AC1-AC5).
+"""The six tables and their DDL (spec 013, T1, AC1-AC4; spec 014, T1, AC1-AC5; spec 023).
 
 The expected DDL is written out literally, as spec 013 Design 3 and spec 014 Design 3 render
 it, so a change to a model, to the naming convention or to a ``Timeframe``, ``Side`` or
@@ -25,6 +25,7 @@ from trading_bot.persistence.models import (
     SignalRow,
     TickerRow,
     TickerRuleRow,
+    UserRow,
 )
 from trading_bot.persistence.state import StateKey
 from trading_bot.persistence.types import SideType, StateKeyType, TimeframeType
@@ -107,6 +108,22 @@ CREATE TABLE bot_state (
     CONSTRAINT pk_bot_state PRIMARY KEY ("key"),
     CONSTRAINT ck_bot_state_key CHECK (key IN ('paused_since', 'last_heartbeat',
         'last_run.1h', 'last_run.4h', 'last_run.1d'))
+)
+"""
+
+EXPECTED_DDL["users"] = """
+CREATE TABLE users (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    username VARCHAR(32) NOT NULL,
+    password_hash TEXT,
+    is_admin BOOLEAN NOT NULL,
+    active BOOLEAN NOT NULL,
+    invite_digest VARCHAR(64),
+    invite_expires_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT uq_users_username UNIQUE (username),
+    CONSTRAINT uq_users_invite_digest UNIQUE (invite_digest)
 )
 """
 
@@ -257,29 +274,31 @@ def test_a_state_key_the_database_should_never_hold_raises_at_the_boundary() -> 
 # --- AC1: the tables, their columns and their constraints ----------------------------------
 
 
-def test_the_metadata_holds_exactly_the_five_tables() -> None:
+def test_the_metadata_holds_exactly_the_six_tables() -> None:
     assert sorted(Base.metadata.tables) == [
         "bot_state",
         "rules",
         "signals",
         "ticker_rules",
         "tickers",
+        "users",
     ]
 
 
-def test_the_model_classes_map_to_the_five_tables() -> None:
+def test_the_model_classes_map_to_the_six_tables() -> None:
     names = (
         TickerRow.__tablename__,
         RuleRow.__tablename__,
         TickerRuleRow.__tablename__,
         SignalRow.__tablename__,
         BotStateRow.__tablename__,
+        UserRow.__tablename__,
     )
 
-    assert names == ("tickers", "rules", "ticker_rules", "signals", "bot_state")
+    assert names == ("tickers", "rules", "ticker_rules", "signals", "bot_state", "users")
 
 
-def test_the_migrated_database_holds_exactly_the_five_tables(database: Database) -> None:
+def test_the_migrated_database_holds_exactly_the_six_tables(database: Database) -> None:
     names = inspect(database.engine).get_table_names()
 
     assert sorted(names) == [
@@ -289,16 +308,21 @@ def test_the_migrated_database_holds_exactly_the_five_tables(database: Database)
         "signals",
         "ticker_rules",
         "tickers",
+        "users",
     ]
 
 
-@pytest.mark.parametrize("table", ["tickers", "rules", "ticker_rules", "signals", "bot_state"])
+@pytest.mark.parametrize(
+    "table", ["tickers", "rules", "ticker_rules", "signals", "bot_state", "users"]
+)
 def test_the_stored_ddl_matches_the_specification(database: Database, table: str) -> None:
     with database.engine.connect() as connection:
         assert stored_ddl(connection, table) == collapsed(EXPECTED_DDL[table])
 
 
-@pytest.mark.parametrize("table", ["tickers", "rules", "ticker_rules", "signals", "bot_state"])
+@pytest.mark.parametrize(
+    "table", ["tickers", "rules", "ticker_rules", "signals", "bot_state", "users"]
+)
 def test_the_models_render_the_same_ddl_as_the_migration(table: str) -> None:
     """The revision is self-contained, so this is what keeps it and the models in step."""
     rendered = str(CreateTable(Base.metadata.tables[table]).compile(dialect=DIALECT))

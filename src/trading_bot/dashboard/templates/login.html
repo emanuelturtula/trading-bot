@@ -5,8 +5,10 @@
 <div class="panel">
   {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
   <form method="post" action="{{ prefix }}/login" class="row">
-    <input type="password" name="password" autocomplete="current-password" placeholder="Password" required autofocus>
+    <input type="text" name="username" autocomplete="username" autocapitalize="none" placeholder="Username" value="{{ username or '' }}" maxlength="32" required {% if not username %}autofocus{% endif %}>
+    <input type="password" name="password" autocomplete="current-password" placeholder="Password" required {% if username %}autofocus{% endif %}>
     <button type="submit" class="primary">Log in</button>
   </form>
+  <p class="muted" style="margin:10px 0 0">No account? Ask an administrator for an access link.</p>
 </div>
 {% endblock %}

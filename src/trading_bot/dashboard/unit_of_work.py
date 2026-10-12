@@ -21,10 +21,12 @@ from trading_bot.persistence.repositories.protocols import (
     RuleRepository,
     SignalRepository,
     TickerRepository,
+    UserRepository,
 )
 from trading_bot.persistence.repositories.rules import SqlRuleRepository
 from trading_bot.persistence.repositories.signals import SqlSignalRepository
 from trading_bot.persistence.repositories.tickers import SqlTickerRepository
+from trading_bot.persistence.repositories.users import SqlUserRepository
 
 __all__ = [
     "DashboardRepositories",
@@ -41,6 +43,7 @@ class DashboardRepositories:
     assignments: AssignmentRepository
     state: BotStateRepository
     signals: SignalRepository
+    users: UserRepository
 
 
 type DashboardUnitOfWork = Callable[[], AbstractContextManager[DashboardRepositories]]
@@ -74,6 +77,7 @@ def sql_dashboard_unit_of_work(
                 assignments=SqlAssignmentRepository(session, clock=clock),
                 state=SqlBotStateRepository(session, clock=clock),
                 signals=SqlSignalRepository(session, clock=clock),
+                users=SqlUserRepository(session, clock=clock),
             )
 
     return unit_of_work

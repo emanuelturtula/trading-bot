@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Account{% endblock %}
+{% block content %}
+<h1>Account</h1>
+<div class="panel">
+  <p>Signed in as <strong>{{ user.username }}</strong>{% if user.is_admin %} · administrator{% endif %}.</p>
+</div>
+<h2>Change your password</h2>
+<div class="panel">
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  <form method="post" action="{{ prefix }}/account/password">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="text" name="username" autocomplete="username" value="{{ user.username }}" hidden readonly>
+    <p><label class="field" for="current">Current password</label>
+    <input type="password" id="current" name="current" autocomplete="current-password" required></p>
+    <p><label class="field" for="password">New password (at least 12 characters)</label>
+    <input type="password" id="password" name="password" autocomplete="new-password" minlength="12" maxlength="1024" required></p>
+    <p><label class="field" for="repeat">Repeat it</label>
+    <input type="password" id="repeat" name="repeat" autocomplete="new-password" minlength="12" maxlength="1024" required></p>
+    <button type="submit" class="primary">Change password</button>
+  </form>
+  <p class="muted" style="margin:10px 0 0">Changing it logs out every other browser signed in to this account.</p>
+</div>
+{% endblock %}

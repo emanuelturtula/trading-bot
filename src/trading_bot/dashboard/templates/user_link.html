@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Access link{% endblock %}
+{% block content %}
+<h1>Access link for {{ invited.username }}</h1>
+<div class="warn-box">Copy it now: it is shown only once. Anyone with this link can set the password of {{ invited.username }}.</div>
+<div class="panel">
+  <pre>{{ link }}</pre>
+  <p class="muted">It works once and expires in {{ hours }} hours, at {{ invited.invite_expires_at | local }}. Send it through a private channel. Creating a new link cancels this one.</p>
+  <p><a href="{{ prefix }}/users">Back to the users</a></p>
+</div>
+{% endblock %}

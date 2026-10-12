@@ -3,8 +3,8 @@
 {% block content %}
 <h1>The dashboard is disabled</h1>
 <div class="panel">
-  <p>Set <code>TB_DASHBOARD_PASSWORD_HASH</code> and <code>TB_SESSION_SECRET</code> (at least 32 characters) in the
-  environment and recreate the container. The startup log says which one is missing or invalid.
-  The bot keeps running and Telegram keeps working meanwhile.</p>
+  <p>Set <code>TB_SESSION_SECRET</code> (at least 32 characters) in the environment and recreate the container.
+  The first time, also set <code>TB_DASHBOARD_PASSWORD_HASH</code>: it becomes the password of the first administrator.
+  The startup log says which one is missing or invalid. The bot keeps running and Telegram keeps working meanwhile.</p>
 </div>
 {% endblock %}

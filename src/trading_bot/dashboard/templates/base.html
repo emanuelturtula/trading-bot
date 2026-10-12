@@ -120,6 +120,8 @@ button.link-button { border: 0; background: none; color: var(--accent); padding:
       <a href="{{ prefix }}/" {% if active == "overview" %}aria-current="page"{% endif %}>Overview</a>
       <a href="{{ prefix }}/tickers" {% if active == "tickers" %}aria-current="page"{% endif %}>Tickers</a>
       <a href="{{ prefix }}/rules" {% if active == "rules" %}aria-current="page"{% endif %}>Rules</a>
+      {% if user and user.is_admin %}<a href="{{ prefix }}/users" {% if active == "users" %}aria-current="page"{% endif %}>Users</a>{% endif %}
+      <a href="{{ prefix }}/account" {% if active == "account" %}aria-current="page"{% endif %}>{{ user.username if user else "Account" }}</a>
     </nav>
     <form class="inline" method="post" action="{{ prefix }}/logout">
       <input type="hidden" name="csrf" value="{{ csrf }}">

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Set your password{% endblock %}
+{% block content %}
+<h1>Set your password</h1>
+<div class="panel">
+  {% if blocked %}
+  <p>Too many failed attempts. Wait 15 minutes and try again.</p>
+  {% elif invalid %}
+  <p>This link is invalid, expired or already used. Ask an administrator for a new one.</p>
+  <p><a href="{{ prefix }}/login">Go to the login page</a></p>
+  {% else %}
+  {% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+  <p>Choose the password of <strong>{{ username }}</strong>. This link works once.</p>
+  <form method="post" action="{{ prefix }}/invite/{{ token }}">
+    <input type="text" name="username" autocomplete="username" value="{{ username }}" hidden readonly>
+    <p><label class="field" for="password">New password (at least 12 characters)</label>
+    <input type="password" id="password" name="password" autocomplete="new-password" minlength="12" maxlength="1024" required autofocus></p>
+    <p><label class="field" for="repeat">Repeat it</label>
+    <input type="password" id="repeat" name="repeat" autocomplete="new-password" minlength="12" maxlength="1024" required></p>
+    <button type="submit" class="primary">Set password and log in</button>
+  </form>
+  {% endif %}
+</div>
+{% endblock %}

@@ -144,7 +144,7 @@ Check it in `docker compose --project-name trading-bot-prod logs app`: with a to
 
 #### Dashboard
 
-The configuration dashboard (spec [020](specs/020-config-dashboard.md)) is served by the bot at `http://<DEPLOY_HOST>:8081/dashboard/`. It stays disabled (every page answers `503`) until both variables are set:
+The configuration dashboard (spec [020](specs/020-config-dashboard.md)) is served by the bot at `http://<DEPLOY_HOST>:8081/dashboard/`. It has user accounts (spec [023](specs/023-dashboard-users.md)). It stays disabled (every page answers `503`) until `TB_SESSION_SECRET` is set, and the first time it also needs `TB_DASHBOARD_PASSWORD_HASH`, the password of the first administrator:
 
 ```sh
 # The password hash: run it in the deployed container and type the password twice (no echo)
@@ -153,7 +153,11 @@ docker compose --project-name trading-bot-prod exec app python -m trading_bot.da
 python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
 ```
 
-Put both values in `~/trading-bot/secrets.env` as `TB_DASHBOARD_PASSWORD_HASH=...` and `TB_SESSION_SECRET=...` and recreate the container as shown above. The hash contains no `$`, so it can be pasted as is. If the startup log says `dashboard disabled: ...`, it names the variable to fix and never shows its value. Changing either value logs every open session out; sessions otherwise last 7 days. After 5 wrong passwords from one device within 15 minutes, that device has to wait out the 15 minutes.
+Put both values in `~/trading-bot/secrets.env` as `TB_DASHBOARD_PASSWORD_HASH=...` and `TB_SESSION_SECRET=...` and recreate the container as shown above. The hash contains no `$`, so it can be pasted as is. If the startup log says `dashboard disabled: ...`, it names the variable to fix and never shows its value. Changing the session secret logs every open session out; sessions otherwise last 7 days.
+
+The first login creates the administrator: username `admin` (or the value of `TB_ADMIN_USERNAME`) with that password. From then on `TB_DASHBOARD_PASSWORD_HASH` is ignored and the password is changed on the Account page. The administrator invites other people from the Users page, which shows a one-time access link (valid 72 hours) to send them; with it they choose their own password. "New access link" is also how a forgotten password is reset. Until spec 024 ships, every account sees and edits the same tickers and rules.
+
+After 5 failed attempts from one address, or 10 on one username from anywhere, within 15 minutes, the login answers `429` until the 15 minutes pass. Behind a proxy every browser arrives from the proxy's address: set `TB_CLIENT_IP_HEADER` to the header carrying the real one (`CF-Connecting-IP` behind Cloudflare). The header is only read on connections from `TB_TRUSTED_PROXIES` (default: loopback and the private ranges, which covers `cloudflared` on the Pi or on its Docker network), so a browser reaching an open port directly cannot forge it.
 
 On port 8081 the dashboard travels over plain HTTP: use that address from the LAN or the tailnet only, and never forward port 8081 from the router.
 

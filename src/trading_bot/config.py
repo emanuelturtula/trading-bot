@@ -13,7 +13,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 Environment = Literal["dev", "beta", "prod"]
 
 # The zone signals are presented in (spec 017, U3). Storage and scheduling stay in UTC (rule 6).
-DEFAULT_DISPLAY_TIMEZONE: Final = "Europe/Madrid"
+DEFAULT_DISPLAY_TIMEZONE: Final = "America/Argentina/Buenos_Aires"
 
 
 class Settings(BaseSettings):

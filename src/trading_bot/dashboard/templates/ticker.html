@@ -3,8 +3,12 @@
 {% block content %}
 <h1>{{ ticker.symbol }} <span class="muted">{{ ticker.timeframe.value }}</span></h1>
 <div class="panel">
-  <p>{% if ticker.enabled %}<span class="on">Watched.</span>{% else %}<span class="off">Stopped.</span>{% endif %}
-  {{ signals }} signal{{ '' if signals == 1 else 's' }} recorded. Added {{ ticker.created_at | local }}.</p>
+  <div class="row"><form class="inline" method="post" action="{{ prefix }}/tickers/{{ ticker.id }}/{{ 'disable' if ticker.enabled else 'enable' }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="back" value="ticker">
+    <button type="submit" class="badge {{ 'on' if ticker.enabled else 'off' }}" title="{{ 'Click to stop watching it' if ticker.enabled else 'Click to watch it again' }}">{{ 'Watched' if ticker.enabled else 'Stopped' }}</button>
+  </form>
+  <span>{{ signals }} signal{{ '' if signals == 1 else 's' }} recorded. Added {{ ticker.created_at | local }}.</span></div>
 </div>
 <h2>Rules evaluated on it</h2>
 <div class="panel">
@@ -16,9 +20,9 @@
       {% for item in candidates %}
       <tr>
         <td><input type="checkbox" id="rule-{{ item.rule.id }}" name="rule" value="{{ item.rule.id }}" {% if item.assigned %}checked{% endif %}></td>
-        <td><label for="rule-{{ item.rule.id }}">{{ item.rule.name }}</label></td>
-        <td>{{ item.rule.rule.signal.value }}</td>
-        <td>{% if item.rule.enabled %}<span class="on">on</span>{% else %}<span class="off">off</span>{% endif %}</td>
+        <td><label for="rule-{{ item.rule.id }}">{{ item.rule.name }}</label> <a class="muted" href="{{ prefix }}/rules/{{ item.rule.id }}">edit</a></td>
+        <td><span class="side-{{ item.rule.rule.signal.value | lower }}">{{ item.rule.rule.signal.value }}</span></td>
+        <td>{% if item.rule.enabled %}<span class="badge on">On</span>{% else %}<span class="badge off">Off</span>{% endif %}</td>
       </tr>
       {% endfor %}
     </table>
@@ -29,5 +33,8 @@
   <p class="muted">There is no {{ ticker.timeframe.value }} rule yet. <a href="{{ prefix }}/rules/new">Create one</a>.</p>
   {% endif %}
 </div>
-<p><a href="{{ prefix }}/tickers">Back to the tickers</a></p>
+<div class="actions" style="justify-content:space-between">
+  <a href="{{ prefix }}/tickers">Back to the tickers</a>
+  <a class="button danger" href="{{ prefix }}/tickers/{{ ticker.id }}/delete">Delete this ticker</a>
+</div>
 {% endblock %}

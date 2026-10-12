@@ -5,49 +5,78 @@
 <div class="split">
   <div class="panel">
     {% if problems %}
-    <p><strong>The rule was not saved:</strong></p>
-    <ul class="problems">{% for problem in problems %}<li>{{ problem }}</li>{% endfor %}</ul>
+    <div class="flash error">
+      <strong>The rule was not saved:</strong>
+      <ul class="problems" style="margin:6px 0 0">{% for problem in problems %}<li>{{ problem }}</li>{% endfor %}</ul>
+    </div>
+    {% elif checked %}
+    <div class="flash ok">The rule is valid. Nothing was saved yet.</div>
     {% endif %}
     <form method="post" action="{{ prefix }}/rules{% if stored %}/{{ stored.id }}{% endif %}">
       <input type="hidden" name="csrf" value="{{ csrf }}">
-      <textarea name="document" spellcheck="false" aria-label="Rule document (JSON)">{{ document }}</textarea>
-      {% if not stored %}
+      <label class="field" for="document">Rule document (JSON)</label>
+      <textarea id="document" name="document" spellcheck="false">{{ document }}</textarea>
       <p class="row">
         <label><input type="checkbox" name="enabled" {% if enabled %}checked{% endif %}> Enabled</label>
+        {% if not stored %}
         <label><input type="checkbox" name="assign" {% if assign %}checked{% endif %}> Assign to every ticker of its timeframe</label>
+        {% endif %}
       </p>
-      {% else %}
-      <p class="muted">The rule is {{ 'enabled' if stored.enabled else 'disabled' }}; switch it from the rules list.</p>
-      {% endif %}
       <div class="actions">
-        <button type="submit" class="primary">{{ 'Save' if stored else 'Create' }}</button>
+        <button type="submit" class="primary" name="intent" value="save">{{ 'Save' if stored else 'Create' }}</button>
+        <button type="submit" name="intent" value="check">Check without saving</button>
         <a class="button" href="{{ prefix }}/rules">Cancel</a>
+        {% if stored %}<a class="button danger" style="margin-left:auto" href="{{ prefix }}/rules/{{ stored.id }}/delete">Delete</a>{% endif %}
       </div>
     </form>
   </div>
   <div class="panel">
     <h2 style="margin-top:0">How a rule is written</h2>
-    <p class="muted">A rule fires on a closed candle when its conditions hold. <code>conditions</code> is
-    <code>{"all": [...]}</code> or <code>{"any": [...]}</code>, one level of nesting allowed. Each condition is
-    <code>{"left": operand, "op": operator, "right": operand}</code>.</p>
-    <dl class="catalog">
-      <dt>Fields</dt>
-      <dd><code>signal</code>: BUY or SELL · <code>timeframe</code>: {{ timeframes | join(', ') }} · <code>cooldown_bars</code>: candles to stay quiet after a signal</dd>
-      <dt>Operators</dt>
-      <dd>{% for operator in operators %}<code>{{ operator }}</code>{{ ', ' if not loop.last }}{% endfor %}</dd>
-      <dt>Operands</dt>
-      <dd><code>{"price": "close"}</code> ({{ prices | join(', ') }}), <code>{"value": 30}</code>,
-      or <code>{"indicator": "rsi", "params": {"length": 14}, "output": "value"}</code></dd>
-    </dl>
-    <h2>Indicators</h2>
-    <dl class="catalog">
-      {% for indicator in catalog %}
-      <dt><code>{{ indicator.name }}</code> · {{ indicator.label }}</dt>
-      <dd>{{ indicator.description }}<br>
-        Params: {% for param in indicator.params %}<code>{{ param.name }}</code> {{ param.default }} [{{ param.min }}–{{ param.max }}]{{ ', ' if not loop.last }}{% else %}none{% endfor %}<br>
-        Outputs: {% for output in indicator.outputs %}<code>{{ output.name }}</code>{{ ', ' if not loop.last }}{% endfor %}</dd>
-      {% endfor %}
-    </dl>
+    <p class="muted">A rule fires on a closed candle when its conditions hold, and is checked on every ticker of its timeframe it is assigned to.</p>
+    <details class="guide" open>
+      <summary>Fields</summary>
+      <dl class="catalog">
+        <dt><code>name</code></dt><dd>Unique; shown in signals.</dd>
+        <dt><code>signal</code></dt><dd><span class="side-buy">BUY</span> or <span class="side-sell">SELL</span>.</dd>
+        <dt><code>timeframe</code></dt><dd>{{ timeframes | join(', ') }}. It cannot change while the rule is assigned to tickers.</dd>
+        <dt><code>cooldown_bars</code></dt><dd>Candles to stay quiet after a signal (0 for none).</dd>
+        <dt><code>conditions</code></dt><dd><code>{"all": [...]}</code> (every condition holds) or <code>{"any": [...]}</code> (at least one holds).</dd>
+      </dl>
+    </details>
+    <details class="guide">
+      <summary>Conditions and grouping</summary>
+      <p class="muted">Each condition is <code>{"left": operand, "op": operator, "right": operand}</code>. Operators:
+      {% for operator in operators %}<code>{{ operator }}</code>{{ ', ' if not loop.last }}{% endfor %}. The crossings compare the last two candles.</p>
+      <p class="muted">A group may contain conditions and groups of the other kind, one level deep: an <code>any</code> inside an <code>all</code>, or an <code>all</code> inside an <code>any</code>. For example, "RSI below 30 and (close above SMA 200 or MACD above its signal)":</p>
+<pre><code>"conditions": {"all": [
+  {"left": {"indicator": "rsi"}, "op": "&lt;", "right": {"value": 30}},
+  {"any": [
+    {"left": {"price": "close"}, "op": "&gt;",
+     "right": {"indicator": "sma", "params": {"length": 200}}},
+    {"left": {"indicator": "macd", "output": "macd"}, "op": "&gt;",
+     "right": {"indicator": "macd", "output": "signal"}}
+  ]}
+]}</code></pre>
+    </details>
+    <details class="guide">
+      <summary>Operands</summary>
+      <dl class="catalog">
+        <dt><code>{"price": "close"}</code></dt><dd>A column of the candle: {{ prices | join(', ') }}. <code>"volume"</code> is read the same way, even though it is not a price.</dd>
+        <dt><code>{"value": 30}</code></dt><dd>A fixed number.</dd>
+        <dt><code>{"indicator": "rsi", "params": {"length": 14}, "output": "value"}</code></dt><dd>An indicator below; <code>params</code> and <code>output</code> fall back to the defaults.</dd>
+      </dl>
+    </details>
+    <details class="guide">
+      <summary>Indicators ({{ catalog | length }})</summary>
+      <dl class="catalog">
+        {% for indicator in catalog %}
+        <dt><code>{{ indicator.name }}</code> · {{ indicator.label }}</dt>
+        <dd>{{ indicator.description }}<br>
+          Params: {% for param in indicator.params %}<code>{{ param.name }}</code> {{ param.default }} [{{ param.min }}–{{ param.max }}]{{ ', ' if not loop.last }}{% else %}none{% endfor %}<br>
+          Outputs: {% for output in indicator.outputs %}<code>{{ output.name }}</code>{{ ', ' if not loop.last }}{% endfor %}</dd>
+        {% endfor %}
+      </dl>
+    </details>
   </div>
 </div>
 {% endblock %}

@@ -119,7 +119,7 @@ umask 077
 cat > ~/trading-bot/secrets.env <<'EOF'
 TB_TELEGRAM_BOT_TOKEN=<bot token>
 TB_TELEGRAM_ALLOWED_CHAT_IDS=<chat id>
-#TB_DISPLAY_TIMEZONE=<IANA zone, default Europe/Madrid>
+#TB_DISPLAY_TIMEZONE=<IANA zone, default America/Argentina/Buenos_Aires>
 TB_DASHBOARD_PASSWORD_HASH=<hash, see "Dashboard" below>
 TB_SESSION_SECRET=<long random value, see "Dashboard" below>
 EOF

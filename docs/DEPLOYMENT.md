@@ -128,9 +128,19 @@ chmod 600 ~/trading-bot/secrets.env
 
 Every chat in `TB_TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated) receives each signal and is the only one whose commands (`/add`, `/status`, `/pause` ...) the bot answers; messages from any other chat are ignored. To find your chat id, **before** starting the container with the token, send any message to the bot and read `message.chat.id` from `https://api.telegram.org/bot<token>/getUpdates` in a browser (never paste the token anywhere else; once the bot runs it consumes the updates and that page stays empty). Without a token or chat ids the bot still starts, only logs its signals and answers no command.
 
-Check it from the phone after a restart: `/status` answers with the version. If it does not, `docker compose --project-name trading-bot-prod logs app` shows one line explaining why (`409 Conflict`, rejected token, Telegram unreachable); the bot keeps retrying on its own.
+`deploy.py` never reads this file; it only creates it empty if it is missing and refuses to deploy if its permissions are more open than 600.
 
-`deploy.py` never reads this file; it only creates it empty if it is missing and refuses to deploy if its permissions are more open than 600. Changes apply on restart: `docker compose --project-name trading-bot-prod restart app`.
+Changes to `secrets.env` need the container to be **recreated**, not restarted: `docker compose restart` keeps the environment the container was created with, so a new token is ignored. The next deploy recreates it; to apply a change right away, on the Pi:
+
+```sh
+cd ~/trading-bot
+TB_IMAGE=$(python3 -c 'import json; print(json.load(open("current.json"))["image"])') \
+TB_PORT=8081 TB_ENVIRONMENT=prod TB_SECRETS_ENV_FILE="$PWD/secrets.env" \
+  docker compose --project-name trading-bot-prod --file compose.yml \
+  up --detach --force-recreate --wait app
+```
+
+Check it in `docker compose --project-name trading-bot-prod logs app`: with a token and chat ids the startup line reads `started: environment prod, telegram notifier`. Then, from the phone, `/status` answers with the version. If it does not, the same logs show one line explaining why (`409 Conflict`, rejected token, Telegram unreachable); the bot keeps retrying on its own.
 
 ### 5. Repository protection
 

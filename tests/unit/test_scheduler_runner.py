@@ -460,20 +460,21 @@ def test_a_second_fire_of_a_timeframe_in_flight_is_busy(
 
 
 def test_runs_of_different_timeframes_never_overlap(tmp_path: Path) -> None:
-    """The three timeframes close at the same instant at every session close (Design 8.2)."""
+    """1h, 4h and 1d close together at every session close, and 1w too on Fridays (Design 8.2)."""
 
     async def scenario(harness: SchedulerHarness) -> None:
         await asyncio.gather(
             harness.runner.run_timeframe(Timeframe.H1),
             harness.runner.run_timeframe(Timeframe.H4),
             harness.runner.run_timeframe(Timeframe.D1),
+            harness.runner.run_timeframe(Timeframe.W1),
         )
 
     with scheduler_harness(tmp_path, now=FIRE, duration=timedelta(seconds=5)) as harness:
         asyncio.run(scenario(harness))
 
         calls = harness.engine.calls
-        assert len(calls) == 3
+        assert len(calls) == 4
         assert {call.timeframe for call in calls} == set(Timeframe)
         for earlier, later in pairwise(calls):
             assert earlier.finished_at <= later.started_at

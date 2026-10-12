@@ -165,6 +165,7 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "migrations/versions/0003_signals_and_bot_state.py",
         "migrations/versions/0004_users.py",
         "migrations/versions/0005_configuration_owners.py",
+        "migrations/versions/0006_weekly_timeframe.py",
         "repositories/__init__.py",
         "repositories/assignments.py",
         "repositories/bot_state.py",
@@ -247,6 +248,7 @@ def test_a_revision_is_self_contained_and_imports_no_application_type() -> None:
         "0003_signals_and_bot_state.py",
         "0004_users.py",
         "0005_configuration_owners.py",
+        "0006_weekly_timeframe.py",
     ]
     for path in revisions:
         imported = {

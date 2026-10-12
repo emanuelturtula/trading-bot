@@ -141,6 +141,7 @@ def test_the_job_id_is_stable_and_names_the_timeframe() -> None:
         "candle-close.1h",
         "candle-close.4h",
         "candle-close.1d",
+        "candle-close.1w",
     ]
     with pytest.raises(TypeError, match="timeframe"):
         job_id("1h")  # type: ignore[arg-type]
@@ -161,13 +162,15 @@ def test_start_adds_one_recurring_job_and_one_catch_up_job_per_timeframe(
             "candle-close.1h",
             "candle-close.4h",
             "candle-close.1d",
+            "candle-close.1w",
             "candle-close.1h.catchup",
             "candle-close.4h.catchup",
             "candle-close.1d.catchup",
+            "candle-close.1w.catchup",
         ]
 
 
-@pytest.mark.parametrize("position", [0, 1, 2])
+@pytest.mark.parametrize("position", [0, 1, 2, 3])
 def test_each_recurring_job_carries_the_pinned_options(tmp_path: Path, position: int) -> None:
     timeframe = list(Timeframe)[position]
     with scheduler_harness(tmp_path, now=FIRE) as harness:
@@ -188,9 +191,9 @@ def test_each_recurring_job_carries_the_pinned_options(tmp_path: Path, position:
         assert str(job.trigger) == f"candle close {timeframe.value} + 120s"
 
 
-@pytest.mark.parametrize("position", [3, 4, 5])
+@pytest.mark.parametrize("position", [4, 5, 6, 7])
 def test_each_catch_up_job_is_an_immediate_date_job(tmp_path: Path, position: int) -> None:
-    timeframe = list(Timeframe)[position - 3]
+    timeframe = list(Timeframe)[position - 4]
     with scheduler_harness(tmp_path, now=FIRE) as harness:
         scheduler = RecordingScheduler()
         service = build_service(harness, scheduler)
@@ -234,7 +237,7 @@ def test_a_second_start_raises_and_adds_nothing(tmp_path: Path) -> None:
         with pytest.raises(RuntimeError, match="already running"):
             service.start()
 
-        assert len(scheduler.added) == 6
+        assert len(scheduler.added) == 8
         assert scheduler.started == 1
 
 
@@ -271,6 +274,7 @@ def test_next_fire_times_reports_one_instant_per_timeframe(tmp_path: Path) -> No
             (Timeframe.H1, FIRE),
             (Timeframe.H4, None),
             (Timeframe.D1, FIRE),
+            (Timeframe.W1, None),
         )
 
 
@@ -293,6 +297,7 @@ def test_next_fire_times_before_start_is_all_none(tmp_path: Path) -> None:
             (Timeframe.H1, None),
             (Timeframe.H4, None),
             (Timeframe.D1, None),
+            (Timeframe.W1, None),
         )
         assert service.running is False
 

@@ -420,7 +420,7 @@ def test_add_a_ticker_without_enabled_rules_warns(signed_in: Browser) -> None:
     ("symbol", "timeframe", "message"),
     [
         ("MSFT", "1d", "MSFT was not found."),
-        ("AAPL", "5m", "Unknown timeframe. Use 1h, 4h or 1d."),
+        ("AAPL", "5m", "Unknown timeframe. Use 1h, 4h, 1d or 1w."),
         ("<b>", "1d", "&lt;B&gt; was not found."),
     ],
 )

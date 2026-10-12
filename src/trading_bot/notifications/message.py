@@ -4,9 +4,10 @@ Pure: the same notification, environment and zone always give the same text. Eve
 comes from user data (ticker, rule name, indicator names) is HTML-escaped, because the message is
 sent with HTML parse mode.
 
-The candle is presented by its session date (``1d``) or its real close in the display zone
-(``1h``, ``4h``), never by the nominal close (spec 004 §5): for ``1d`` that one is midnight of the
-next day. The real close comes from the calendar slot whose label is the candle's open.
+The candle is presented by its session date (``1d``), the date of its first session (``1w``,
+spec 027) or its real close in the display zone (``1h``, ``4h``), never by the nominal close
+(spec 004 §5): for ``1d`` that one is midnight of the next day. The real close comes from the
+calendar slot whose label is the candle's open.
 """
 
 from __future__ import annotations
@@ -77,6 +78,8 @@ def _candle_text(signal: Signal, display_tz: tzinfo, calendar: MarketCalendar) -
         return f"opened {_local(label, display_tz)}"
     if timeframe is Timeframe.D1:
         return f"{slot.session_day.isoformat()} (session)"
+    if timeframe is Timeframe.W1:
+        return f"week of {slot.session_day.isoformat()}"
     return f"closed {_local(slot.close_time, display_tz)}"
 
 

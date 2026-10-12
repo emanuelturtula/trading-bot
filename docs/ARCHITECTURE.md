@@ -4,7 +4,7 @@
 
 For a list of configurable tickers (stocks and ETFs via yfinance in v1), the bot:
 
-1. waits for each candle to close according to the ticker's timeframe (1h, 4h, 1d; default 1d);
+1. waits for each candle to close according to the ticker's timeframe (1h, 4h, 1d, 1w; default 1d);
 2. downloads the OHLCV candles and discards the in-progress candle;
 3. computes technical indicators;
 4. evaluates the rules assigned to the ticker;
@@ -42,8 +42,8 @@ The user decides whether to trade. **There is no order execution layer** and one
 
 | Layer | Responsibility | Rules |
 |-------|----------------|-------|
-| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the market calendar (`MarketCalendar`: NYSE sessions, candle grid and real closes), candle normalization and open-candle removal (`normalize_candles`, `drop_open_candle`), `4h` candles resampled from hourly candles (`resample_hourly_to_4h`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
-| `data/` | `MarketDataProvider` (async Protocol), `TickerInfo` and the D27 policy, typed errors, and `prepare_candles`, which every provider uses to normalize, drop bad rows and the open candle, and require the last closed candle; `YFinanceProvider` in `data/yahoo/`, with `4h` candles built from `1h` bars; `ProviderTransport` (retries with backoff and jitter, timeouts, pacing) | Never decides signals. Respects Yahoo's limits: `1h` requests start at most 720 days back; `1d` is unlimited. |
+| `domain/` | Models (`Timeframe`, the candle frame contract with `validate_candles`, `Signal`/`SignalKey`/`Side`), the market calendar (`MarketCalendar`: NYSE sessions, candle grid and real closes), candle normalization and open-candle removal (`normalize_candles`, `drop_open_candle`), `4h` and `1w` candles resampled from hourly and daily candles (`resample_hourly_to_4h`, `resample_daily_to_1w`), the JSON rule model (`parse_rule`, `dump_rule`, `rule_json_schema`), indicator registry (whitelist → TA-Lib), rule evaluator | No I/O, no clock, no globals. Testable with fixed DataFrames. |
+| `data/` | `MarketDataProvider` (async Protocol), `TickerInfo` and the D27 policy, typed errors, and `prepare_candles`, which every provider uses to normalize, drop bad rows and the open candle, and require the last closed candle; `YFinanceProvider` in `data/yahoo/`, with `4h` candles built from `1h` bars and `1w` candles from `1d` bars; `ProviderTransport` (retries with backoff and jitter, timeouts, pacing) | Never decides signals. Respects Yahoo's limits: `1h` requests start at most 720 days back; `1d` (and so `1w`) is unlimited. |
 | `engine/` | `SignalEngine`: orchestrates fetch → indicators → rules → cooldown/dedupe → persistence → notification, over one configuration snapshot per run, and returns a `RunReport` | Idempotent by `(ticker, timeframe, rule_id, candle_close_ts)`; the cooldown counts candle positions, never a duration; a failing ticker never stops the rest; no clock is read. |
 | `scheduler/` | APScheduler (`AsyncIOScheduler`) behind a pure schedule function: one job per timeframe with a custom calendar-driven trigger, fired at the **real** candle close plus `TB_CANDLE_CLOSE_DELAY_SECONDS`; the startup catch-up, the misfire window and the bounded retry of unpublished candles | One service per process, `max_instances=1` and `coalesce=True`; exactly once per close (`bot_state`); market hours by construction, never an `is_open` gate; no `Exception` escapes a job. |
 | `notifications/` | `Notifier` (Protocol), `SignalNotification` and `NotificationError`, shipped with the engine (#14); `TelegramNotifier` implements them (#17, #18) | `[BETA]` prefix outside prod; disclaimer; chart in memory (`io.BytesIO`, `seek(0)`), never to disk; `notification.candles` is read-only. |
@@ -61,7 +61,7 @@ A single asyncio process (`uvicorn ... --workers 1`). The FastAPI lifespan start
 
 ### Timeframes
 
-`Timeframe` (`domain/timeframe.py`) is a `StrEnum` with the codes `1h`, `4h` and `1d`, the single spelling used in rule JSON, the API, Telegram, the CLI and the database. `Timeframe.parse(text)` only ignores surrounding whitespace: other letter cases (`1H`), aliases (`60m`, `daily`) and unsupported codes raise `UnknownTimeframeError` (a `ValueError`) whose message lists the valid codes. `duration` is the fixed candle length (`timedelta`).
+`Timeframe` (`domain/timeframe.py`) is a `StrEnum` with the codes `1h`, `4h`, `1d` and `1w`, the single spelling used in rule JSON, the API, Telegram, the CLI and the database. `Timeframe.parse(text)` only ignores surrounding whitespace: other letter cases (`1H`), aliases (`60m`, `daily`) and unsupported codes raise `UnknownTimeframeError` (a `ValueError`) whose message lists the valid codes. `duration` is the fixed candle length (`timedelta`; seven days for `1w`).
 
 ### Candle frames
 
@@ -170,7 +170,7 @@ Intraday candles are anchored at the session open and the last one is cut at the
 | 2024-01-02 (regular, EST) | 14:30→15:30, 15:30→16:30, 16:30→17:30, 17:30→18:30, 18:30→19:30, 19:30→20:30, 20:30→21:00 | 14:30→18:30, 18:30→21:00 | 05:00 (open 14:30) → 21:00 |
 | 2024-07-03 (half day, EDT) | 13:30→14:30, 14:30→15:30, 15:30→16:30, 16:30→17:00 | 13:30→17:00 | 04:00 (open 13:30) → 17:00 |
 
-The canonical label is the candle open for `1h` and `4h`, and 00:00 of the session date in New York for `1d` (the yfinance convention). `candle_slot(timeframe, label)` matches labels exactly and raises `CandleLabelError` (a `ValueError`) for any other label inside the calendar, with the first `kind` that applies:
+The canonical label is the candle open for `1h` and `4h`, and 00:00 of the session date in New York for `1d` (the yfinance convention). A `1w` candle is one ISO week of sessions (Monday to Sunday, New York time): its label is the `1d` label of the week's first session, it opens with that session and closes with the week's last one, so holiday weeks need no special case (spec [027](specs/027-weekly-timeframe.md)). `candle_slot(timeframe, label)` matches labels exactly and raises `CandleLabelError` (a `ValueError`) for any other label inside the calendar, with the first `kind` that applies:
 
 | Kind | Meaning | Example (ET) |
 |------|---------|--------------|
@@ -357,9 +357,10 @@ async def run_once(now: datetime) -> None:  # now: the scheduled close of the ru
 | `1h` | `Ticker.history(start=…, interval="1h")` | `prepare_candles` on the answer |
 | `4h` | the same `1h` request | normalized `1h` bars (dropped rows logged as `1h`) → `resample_hourly_to_4h` → `publishable_4h` → `prepare_candles` |
 | `1d` | `Ticker.history(start=…, interval="1d")` | `prepare_candles` on the answer |
+| `1w` | the same `1d` request | normalized `1d` bars (dropped rows logged as `1d`) → `resample_daily_to_1w` → `publishable_1w` → `prepare_candles` |
 
 - Every request passes `prepost=False` (regular hours, D28), `auto_adjust=False` (`close` is Yahoo's split-adjusted `Close`, never `Adj Close`, D30), `repair=False`, `keepna=False` and a 15 s request timeout, and never `end`: yfinance answers requests whose `end` lies in the past from an in-memory cache, so a retry could re-read a stale answer.
-- `plan_history` starts at the label of the first candle of `candle_window`. Yahoo rejects `1h` requests that start 730 days back or earlier, so a `1h` or `4h` start more than **720 days** before `now` becomes the first slot at or after that instant; the 10-day margin covers retries of a run over a long weekend. The first capped fetch of a `(symbol, timeframe)` logs `INFO` and later ones `DEBUG`. `1d` is unlimited.
+- `plan_history` starts at the label of the first candle of `candle_window`. Yahoo rejects `1h` requests that start 730 days back or earlier, so a `1h` or `4h` start more than **720 days** before `now` becomes the first slot at or after that instant; the 10-day margin covers retries of a run over a long weekend. The first capped fetch of a `(symbol, timeframe)` logs `INFO` and later ones `DEBUG`. `1d` and `1w` are unlimited.
 - `validate_ticker` rejects malformed and ISIN-shaped text without a request, asks for one month of daily bars and maps the chart metadata of that answer (`symbol`, `instrumentType`, `exchangeName`, `currency`, `longName`, `shortName`) to `TickerInfo`, with OTC markets and unknown codes as `OTHER`, before `ensure_supported`. A metadata symbol that differs from the requested one is `ProviderDataError("symbol_mismatch")`.
 
 #### `4h` resampling
@@ -373,6 +374,8 @@ The last `4h` slot closed at `now` is special (D58): `publishable_4h` withholds 
 | 2024-11-27T14:30Z | 14:30Z, 15:30Z, 17:30Z (16:30Z missing) | 100 | 105 | 98 | 99 | 4500 | built from 3 of 4 bars; a `WARNING` when it is the last candle |
 | 2024-11-27T18:30Z | 18:30Z, 19:30Z, 20:30Z | 99 | 101 | 96 | 100 | 4700 | complete (its last hourly slot lasts 30 minutes) |
 | 2024-11-29T14:30Z | 14:30Z, 15:30Z, 16:30Z (half day) | 100 | 106 | 100 | 104 | 1800 | published: 17:30Z (12:30–13:00 ET) is never published |
+
+`1w` candles follow the same path from daily bars (spec 027): `resample_daily_to_1w` aggregates the daily rows of each closed week, and `publishable_1w` withholds the last closed week while the daily bar of its last session is missing.
 
 On the provider logger: `DEBUG` for a withheld candle, one `DEBUG` summary of earlier candles built from incomplete bars, and one `WARNING` when the returned last candle lacks bars Yahoo publishes.
 
@@ -527,7 +530,7 @@ assert rule.stable_warmup() == 200  # candles for values independent of the hist
 ### Grammar
 
 ```text
-rule        := {"name": string, "signal": "BUY"|"SELL", "timeframe": "1h"|"4h"|"1d",
+rule        := {"name": string, "signal": "BUY"|"SELL", "timeframe": "1h"|"4h"|"1d"|"1w",
                 "conditions": group, "cooldown_bars"?: integer}
 group       := {"all": [item, ...]} | {"any": [item, ...]}          # exactly one key, 1..10 items
 item        := condition | nested                                    # only inside the root group
@@ -809,7 +812,7 @@ The frame is shared, not copied: copying it per signal would duplicate up to 2 2
 [BETA] 🟢 BUY · AAPL · 1d          (bold; no [BETA] in prod)
 Rule: RSI bounce
 Close: 182.41
-Candle: 2024-07-01 (session)       (1h/4h: "closed 2024-07-01 22:00 CEST", the real close)
+Candle: 2024-07-01 (session)       (1h/4h: "closed 2024-07-01 22:00 CEST", the real close; 1w: "week of 2024-07-01")
 rsi_14: 28.73
 sma_50: 190.12
 
@@ -827,7 +830,7 @@ The bot is managed from the phone (spec [018](specs/018-telegram-commands.md), i
 
 - **`TelegramPoller`** (`poller.py`) is its own `getUpdates` loop, not `telegram.ext.Application`: a 30 s long poll asking only for `message` updates. It drops every message from a chat outside `TB_TELEGRAM_ALLOWED_CHAT_IDS` before parsing it, logging one `INFO` line without the chat id, user or text. `BotUpdateSource` is the python-telegram-bot adapter and maps the library's errors onto `PollError` (`transient`, `conflict`, `rejected_token`), raised `from None`.
 - **`CommandHandler`** (`commands.py`) is library-free: text in, HTML reply out (or `None` for a command addressed to another bot). Every database access is one unit of work (`unit_of_work.py`) in a worker thread. User text is HTML-escaped and echoed truncated to 32 characters; every reply starts with `[BETA]` outside `prod`. An unexpected error is logged by class name and answered with a fixed sentence.
-- **Commands.** `/add TICKER [1h|4h|1d]` validates the symbol with the provider, defaults to `1d`, stores it enabled (or re-enables it) and assigns every stored rule of that timeframe. `/remove TICKER [timeframe]` disables it and keeps its assignments and signals; deleting is done from the dashboard or the CLI. `/list`, `/rules`, `/status` (version, pause, last and next run per timeframe in `TB_DISPLAY_TIMEZONE`), `/pause`, `/resume`, `/help`. Rules are not created from Telegram but from the [dashboard](#dashboard). `/add` and `/remove` share `trading_bot/watchlist.py` with the dashboard, so both front ends behave the same.
+- **Commands.** `/add TICKER [1h|4h|1d|1w]` validates the symbol with the provider, defaults to `1d`, stores it enabled (or re-enables it) and assigns every stored rule of that timeframe. `/remove TICKER [timeframe]` disables it and keeps its assignments and signals; deleting is done from the dashboard or the CLI. `/list`, `/rules`, `/status` (version, pause, last and next run per timeframe in `TB_DISPLAY_TIMEZONE`), `/pause`, `/resume`, `/help`. Rules are not created from Telegram but from the [dashboard](#dashboard). `/add` and `/remove` share `trading_bot/watchlist.py` with the dashboard, so both front ends behave the same.
 
 | Situation | Behaviour |
 |-----------|-----------|

@@ -747,7 +747,9 @@ class Dashboard:
         text = _field(form, "symbol").strip()
         timeframe = _timeframe(_field(form, "timeframe"))
         if timeframe is None:
-            return _redirect("/tickers", flash="Unknown timeframe. Use 1h, 4h or 1d.", error=True)
+            return _redirect(
+                "/tickers", flash="Unknown timeframe. Use 1h, 4h, 1d or 1w.", error=True
+            )
         try:
             info = await self._provider(request).validate_ticker(text)
         except InvalidTickerError as error:

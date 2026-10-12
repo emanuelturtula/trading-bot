@@ -22,7 +22,7 @@ __all__ = ["skip_unpublished_hours"]
 def skip_unpublished_hours(calendar: MarketCalendar) -> SlotPredicate:
     """A predicate that skips the ``1h`` slots Yahoo never publishes (spec 011, D65).
 
-    ``4h`` and ``1d`` slots are accepted without consulting ``is_unpublished_hour``, which
+    ``4h``, ``1d`` and ``1w`` slots are accepted without consulting ``is_unpublished_hour``, which
     raises for any timeframe but ``1h``.
     """
     if not isinstance(calendar, MarketCalendar):

@@ -66,6 +66,14 @@ def test_intraday_candles_show_the_real_close_in_the_display_zone(
     assert f"Candle: {expected}\n" in text
 
 
+def test_a_weekly_candle_shows_the_day_of_its_first_session() -> None:
+    # 2024-05-27 is Memorial Day, so the week starts on Tuesday.
+    text = render(notification(timeframe=Timeframe.W1, label=utc("2024-05-28T04:00")))
+
+    assert "<b>[BETA] 🟢 BUY · AAPL · 1w</b>\n" in text
+    assert "Candle: week of 2024-05-28\n" in text
+
+
 def test_an_off_grid_candle_shows_its_open_instead_of_a_guessed_close() -> None:
     text = render(notification(timeframe=Timeframe.H1, label=utc("2024-07-01T13:00")))
 

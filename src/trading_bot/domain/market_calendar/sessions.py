@@ -6,6 +6,10 @@ they are pure (CLAUDE.md rule 3): whether the market is open, the session of a d
 grid of a timeframe, the next real candle close and the candles closed at an instant. They
 decide closedness and scheduling; signal identity keeps ``Timeframe.nominal_close`` (spec 004).
 
+A ``1w`` candle groups the sessions of one ISO week (Monday to Sunday in exchange time, spec 027):
+it is labelled like the ``1d`` candle of its first session, opens with that session and closes
+with the last one, so a holiday week simply has fewer sessions.
+
 Intervals are half-open: a session is ``[open_time, close_time)`` and a candle is closed when
 ``close_time <= now``. Outside its span a calendar raises ``CalendarRangeError`` instead of
 guessing. This module imports neither pandas, numpy nor ``exchange_calendars``.
@@ -129,7 +133,7 @@ class CandleSlot:
     """One candle of the session grid. Built by MarketCalendar; fields are stdlib UTC."""
 
     timeframe: Timeframe
-    session_day: date
+    session_day: date  # for 1w, the day of the week's first session
     label: datetime  # the canonical provider label (spec 009, D21)
     open_time: datetime
     close_time: datetime  # the real close
@@ -156,6 +160,10 @@ class MarketCalendar:
     _opens: tuple[datetime, ...] = field(init=False, repr=False, compare=False)
     _closes: tuple[datetime, ...] = field(init=False, repr=False, compare=False)
     _day_starts: tuple[datetime, ...] = field(init=False, repr=False, compare=False)
+    _week_firsts: tuple[int, ...] = field(init=False, repr=False, compare=False)
+    _week_lasts: tuple[int, ...] = field(init=False, repr=False, compare=False)
+    _week_labels: tuple[datetime, ...] = field(init=False, repr=False, compare=False)
+    _week_closes: tuple[datetime, ...] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         name = _calendar_name(self.name)
@@ -187,6 +195,17 @@ class MarketCalendar:
         object.__setattr__(
             self, "_day_starts", tuple(self._day_start(session.day) for session in sessions)
         )
+        # The first and last session of every ISO week, in session order.
+        firsts = [
+            index
+            for index, session in enumerate(sessions)
+            if index == 0 or _iso_week(sessions[index - 1].day) != _iso_week(session.day)
+        ]
+        lasts = [*(first - 1 for first in firsts[1:]), len(sessions) - 1] if firsts else []
+        object.__setattr__(self, "_week_firsts", tuple(firsts))
+        object.__setattr__(self, "_week_lasts", tuple(lasts))
+        object.__setattr__(self, "_week_labels", tuple(self._day_starts[i] for i in firsts))
+        object.__setattr__(self, "_week_closes", tuple(self._closes[i] for i in lasts))
 
     def __repr__(self) -> str:
         return (
@@ -226,6 +245,14 @@ class MarketCalendar:
         """
         _check_timeframe(timeframe)
         instant = self._inside(_utc_instant(now, "now"), "now")
+        if timeframe is Timeframe.W1:
+            week = bisect_right(self._week_closes, instant)
+            if week == len(self._week_closes):
+                raise self._range_error(
+                    f"no {timeframe} candle of calendar {self.name} closes after "
+                    f"{instant.isoformat()}"
+                )
+            return self._week_closes[week]
         index = bisect_right(self._closes, instant)  # the first session that closes after now
         if index == len(self._closes):
             raise self._range_error(
@@ -244,7 +271,11 @@ class MarketCalendar:
         """
         _check_timeframe(timeframe)
         instant = self._inside(_utc_instant(label, "label"), "label")
-        if timeframe is Timeframe.D1:
+        if timeframe is Timeframe.W1:
+            week = bisect_left(self._week_labels, instant)
+            if week < len(self._week_labels) and self._week_labels[week] == instant:
+                return self._week_slot(week)
+        elif timeframe is Timeframe.D1:
             index = bisect_left(self._day_starts, instant)
             if index < len(self._day_starts) and self._day_starts[index] == instant:
                 return self._slot(timeframe, index, 0)
@@ -274,6 +305,10 @@ class MarketCalendar:
                 raise self._range_error(
                     f"{argument} {bound.isoformat()} is outside calendar {self.name}"
                 )
+        if timeframe is Timeframe.W1:
+            low = bisect_left(self._week_labels, first)
+            high = bisect_left(self._week_labels, stop)
+            return tuple(self._week_slot(week) for week in range(low, high))
         if timeframe is Timeframe.D1:
             low = bisect_left(self._day_starts, first)
             high = bisect_left(self._day_starts, stop)
@@ -308,6 +343,14 @@ class MarketCalendar:
         self._inside(instant, "now")
         if count == 0:
             return ()
+        if timeframe is Timeframe.W1:
+            closed = bisect_right(self._week_closes, instant)
+            if closed < count:
+                raise self._range_error(
+                    f"only {closed} {timeframe} candles of calendar {self.name} close by "
+                    f"{instant.isoformat()}, fewer than requested"
+                )
+            return tuple(self._week_slot(week) for week in range(closed - count, closed))
         # Sessions before ``index`` have closed; session ``index`` may be in progress at ``now``.
         index = bisect_right(self._closes, instant)
         in_progress = 0
@@ -385,12 +428,23 @@ class MarketCalendar:
             close_time=min(label + timeframe.duration, close_time),
         )
 
+    def _week_slot(self, week: int) -> CandleSlot:
+        """Week ``week``: from the open of its first session to the close of its last one."""
+        first = self._week_firsts[week]
+        return CandleSlot(
+            timeframe=Timeframe.W1,
+            session_day=self._days[first],
+            label=self._week_labels[week],
+            open_time=self._opens[first],
+            close_time=self._week_closes[week],
+        )
+
     def _label_error(self, timeframe: Timeframe, label: datetime) -> CandleLabelError:
         """Classify a label that matched no slot (Design 4.3)."""
         index = self._session_index(label.astimezone(self.timezone).date())
         if index is None:
             kind = CandleLabelErrorKind.NOT_A_SESSION
-        elif timeframe is not Timeframe.D1 and not (
+        elif timeframe not in _SESSION_DAY_TIMEFRAMES and not (
             self._opens[index] <= label < self._closes[index]
         ):
             kind = CandleLabelErrorKind.OUTSIDE_SESSION
@@ -411,6 +465,16 @@ class MarketCalendar:
             first_day=self.first_day,
             last_day=self.last_day,
         )
+
+
+# Timeframes labelled at 00:00 of a session day rather than inside a session.
+_SESSION_DAY_TIMEFRAMES: Final = frozenset({Timeframe.D1, Timeframe.W1})
+
+
+def _iso_week(day: date) -> tuple[int, int]:
+    """The ISO year and week of ``day``: weeks run from Monday to Sunday."""
+    calendar = day.isocalendar()
+    return calendar.year, calendar.week
 
 
 def _check_timeframe(value: object) -> None:

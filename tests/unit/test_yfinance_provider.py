@@ -174,6 +174,7 @@ def test_the_module_exports_exactly_the_spec_names() -> None:
         "YFinanceProvider",
         "is_unpublished_hour",
         "plan_history",
+        "publishable_1w",
         "publishable_4h",
     ]
     assert timedelta(days=720) == INTRADAY_HISTORY

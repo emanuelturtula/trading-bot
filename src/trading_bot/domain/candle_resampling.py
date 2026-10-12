@@ -1,4 +1,5 @@
-"""Session-anchored ``4h`` candles resampled from hourly candles (spec 011, Design 5; D31, D57).
+"""Session-anchored ``4h`` and ``1w`` candles resampled from finer candles (spec 011, Design 5;
+D31, D57; spec 027).
 
 ``resample_hourly_to_4h`` builds one ``4h`` row for every ``4h`` slot of the calendar grid that
 is closed at ``now`` and holds at least one hourly row: the open of its first row, the highest
@@ -6,6 +7,9 @@ high, the lowest low, the close of its last row and the sum of volumes (decision
 the bars that exist). Each row comes with a report of the hourly slots it lacks, so the data
 layer can apply its publication policy and log gaps; this module applies no policy and does not
 log.
+
+``resample_daily_to_1w`` does the same for ``1w`` slots from daily candles (spec 027): a week
+holds the daily rows of its sessions, and its report lists the session days without a row.
 
 The grid comes from the market calendar (spec 009), so DST changes, half days and late opens
 need no special cases. Only rows labelled before the close of the last ``4h`` slot closed at
@@ -28,7 +32,7 @@ from trading_bot.domain.market_calendar.sessions import CandleSlot, MarketCalend
 from trading_bot.domain.timeframe import Timeframe
 from trading_bot.domain.utc import to_utc
 
-__all__ = ["ResampledCandles", "ResampledSlot", "resample_hourly_to_4h"]
+__all__ = ["ResampledCandles", "ResampledSlot", "resample_daily_to_1w", "resample_hourly_to_4h"]
 
 _CANONICAL_INDEX_DTYPE: Final = pd.DatetimeTZDtype(unit="us", tz="UTC")
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
@@ -38,20 +42,22 @@ type _Positions = npt.NDArray[np.intp]
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ResampledSlot:
-    """The report of one resampled ``4h`` row. Equal by value and hashable."""
+    """The report of one resampled row. Equal by value and hashable."""
 
-    slot: CandleSlot  # the 4h slot of the row
-    bars: int  # hourly rows aggregated, >= 1
-    # labels of the slot's 1h grid slots without a row, stdlib UTC, increasing
+    slot: CandleSlot  # the 4h or 1w slot of the row
+    bars: int  # source rows (hourly or daily) aggregated, >= 1
+    # labels of the slot's source grid slots (1h or 1d) without a row, stdlib UTC, increasing
     missing: tuple[datetime, ...]
-    closing_bar_missing: bool  # the 1h slot whose close_time equals slot.close_time has no row
+    closing_bar_missing: bool  # the source slot whose close_time equals slot.close_time has no row
 
 
 @dataclass(frozen=True, slots=True, kw_only=True, eq=False)
 class ResampledCandles:
     """The resampled frame and its per-row report. Compared by identity (it holds a frame)."""
 
-    candles: pd.DataFrame  # canonical 4h frame, one row per entry of `slots`, in the same order
+    candles: (
+        pd.DataFrame
+    )  # canonical 4h or 1w frame, one row per entry of `slots`, in the same order
     slots: tuple[ResampledSlot, ...]
 
 
@@ -72,45 +78,73 @@ def resample_hourly_to_4h(
     ``OHLCV_COLUMNS`` as ``float64``) that passes ``validate_candles``, with one
     ``ResampledSlot`` per row. ``hourly`` is never modified.
     """
+    return _resample(hourly, now, calendar=calendar, source=Timeframe.H1, target=Timeframe.H4)
+
+
+def resample_daily_to_1w(
+    daily: pd.DataFrame, now: datetime, *, calendar: MarketCalendar
+) -> ResampledCandles:
+    """The ``1w`` candles of every ``1w`` slot closed at ``now`` that holds daily rows (spec 027).
+
+    The contract of ``resample_hourly_to_4h`` with ``1d`` rows and ``1w`` slots: each considered
+    row must be a ``1d`` slot label, a week aggregates the rows of its sessions, and its report
+    lists the session days of the week without a row.
+    """
+    return _resample(daily, now, calendar=calendar, source=Timeframe.D1, target=Timeframe.W1)
+
+
+def _resample(
+    rows: pd.DataFrame,
+    now: datetime,
+    *,
+    calendar: MarketCalendar,
+    source: Timeframe,
+    target: Timeframe,
+) -> ResampledCandles:
+    """``source`` rows aggregated into the ``target`` slots closed at ``now``.
+
+    Every ``target`` slot is a run of whole ``source`` slots that starts at the slot's label, so
+    a ``source`` slot belongs to the ``target`` slot with the greatest label at or before its own.
+    """
     if not isinstance(calendar, MarketCalendar):
         raise TypeError(f"calendar must be a MarketCalendar, got {type(calendar).__name__}")
     instant = to_utc(now)
-    validate_candles(hourly)
-    last = calendar.closed_candles(Timeframe.H4, instant, 1)[-1]
+    validate_candles(rows)
+    last = calendar.closed_candles(target, instant, 1)[-1]
 
-    index = pd.DatetimeIndex(hourly.index).tz_convert("UTC")
+    index = pd.DatetimeIndex(rows.index).tz_convert("UTC")
     count = int(index.searchsorted(pd.Timestamp(last.close_time), side="left"))
     if count == 0:
         return ResampledCandles(candles=_frame([], np.empty((0, len(OHLCV_COLUMNS)))), slots=())
     labels = index[:count]
 
     # The first considered label locates the grid; its own error is the first one to report.
-    first = calendar.candle_slot(Timeframe.H1, labels[0])
+    first = calendar.candle_slot(source, labels[0])
     blocks = calendar.candle_slots(
-        Timeframe.H4,
-        max(first.label - Timeframe.H4.duration + _ONE_MICROSECOND, calendar.coverage_start),
+        target,
+        max(first.label - target.duration + _ONE_MICROSECOND, calendar.coverage_start),
         last.close_time,
     )
     block_labels = _labels(blocks)
     first_block = blocks[
         int(block_labels.searchsorted(pd.Timestamp(first.label), side="right")) - 1
     ]
-    hours = calendar.candle_slots(Timeframe.H1, first_block.label, last.close_time)
+    hours = calendar.candle_slots(source, first_block.label, last.close_time)
     hour_labels = _labels(hours)
 
     exact = np.asarray(labels.nanosecond == 0, dtype=np.bool_)
     grid_positions: _Positions = hour_labels.get_indexer(labels.as_unit("us"))
     valid = exact & (grid_positions >= 0)
     if not valid.all():
-        # Not a 1h slot label: the calendar raises the error that names it.
-        calendar.candle_slot(Timeframe.H1, labels[int(np.argmin(valid))])
+        # Not a source slot label: the calendar raises the error that names it.
+        calendar.candle_slot(source, labels[int(np.argmin(valid))])
 
     block_of_row = np.asarray(
         block_labels.searchsorted(labels.as_unit("us"), side="right"), dtype=np.intp
     ) - np.intp(1)
     starts = np.flatnonzero(np.diff(block_of_row, prepend=np.intp(-1)) != 0)
     ends = np.append(starts[1:], count)
-    values = hourly.iloc[:count].to_numpy(dtype=np.float64)
+    values = rows.iloc[:count].to_numpy(dtype=np.float64)
     with np.errstate(over="ignore"):  # an overflowing volume sum fails the postcondition instead
         aggregated = np.column_stack(
             (
@@ -125,7 +159,9 @@ def resample_hourly_to_4h(
     report: list[ResampledSlot] = []
     for start, end in zip(starts.tolist(), ends.tolist(), strict=True):
         block = blocks[int(block_of_row[start])]
-        first_hour = int(hour_labels.searchsorted(pd.Timestamp(block.open_time), side="left"))
+        # The label, not the open: a 1w slot opens with its first session, after that day's
+        # 00:00 1d label. For 4h both are the same instant.
+        first_hour = int(hour_labels.searchsorted(pd.Timestamp(block.label), side="left"))
         stop_hour = int(hour_labels.searchsorted(pd.Timestamp(block.close_time), side="left"))
         present = set(grid_positions[start:end].tolist())
         report.append(

@@ -174,6 +174,18 @@ def test_a_daily_slot_keeps_its_label_while_the_fire_follows_the_close(
     assert fire == utc("2024-07-01T20:02")
 
 
+def test_the_weekly_candle_fires_after_the_last_session_of_the_week(
+    calendar: MarketCalendar,
+) -> None:
+    """Spec 027: the 2024-07-04 holiday week still closes on Friday; a Good Friday week on
+    Thursday."""
+    fires = list(fire_sequence(calendar, Timeframe.W1, "2024-07-01T00:00", 2))
+    easter = list(fire_sequence(calendar, Timeframe.W1, "2024-03-25T00:00", 1))
+
+    assert fires == [utc("2024-07-05T20:02"), utc("2024-07-12T20:02")]
+    assert easter == [utc("2024-03-28T20:02")]
+
+
 # --- T2: the predicate (AC4) ----------------------------------------------------------------
 
 
@@ -218,7 +230,7 @@ def test_the_predicate_answers_for_four_hourly_and_daily_slots_without_raising(
     calendar: MarketCalendar, skip_unpublished: SlotPredicate
 ) -> None:
     """``is_unpublished_hour`` raises for other timeframes, so it must not be called for them."""
-    for timeframe in (Timeframe.H4, Timeframe.D1):
+    for timeframe in (Timeframe.H4, Timeframe.D1, Timeframe.W1):
         slots = calendar.candle_slots(timeframe, utc("2024-07-01T04:00"), utc("2024-07-08T04:00"))
 
         assert slots != ()

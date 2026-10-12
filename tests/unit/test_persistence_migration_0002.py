@@ -27,7 +27,7 @@ from trading_bot.persistence.models import Base
 
 BASELINE = "0001"
 REVISION = "0002"
-HEAD = "0005"  # specs 014, 023 and 024 built on this revision
+HEAD = "0006"  # specs 014, 023, 024 and 027 built on this revision
 TABLES = ("rules", "ticker_rules", "tickers")
 HEAD_TABLES = ("bot_state", "rules", "signals", "ticker_rules", "tickers", "users")
 

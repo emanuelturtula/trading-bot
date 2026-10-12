@@ -109,7 +109,7 @@ def test_payload_is_json_with_the_grammar() -> None:
     assert [template["id"] for template in payload["templates"]] == IDS
     assert {"rsi", "macd", "sma"} <= {indicator["name"] for indicator in payload["catalog"]}
     assert payload["prices"] == ["open", "high", "low", "close", "volume"]
-    assert payload["timeframes"] == ["1h", "4h", "1d"]
+    assert payload["timeframes"] == ["1h", "4h", "1d", "1w"]
     rsi = payload["templates"][0]["fields"]
     assert rsi[0] == {
         "name": "length",

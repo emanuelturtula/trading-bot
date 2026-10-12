@@ -14,7 +14,7 @@ from trading_bot.dashboard.auth import hash_password
 
 __all__ = ["main"]
 
-MIN_PASSWORD_LENGTH = 12
+MIN_LENGTH = 12  # characters
 
 
 def main(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
@@ -27,8 +27,8 @@ def main(stdin: TextIO | None = None, stdout: TextIO | None = None) -> int:
             return 1
     else:
         typed = source.readline().rstrip("\r\n")
-    if len(typed) < MIN_PASSWORD_LENGTH:
-        out.write(f"Use at least {MIN_PASSWORD_LENGTH} characters.\n")
+    if len(typed) < MIN_LENGTH:
+        out.write("Use at least 12 characters.\n")
         return 1
     # Only the salted scrypt hash is printed, never what was typed: that hash is the output.
     digest = hash_password(typed)

@@ -758,7 +758,9 @@ def test_session_cookie_is_secure_when_the_browser_used_https(
 ) -> None:
     headers = {"origin": origin} if origin is not None else {}
 
-    response = browser.client.post("/dashboard/login", data={"password": PASSWORD}, headers=headers)
+    response = browser.client.post(
+        "/dashboard/login", data={"username": ADMIN, "password": PASSWORD}, headers=headers
+    )
 
     assert response.status_code == 303
     cookie = response.headers["set-cookie"].lower()
@@ -770,7 +772,7 @@ def test_session_cookie_is_secure_when_the_app_itself_serves_https(tmp_path: Pat
     with TestClient(
         make_app(tmp_path), base_url="https://testserver", follow_redirects=False
     ) as client:
-        response = client.post("/dashboard/login", data={"password": PASSWORD})
+        response = client.post("/dashboard/login", data={"username": ADMIN, "password": PASSWORD})
 
     assert response.status_code == 303
     assert "; secure" in response.headers["set-cookie"].lower()

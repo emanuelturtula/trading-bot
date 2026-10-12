@@ -5,20 +5,24 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>{% if not production %}[BETA] {% endif %}{% block title %}Dashboard{% endblock %} · trading-bot</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232457c5'/%3E%3Cpath d='M6 22l6-7 5 4 9-11' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
 :root {
   --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6677; --line: #dfe3ea;
   --accent: #2457c5; --ok-bg: #e5f4ea; --ok: #1f6b3a; --err-bg: #fbe8e8; --err: #9b2222;
-  --on: #1f6b3a; --off: #8a909c;
+  --on: #1f6b3a; --off: #8a909c; --on-bg: #e5f4ea; --off-bg: #eceef2;
+  --buy: #1f6b3a; --sell: #9b2222; --warn-bg: #fff4dc; --warn: #7a5200;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #14171d; --panel: #1c2028; --text: #e6e9ef; --muted: #9aa3b2; --line: #2d333e;
     --accent: #7aa2ff; --ok-bg: #173323; --ok: #8fd6a6; --err-bg: #3a1c1c; --err: #f2a3a3;
-    --on: #8fd6a6; --off: #7b8290;
+    --on: #8fd6a6; --off: #9aa3b2; --on-bg: #173323; --off-bg: #262b35;
+    --buy: #8fd6a6; --sell: #f2a3a3; --warn-bg: #3a2f14; --warn: #f3d28b;
   }
 }
 * { box-sizing: border-box; }
+html { scrollbar-gutter: stable; }
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
 header { background: var(--panel); border-bottom: 1px solid var(--line); }
@@ -26,8 +30,9 @@ header .bar { max-width: 1000px; margin: 0 auto; padding: 10px 16px; display: fl
   flex-wrap: wrap; gap: 6px 18px; align-items: center; }
 header .brand { font-weight: 600; margin-right: auto; }
 header .brand small { color: var(--muted); font-weight: 400; }
-nav a { color: var(--text); text-decoration: none; margin-right: 14px; }
+nav a { color: var(--text); text-decoration: none; margin-right: 14px; padding: 4px 0; border-bottom: 2px solid transparent; }
 nav a:hover { color: var(--accent); }
+nav a[aria-current="page"] { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 main { max-width: 1000px; margin: 0 auto; padding: 18px 16px 40px; }
 h1 { font-size: 22px; margin: 0 0 14px; }
 h2 { font-size: 17px; margin: 22px 0 10px; }
@@ -36,6 +41,29 @@ h2 { font-size: 17px; margin: 22px 0 10px; }
 .flash { border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; }
 .flash.ok { background: var(--ok-bg); color: var(--ok); }
 .flash.error { background: var(--err-bg); color: var(--err); }
+.flash.warn, .warn-box { background: var(--warn-bg); color: var(--warn); }
+.warn-box { border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; }
+a.plain { color: var(--text); text-decoration: none; font-weight: 600; }
+a.plain:hover { color: var(--accent); text-decoration: underline; }
+.badge { display: inline-block; font-size: 13px; font-weight: 600; padding: 2px 10px; border-radius: 999px; border: 1px solid transparent; }
+.badge.on { background: var(--on-bg); color: var(--on); }
+.badge.off { background: var(--off-bg); color: var(--off); }
+button.badge { cursor: pointer; }
+button.badge:hover { border-color: currentColor; }
+.side-buy { color: var(--buy); font-weight: 600; }
+.side-sell { color: var(--sell); font-weight: 600; }
+td.end { text-align: right; white-space: nowrap; }
+footer { max-width: 1000px; margin: 0 auto; padding: 0 16px 28px; color: var(--muted); font-size: 13px; }
+details.guide summary { cursor: pointer; font-weight: 600; margin: 10px 0 4px; }
+label.field { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.symbol-input { text-transform: uppercase; }
+.symbol-input::placeholder { text-transform: none; }
+@media (max-width: 640px) {
+  .hide-narrow { display: none; }
+  table { font-size: 14px; }
+  th, td { padding: 8px 3px; }
+  td.end .button { padding: 3px 8px; font-size: 13px; }
+}
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
 th { font-size: 13px; color: var(--muted); font-weight: 600; }
@@ -47,7 +75,8 @@ form.inline { display: inline; margin: 0; }
 button, .button { font: inherit; font-size: 14px; padding: 5px 12px; border-radius: 6px; cursor: pointer;
   border: 1px solid var(--line); background: var(--panel); color: var(--text); text-decoration: none; display: inline-block; }
 button.primary, .button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button.danger { color: var(--err); border-color: var(--err); }
+button.danger, .button.danger { color: var(--err); border-color: var(--err); }
+button.danger.solid { background: var(--err); color: #fff; }
 input[type=text], input[type=password], select, textarea { font: inherit; padding: 6px 8px; border-radius: 6px;
   border: 1px solid var(--line); background: var(--bg); color: var(--text); }
 textarea { width: 100%; min-height: 420px; font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -59,6 +88,7 @@ textarea { width: 100%; min-height: 420px; font: 13px/1.45 ui-monospace, SFMono-
 @media (max-width: 760px) { .split { grid-template-columns: 1fr; } }
 .catalog dt { font-weight: 600; margin-top: 8px; }
 .catalog dd { margin: 0 0 4px; color: var(--muted); font-size: 13px; }
+pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; overflow-x: auto; font-size: 12px; }
 code { font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 label { cursor: pointer; }
 </style>
@@ -69,9 +99,9 @@ label { cursor: pointer; }
     <span class="brand">{% if not production %}[BETA] {% endif %}trading-bot <small>{{ version }} · {{ environment }}</small></span>
     {% if signed_in %}
     <nav>
-      <a href="{{ prefix }}/">Overview</a>
-      <a href="{{ prefix }}/tickers">Tickers</a>
-      <a href="{{ prefix }}/rules">Rules</a>
+      <a href="{{ prefix }}/" {% if active == "overview" %}aria-current="page"{% endif %}>Overview</a>
+      <a href="{{ prefix }}/tickers" {% if active == "tickers" %}aria-current="page"{% endif %}>Tickers</a>
+      <a href="{{ prefix }}/rules" {% if active == "rules" %}aria-current="page"{% endif %}>Rules</a>
     </nav>
     <form class="inline" method="post" action="{{ prefix }}/logout">
       <input type="hidden" name="csrf" value="{{ csrf }}">
@@ -83,7 +113,7 @@ label { cursor: pointer; }
 <main>
 {% if flash %}<div class="flash {{ flash.level }}">{{ flash.text }}</div>{% endif %}
 {% block content %}{% endblock %}
-<p class="muted">Signals only: this bot never places orders. Not financial advice.</p>
 </main>
+<footer>Signals only: this bot never places orders. Not financial advice. Times are shown in {{ zone }}.</footer>
 </body>
 </html>

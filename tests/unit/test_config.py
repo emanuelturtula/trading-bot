@@ -147,7 +147,7 @@ def test_a_malformed_chat_id_is_rejected_without_echoing_the_value() -> None:
 
 
 def test_the_display_zone_defaults_to_madrid_and_is_validated() -> None:
-    assert Settings(_env_file=None).display_zone.key == "Europe/Madrid"  # type: ignore[call-arg]
+    assert Settings(_env_file=None).display_zone.key == "America/Argentina/Buenos_Aires"  # type: ignore[call-arg]
     assert (
         Settings(
             _env_file=None,  # type: ignore[call-arg]

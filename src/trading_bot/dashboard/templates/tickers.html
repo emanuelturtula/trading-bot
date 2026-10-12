@@ -3,42 +3,44 @@
 {% block content %}
 <h1>Tickers</h1>
 <div class="panel">
-  <form method="post" action="{{ prefix }}/tickers" class="row">
+  <form method="post" action="{{ prefix }}/tickers" class="row" style="align-items:flex-end">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="text" name="symbol" placeholder="Symbol, e.g. AAPL" maxlength="32" required>
-    <select name="timeframe">
-      {% for timeframe in timeframes %}<option value="{{ timeframe }}" {% if timeframe == "1d" %}selected{% endif %}>{{ timeframe }}</option>{% endfor %}
-    </select>
+    <div>
+      <label class="field" for="symbol">Symbol</label>
+      <input type="text" id="symbol" name="symbol" class="symbol-input" placeholder="e.g. AAPL" maxlength="32" autocapitalize="characters" autocomplete="off" required>
+    </div>
+    <div>
+      <label class="field" for="timeframe">Timeframe</label>
+      <select id="timeframe" name="timeframe">
+        {% for option in options %}<option value="{{ option.code }}" {% if option.code == "1d" %}selected{% endif %}>{{ option.code }} · {% if option.rules %}{{ option.rules }} enabled rule{{ '' if option.rules == 1 else 's' }}{% else %}no enabled rule{% endif %}</option>{% endfor %}
+      </select>
+    </div>
     <button type="submit" class="primary">Watch</button>
   </form>
-  <p class="muted" style="margin:8px 0 0">The symbol is checked with the market data provider and gets every rule of that timeframe, as Telegram <code>/add</code> does.</p>
+  <p class="muted" style="margin:10px 0 0">The symbol is checked with the market data provider. A new ticker gets every rule of its timeframe, as Telegram <code>/add</code> does; open a ticker to change which rules run on it. A timeframe with no enabled rule sends no signal.</p>
 </div>
 <div class="panel table-wrap">
   {% if rows %}
   <table>
-    <tr><th>Symbol</th><th>Timeframe</th><th>State</th><th>Rules</th><th></th></tr>
+    <tr><th>Symbol</th><th>TF</th><th>State</th><th>Rules</th><th></th></tr>
     {% for row in rows %}
     {% set ticker = row.ticker %}
     <tr>
-      <td><a href="{{ prefix }}/tickers/{{ ticker.id }}">{{ ticker.symbol }}</a></td>
+      <td><a class="plain" href="{{ prefix }}/tickers/{{ ticker.id }}">{{ ticker.symbol }}</a></td>
       <td>{{ ticker.timeframe.value }}</td>
-      <td>{% if ticker.enabled %}<span class="on">on</span>{% else %}<span class="off">off</span>{% endif %}</td>
-      <td>{{ row.assigned }} <span class="muted">({{ row.enabled_rules }} enabled)</span></td>
       <td>
-        <div class="actions">
-          <a class="button" href="{{ prefix }}/tickers/{{ ticker.id }}">Rules</a>
-          <form class="inline" method="post" action="{{ prefix }}/tickers/{{ ticker.id }}/{{ 'disable' if ticker.enabled else 'enable' }}">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <button type="submit">{{ 'Stop' if ticker.enabled else 'Watch again' }}</button>
-          </form>
-          <a class="button" href="{{ prefix }}/tickers/{{ ticker.id }}/delete">Delete</a>
-        </div>
+        <form class="inline" method="post" action="{{ prefix }}/tickers/{{ ticker.id }}/{{ 'disable' if ticker.enabled else 'enable' }}">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="badge {{ 'on' if ticker.enabled else 'off' }}" title="{{ 'Click to stop watching it' if ticker.enabled else 'Click to watch it again' }}" aria-label="{{ 'Stop watching' if ticker.enabled else 'Watch again' }} {{ ticker.symbol }} {{ ticker.timeframe.value }}">{{ 'On' if ticker.enabled else 'Off' }}</button>
+        </form>
       </td>
+      <td>{{ row.enabled_rules }} enabled{% if row.assigned > row.enabled_rules %} <span class="muted hide-narrow">· {{ row.assigned - row.enabled_rules }} disabled</span>{% endif %}{% if row.enabled_rules == 0 %} <span class="muted">· no signal</span>{% endif %}</td>
+      <td class="end"><a class="button danger" href="{{ prefix }}/tickers/{{ ticker.id }}/delete">Delete</a></td>
     </tr>
     {% endfor %}
   </table>
   {% else %}
-  <p class="muted">No symbol is watched yet.</p>
+  <p>No symbol is watched yet. Type one above, for example <code>AAPL</code>, <code>MSFT</code> or <code>SPY</code>, and press Watch.</p>
   {% endif %}
 </div>
 {% endblock %}

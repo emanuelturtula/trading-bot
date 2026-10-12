@@ -6,31 +6,27 @@
 <div class="panel table-wrap">
   {% if rows %}
   <table>
-    <tr><th>Name</th><th>Timeframe</th><th>Side</th><th>State</th><th>Tickers</th><th></th></tr>
+    <tr><th>Name</th><th>TF</th><th>Side</th><th>State</th><th class="hide-narrow">Tickers</th><th></th></tr>
     {% for row in rows %}
     {% set stored = row.rule %}
     <tr>
-      <td><a href="{{ prefix }}/rules/{{ stored.id }}">{{ stored.name }}</a></td>
+      <td><a class="plain" href="{{ prefix }}/rules/{{ stored.id }}">{{ stored.name }}</a></td>
       <td>{{ stored.rule.timeframe.value }}</td>
-      <td>{{ stored.rule.signal.value }}</td>
-      <td>{% if stored.enabled %}<span class="on">on</span>{% else %}<span class="off">off</span>{% endif %}</td>
-      <td>{{ row.tickers }}</td>
+      <td><span class="side-{{ stored.rule.signal.value | lower }}">{{ stored.rule.signal.value }}</span></td>
       <td>
-        <div class="actions">
-          <a class="button" href="{{ prefix }}/rules/{{ stored.id }}">Edit</a>
-          <form class="inline" method="post" action="{{ prefix }}/rules/{{ stored.id }}/{{ 'disable' if stored.enabled else 'enable' }}">
-            <input type="hidden" name="csrf" value="{{ csrf }}">
-            <button type="submit">{{ 'Disable' if stored.enabled else 'Enable' }}</button>
-          </form>
-          <a class="button" href="{{ prefix }}/rules/{{ stored.id }}/delete">Delete</a>
-        </div>
+        <form class="inline" method="post" action="{{ prefix }}/rules/{{ stored.id }}/{{ 'disable' if stored.enabled else 'enable' }}">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <button type="submit" class="badge {{ 'on' if stored.enabled else 'off' }}" title="{{ 'Click to disable it' if stored.enabled else 'Click to enable it' }}" aria-label="{{ 'Disable' if stored.enabled else 'Enable' }} {{ stored.name }}">{{ 'On' if stored.enabled else 'Off' }}</button>
+        </form>
       </td>
+      <td class="hide-narrow">{{ row.tickers }}</td>
+      <td class="end"><a class="button danger" href="{{ prefix }}/rules/{{ stored.id }}/delete">Delete</a></td>
     </tr>
     {% endfor %}
   </table>
   {% else %}
-  <p class="muted">No rule is stored yet.</p>
+  <p>No rule is stored yet. <a href="{{ prefix }}/rules/new">Create the first one</a> from an example.</p>
   {% endif %}
 </div>
-<p class="muted">Which tickers a rule runs on is chosen on each ticker's page.</p>
+<p class="muted">A rule runs on the tickers of its timeframe it is assigned to. A new rule can be assigned to all of them when it is created, and a new ticker gets every rule of its timeframe; open a ticker to fine-tune its rules. Click On/Off to switch a rule; a disabled rule stays assigned but sends nothing.</p>
 {% endblock %}

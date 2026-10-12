@@ -240,7 +240,10 @@ def test_disabled_reason_is_logged_without_the_value(tmp_path: Path) -> None:
         app_logger.removeHandler(handler)
 
     messages = [record.getMessage() for record in records]
-    assert messages == ["dashboard disabled: the dashboard password hash is malformed"]
+    assert messages == [
+        "dashboard disabled: TB_DASHBOARD_PASSWORD_HASH is not a valid hash;"
+        " generate it with python -m trading_bot.dashboard.password"
+    ]
     assert all("!!!!" not in message for message in messages)
 
 

@@ -120,16 +120,17 @@ def _credentials(settings: Settings, logger: logging.Logger) -> _Credentials | N
             "dashboard disabled: TB_DASHBOARD_PASSWORD_HASH and TB_SESSION_SECRET are required"
         )
         return None
+    # Fixed messages only: nothing derived from either value reaches a log line (AC18).
     try:
         password = parse_password_hash(hash_value.get_secret_value())
-    except InvalidPasswordHashError as error:
-        logger.error("dashboard disabled: %s", error)  # the message never echoes the value
+    except InvalidPasswordHashError:
+        logger.error(
+            "dashboard disabled: TB_DASHBOARD_PASSWORD_HASH is not a valid hash;"
+            " generate it with python -m trading_bot.dashboard.password"
+        )
         return None
     if len(secret.get_secret_value()) < MIN_SESSION_SECRET_LENGTH:
-        logger.error(
-            "dashboard disabled: TB_SESSION_SECRET must have at least %d characters",
-            MIN_SESSION_SECRET_LENGTH,
-        )
+        logger.error("dashboard disabled: TB_SESSION_SECRET must have at least 32 characters")
         return None
     signer = SessionSigner(secret.get_secret_value(), hash_value.get_secret_value().strip())
     return _Credentials(password=password, signer=signer)

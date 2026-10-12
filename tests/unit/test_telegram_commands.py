@@ -189,6 +189,15 @@ def test_add_with_a_timeframe_assigns_only_its_rules(bot: Harness, database: Dat
     )
 
 
+def test_add_accepts_the_weekly_timeframe(bot: Harness) -> None:
+    reply = bot.reply("/add AAPL 1w")
+
+    assert reply == (
+        "Watching <b>AAPL</b> (Apple Inc.) on 1w with 0 rules (0 enabled).\n"
+        "No enabled 1w rule yet: no signal will be sent for it."
+    )
+
+
 def test_add_warns_when_no_enabled_rule_exists(bot: Harness) -> None:
     reply = bot.reply("/add SPY 4h")
 
@@ -222,10 +231,10 @@ def test_add_re_enables_a_removed_ticker(bot: Harness, database: Database) -> No
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("/add", "Usage: /add TICKER [1h|4h|1d], for example /add AAPL 1d"),
-        ("/add A B C", "Usage: /add TICKER [1h|4h|1d], for example /add AAPL 1d"),
-        ("/add AAPL 1w", "Unknown timeframe 1w. Use 1h, 4h or 1d."),
-        ("/add AAPL <i>", "Unknown timeframe &lt;i&gt;. Use 1h, 4h or 1d."),
+        ("/add", "Usage: /add TICKER [1h|4h|1d|1w], for example /add AAPL 1d"),
+        ("/add A B C", "Usage: /add TICKER [1h|4h|1d|1w], for example /add AAPL 1d"),
+        ("/add AAPL 1mo", "Unknown timeframe 1mo. Use 1h, 4h, 1d or 1w."),
+        ("/add AAPL <i>", "Unknown timeframe &lt;i&gt;. Use 1h, 4h, 1d or 1w."),
         ("/add MSFT", "MSFT was not found."),
         ("/add <i>", "&lt;i&gt; was not found."),
         (
@@ -245,7 +254,7 @@ def test_add_explains_what_is_wrong(
 def test_a_long_argument_is_truncated_in_the_reply(bot: Harness) -> None:
     reply = bot.reply("/add AAPL " + "x" * 100)
 
-    assert reply == f"Unknown timeframe {'x' * 32}…. Use 1h, 4h or 1d."
+    assert reply == f"Unknown timeframe {'x' * 32}…. Use 1h, 4h, 1d or 1w."
 
 
 def test_add_explains_a_malformed_symbol(bot: Harness) -> None:
@@ -311,10 +320,10 @@ def test_remove_with_a_timeframe_disables_only_that_one(bot: Harness, database: 
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
-        ("/remove", "Usage: /remove TICKER [1h|4h|1d]"),
+        ("/remove", "Usage: /remove TICKER [1h|4h|1d|1w]"),
         ("/remove MSFT", "MSFT is not watched."),
         ("/remove MSFT 4h", "MSFT is not watched on 4h."),
-        ("/remove AAPL 2d", "Unknown timeframe 2d. Use 1h, 4h or 1d."),
+        ("/remove AAPL 2d", "Unknown timeframe 2d. Use 1h, 4h, 1d or 1w."),
         ("/remove <b>", "&lt;B&gt; is not watched."),
     ],
 )
@@ -380,7 +389,8 @@ def test_status_shows_version_runs_and_next_fires_in_the_display_zone(
         "Running · 1 enabled ticker\n"
         "1h: last candle never · next run 2026-03-02 17:30 CET\n"
         "4h: last candle never · next run not scheduled\n"
-        "1d: last candle 2026-02-27 22:00 CET · next run 2026-03-02 22:00 CET"
+        "1d: last candle 2026-02-27 22:00 CET · next run 2026-03-02 22:00 CET\n"
+        "1w: last candle never · next run not scheduled"
     )
 
 

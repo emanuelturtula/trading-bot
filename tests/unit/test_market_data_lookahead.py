@@ -44,13 +44,19 @@ CALENDAR_REJECTIONS: dict[Timeframe, tuple[tuple[str, DropReason], ...]] = {
         ("2024-07-04T04:00", DropReason.NOT_A_SESSION),
         ("2024-07-03T00:00", DropReason.OFF_GRID),
     ),
+    Timeframe.W1: (
+        ("2024-07-06T04:00", DropReason.NOT_A_SESSION),  # a Saturday
+        ("2024-07-02T04:00", DropReason.OFF_GRID),  # a session day, not the week's first
+    ),
 }
 
 
 @cache
 def grid_frame(timeframe: Timeframe) -> pd.DataFrame:
-    """Grid candles with labels from 2024-06-24T00:00Z to 2024-07-10T00:00Z."""
-    return session_candles(NYSE, timeframe, utc("2024-06-24T00:00"), utc("2024-07-10T00:00"))
+    """Grid candles with labels from 2024-06-24T00:00Z (``1w``: 2024-04-01T00:00Z, for enough
+    rows) to 2024-07-10T00:00Z."""
+    start = "2024-04-01T00:00" if timeframe is Timeframe.W1 else "2024-06-24T00:00"
+    return session_candles(NYSE, timeframe, utc(start), utc("2024-07-10T00:00"))
 
 
 def raw_with_bad_rows(timeframe: Timeframe) -> pd.DataFrame:
@@ -106,7 +112,7 @@ def test_the_raw_frame_mixes_valid_rows_with_every_harness_compatible_reason(
         DropReason.NEGATIVE_VOLUME,
         DropReason.INCONSISTENT_RANGE,
     }
-    if timeframe is not Timeframe.D1:
+    if timeframe not in (Timeframe.D1, Timeframe.W1):
         expected.add(DropReason.OUTSIDE_SESSION)
     assert {row.reason for row in result.dropped} == expected
     assert len(result.candles) == len(grid_frame(timeframe)) - 5

@@ -43,7 +43,7 @@ CREATE TABLE tickers (
     user_id INTEGER NOT NULL,
     CONSTRAINT uq_tickers_user_id_symbol_timeframe UNIQUE (user_id, symbol, timeframe),
     CONSTRAINT uq_tickers_id_timeframe UNIQUE (id, timeframe),
-    CONSTRAINT ck_tickers_timeframe CHECK (timeframe IN ('1h', '4h', '1d')),
+    CONSTRAINT ck_tickers_timeframe CHECK (timeframe IN ('1h', '4h', '1d', '1w')),
     CONSTRAINT fk_tickers_user_id_users FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
 )
 """,
@@ -60,7 +60,7 @@ CREATE TABLE rules (
     user_id INTEGER NOT NULL,
     CONSTRAINT uq_rules_user_id_name UNIQUE (user_id, name),
     CONSTRAINT uq_rules_id_timeframe UNIQUE (id, timeframe),
-    CONSTRAINT ck_rules_timeframe CHECK (timeframe IN ('1h', '4h', '1d')),
+    CONSTRAINT ck_rules_timeframe CHECK (timeframe IN ('1h', '4h', '1d', '1w')),
     CONSTRAINT ck_rules_signal CHECK (signal IN ('BUY', 'SELL')),
     CONSTRAINT fk_rules_user_id_users FOREIGN KEY(user_id) REFERENCES users (id) ON DELETE CASCADE
 )
@@ -98,7 +98,7 @@ CREATE TABLE signals (
         FOREIGN KEY(ticker_id, timeframe) REFERENCES tickers (id, timeframe) ON DELETE CASCADE,
     CONSTRAINT fk_signals_rule_id_rules
         FOREIGN KEY(rule_id) REFERENCES rules (id) ON DELETE CASCADE,
-    CONSTRAINT ck_signals_timeframe CHECK (timeframe IN ('1h', '4h', '1d')),
+    CONSTRAINT ck_signals_timeframe CHECK (timeframe IN ('1h', '4h', '1d', '1w')),
     CONSTRAINT ck_signals_side CHECK (side IN ('BUY', 'SELL')),
     CONSTRAINT ck_signals_close_price CHECK (close_price > 0)
 )
@@ -111,7 +111,7 @@ CREATE TABLE bot_state (
     updated_at DATETIME NOT NULL,
     CONSTRAINT pk_bot_state PRIMARY KEY ("key"),
     CONSTRAINT ck_bot_state_key CHECK (key IN ('paused_since', 'last_heartbeat',
-        'last_run.1h', 'last_run.4h', 'last_run.1d'))
+        'last_run.1h', 'last_run.4h', 'last_run.1d', 'last_run.1w'))
 )
 """
 
@@ -282,8 +282,8 @@ def test_a_raw_string_cannot_reach_the_state_key_column_through_the_orm() -> Non
 
 
 def test_a_state_key_the_database_should_never_hold_raises_at_the_boundary() -> None:
-    with pytest.raises(ValueError, match=r"last_run\.1w"):
-        StateKeyType().process_result_value("last_run.1w", DIALECT)
+    with pytest.raises(ValueError, match=r"last_run\.1mo"):
+        StateKeyType().process_result_value("last_run.1mo", DIALECT)
 
 
 # --- AC1: the tables, their columns and their constraints ----------------------------------
@@ -742,7 +742,7 @@ def test_a_signal_that_breaks_a_check_is_refused_by_the_database(
         )
 
 
-@pytest.mark.parametrize("key", ["paused", "last_run.1w", "PAUSED_SINCE", ""])
+@pytest.mark.parametrize("key", ["paused", "last_run.1mo", "PAUSED_SINCE", ""])
 def test_a_state_key_outside_the_vocabulary_is_refused_by_the_database(
     database: Database, key: str
 ) -> None:
@@ -752,7 +752,14 @@ def test_a_state_key_outside_the_vocabulary_is_refused_by_the_database(
 
 def test_every_state_key_of_the_vocabulary_is_accepted_once(database: Database) -> None:
     with database.engine.begin() as connection:
-        for key in ("paused_since", "last_heartbeat", "last_run.1h", "last_run.4h", "last_run.1d"):
+        for key in (
+            "paused_since",
+            "last_heartbeat",
+            "last_run.1h",
+            "last_run.4h",
+            "last_run.1d",
+            "last_run.1w",
+        ):
             insert_state(connection, key)
 
     with (

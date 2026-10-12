@@ -27,7 +27,7 @@ from trading_bot.persistence.migrator import (
 from trading_bot.persistence.models import Base
 
 PREVIOUS = "0002"
-HEAD = "0005"  # specs 023 and 024 built on this revision
+HEAD = "0006"  # specs 023, 024 and 028 built on this revision
 THIS = "0003"
 NEXT = "0004"
 REVISION_ID = re.compile(r"^[0-9]{4}$")
@@ -178,7 +178,7 @@ def test_an_empty_database_is_upgraded_to_0003(
         assert current_revision(engine) == HEAD
         assert stored_revisions(engine) == [HEAD]
         assert table_names(engine) == ALL_TABLES
-        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0005"]
+        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0006"]
     finally:
         engine.dispose()
 
@@ -194,7 +194,7 @@ def test_a_second_run_is_a_no_op(tmp_path: Path, caplog: pytest.LogCaptureFixtur
 
         assert stored_revisions(engine) == [HEAD]
         assert table_names(engine) == ALL_TABLES
-        assert migrator_messages(caplog) == ["database schema already at revision 0005"]
+        assert migrator_messages(caplog) == ["database schema already at revision 0006"]
     finally:
         engine.dispose()
 

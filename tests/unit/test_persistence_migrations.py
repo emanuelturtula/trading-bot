@@ -27,7 +27,7 @@ from trading_bot.persistence.migrator import (
 MIGRATOR_LOGGER = "trading_bot.persistence.migrator"
 REVISION_ID = re.compile(r"^[0-9]{4}$")
 BASELINE = "0001"
-HEAD = "0005"
+HEAD = "0006"
 HEAD_TABLES = ["bot_state", "rules", "signals", "ticker_rules", "tickers", "users"]
 
 
@@ -72,7 +72,14 @@ def test_every_revision_identifier_is_four_digits_and_the_chain_is_linear() -> N
     script = ScriptDirectory.from_config(alembic_config())
     revisions = list(script.walk_revisions())
 
-    assert [revision.revision for revision in revisions] == [HEAD, "0004", "0003", "0002", BASELINE]
+    assert [revision.revision for revision in revisions] == [
+        HEAD,
+        "0005",
+        "0004",
+        "0003",
+        "0002",
+        BASELINE,
+    ]
     for revision in revisions:
         assert REVISION_ID.match(revision.revision), revision.revision
         assert revision.down_revision is None or REVISION_ID.match(str(revision.down_revision))
@@ -140,7 +147,7 @@ def test_the_first_upgrade_reaches_the_head_revision(
         assert current_revision(engine) == HEAD
         assert stored_revisions(engine) == [HEAD]
         assert table_names(engine) == ["alembic_version", *HEAD_TABLES]
-        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0005"]
+        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0006"]
     finally:
         engine.dispose()
 
@@ -157,7 +164,7 @@ def test_a_second_upgrade_is_a_no_op(tmp_path: Path, caplog: pytest.LogCaptureFi
         assert revision == HEAD
         assert stored_revisions(engine) == [HEAD]
         assert table_names(engine) == ["alembic_version", *HEAD_TABLES]
-        assert migrator_messages(caplog) == ["database schema already at revision 0005"]
+        assert migrator_messages(caplog) == ["database schema already at revision 0006"]
     finally:
         engine.dispose()
 

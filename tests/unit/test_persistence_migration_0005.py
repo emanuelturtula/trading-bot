@@ -119,12 +119,11 @@ def owners(engine: Engine, table: str) -> list[int]:
         return [int(value) for value in found.scalars().all()]
 
 
-def test_0005_is_the_head_and_follows_0004() -> None:
+def test_0005_follows_0004() -> None:
     script = ScriptDirectory.from_config(alembic_config())
 
-    assert script.get_heads() == [THIS]
-    assert head_revision() == THIS
     assert script.get_revision(THIS).down_revision == PREVIOUS
+    assert head_revision() >= THIS
 
 
 def test_the_existing_rows_go_to_the_first_administrator(tmp_path: Path) -> None:
@@ -141,7 +140,7 @@ def test_the_existing_rows_go_to_the_first_administrator(tmp_path: Path) -> None
             sequences(engine),
         )
 
-        assert run_migrations(engine) == THIS
+        assert run_migrations(engine) == head_revision()
 
         assert rows(engine, PARENT_QUERIES) == parents
         assert rows(engine, CHILD_QUERIES) == children
@@ -200,6 +199,8 @@ def test_the_stored_ddl_matches_the_models(tmp_path: Path, table: str) -> None:
 
         stored = scalar(engine, f"SELECT sql FROM sqlite_master WHERE name = '{table}'")  # noqa: S608
         rendered = str(CreateTable(Base.metadata.tables[table]).compile(dialect=engine.dialect))
+        # Revision 0006 (spec 028) widened the timeframe check; 0005 stored the narrower one.
+        rendered = rendered.replace("'1d', '1w'", "'1d'")
         assert " ".join(str(stored).split()) == " ".join(rendered.split())
     finally:
         engine.dispose()
@@ -263,6 +264,6 @@ def test_downgrade_to_0004_drops_the_owner_and_keeps_every_row(tmp_path: Path) -
             scalar(engine, "SELECT sql FROM sqlite_master WHERE name = 'tickers'")
         )
         assert rows(engine, ("PRAGMA foreign_key_check",)) == []
-        assert run_migrations(engine) == THIS
+        assert run_migrations(engine) == head_revision()
     finally:
         engine.dispose()

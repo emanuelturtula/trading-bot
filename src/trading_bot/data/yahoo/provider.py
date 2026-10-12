@@ -6,7 +6,9 @@ transport, and finishes with ``prepare_candles``. ``4h`` candles are built from 
 hourly bars on the session grid (``resample_hourly_to_4h``); the last ``4h`` slot closed at
 ``now`` is withheld while its closing hourly bar is missing (``publishable_4h``), except for the
 truncated final half hour of an early-close session, which Yahoo never publishes
-(``is_unpublished_hour``). ``validate_ticker`` reads the chart metadata of a one-month daily
+(``is_unpublished_hour``). ``1w`` candles are built the same way from normalized daily bars
+(``resample_daily_to_1w``, spec 028); the last week is withheld while the daily bar of its last
+session is missing. ``validate_ticker`` reads the chart metadata of a one-month daily
 request and applies the v1 instrument policy.
 
 Everything after the client call runs in its own worker thread (``_prepare``, decision D67), so
@@ -43,7 +45,11 @@ from trading_bot.data.transport import ProviderTransport
 from trading_bot.data.yahoo.history import HistoryQuery, YahooClient, YahooInterval
 from trading_bot.data.yahoo.instruments import check_yahoo_symbol, ticker_info
 from trading_bot.domain.candle_normalization import CandleNormalizationError, normalize_candles
-from trading_bot.domain.candle_resampling import ResampledCandles, resample_hourly_to_4h
+from trading_bot.domain.candle_resampling import (
+    ResampledCandles,
+    resample_daily_to_1w,
+    resample_hourly_to_4h,
+)
 from trading_bot.domain.market_calendar.sessions import CandleSlot, MarketCalendar
 from trading_bot.domain.timeframe import Timeframe
 
@@ -53,6 +59,7 @@ __all__ = [
     "YFinanceProvider",
     "is_unpublished_hour",
     "plan_history",
+    "publishable_1w",
     "publishable_4h",
 ]
 
@@ -63,11 +70,13 @@ _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 _ONE_HOUR: Final = timedelta(hours=1)
 _REGULAR_CLOSE: Final = time(16, 0)
 _CAPPED_MESSAGE: Final = "Yahoo history for %s %s capped: requested from %s, available from %s"
-_WITHHELD_MESSAGE: Final = "withheld %s %s candle %s: hourly bar %s is missing"
+_WITHHELD_MESSAGE: Final = "withheld %s %s candle %s: %s bar %s is missing"
 _EARLIER_GAPS_MESSAGE: Final = (
-    "built %d earlier %s %s candles from incomplete hourly bars (first %s, last %s)"
+    "built %d earlier %s %s candles from incomplete %s bars (first %s, last %s)"
 )
-_FINAL_GAP_MESSAGE: Final = "built %s %s candle %s from %d of %d hourly bars (missing %s)"
+_FINAL_GAP_MESSAGE: Final = "built %s %s candle %s from %d of %d %s bars (missing %s)"
+# The timeframe each resampled timeframe is built from, and the word its logs use for it.
+_SOURCES: Final = {Timeframe.H4: (Timeframe.H1, "hourly"), Timeframe.W1: (Timeframe.D1, "daily")}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -84,9 +93,9 @@ def plan_history(request: CandleRequest, *, calendar: MarketCalendar) -> History
     """The interval and start of the Yahoo request for ``request`` (Design 10.1).
 
     The start is the label of the first slot of ``candle_window`` (``CalendarRangeError``
-    propagates). ``1d`` is never capped. For ``1h`` and ``4h`` a start before
-    ``request.now - INTRADAY_HISTORY`` becomes the label of the first slot of the timeframe at or
-    after that instant, and the plan is ``capped``.
+    propagates). ``1d`` and ``1w`` (built from daily bars) ask for ``1d`` and are never capped.
+    For ``1h`` and ``4h`` a start before ``request.now - INTRADAY_HISTORY`` becomes the label of
+    the first slot of the timeframe at or after that instant, and the plan is ``capped``.
     """
     if not isinstance(request, CandleRequest):
         raise TypeError(f"request must be a CandleRequest, got {type(request).__name__}")
@@ -94,7 +103,7 @@ def plan_history(request: CandleRequest, *, calendar: MarketCalendar) -> History
         raise TypeError(f"calendar must be a MarketCalendar, got {type(calendar).__name__}")
     window = candle_window(request, calendar=calendar)
     requested = window.first.label
-    if request.timeframe is Timeframe.D1:
+    if request.timeframe in (Timeframe.D1, Timeframe.W1):
         return HistoryPlan(interval="1d", start=requested, requested_start=requested, capped=False)
     earliest = request.now - INTRADAY_HISTORY
     if requested >= earliest:
@@ -150,6 +159,25 @@ def publishable_4h(
     if is_unpublished_hour(hours[-1], calendar=calendar) and hours[-2].label not in entry.missing:
         return resampled.candles
     return resampled.candles.iloc[:-1]
+
+
+def publishable_1w(resampled: ResampledCandles, *, last: CandleSlot) -> pd.DataFrame:
+    """The resampled ``1w`` candles without an unpublished last week (spec 028).
+
+    The row of ``last`` (the last ``1w`` slot closed at ``now``) is removed while the daily bar
+    of its last session is missing; otherwise ``resampled.candles`` is returned.
+    """
+    if not isinstance(resampled, ResampledCandles):
+        raise TypeError(f"resampled must be a ResampledCandles, got {type(resampled).__name__}")
+    if not isinstance(last, CandleSlot):
+        raise TypeError(f"last must be a CandleSlot, got {type(last).__name__}")
+    if (
+        resampled.slots
+        and resampled.slots[-1].slot == last
+        and resampled.slots[-1].closing_bar_missing
+    ):
+        return resampled.candles.iloc[:-1]
+    return resampled.candles
 
 
 class YFinanceProvider:
@@ -231,51 +259,67 @@ class YFinanceProvider:
     def _prepare(self, frame: pd.DataFrame, request: CandleRequest, symbol: str) -> pd.DataFrame:
         """The post-fetch processing (Design 10.2, step 7), run in a worker thread (D67).
 
-        ``1h`` and ``1d`` only run ``prepare_candles``; ``4h`` normalizes the hourly frame, logs
-        its dropped rows as ``1h``, resamples, withholds an unpublished last slot, logs the gaps
-        and then runs ``prepare_candles``. It reads no clock and touches no yfinance state.
+        ``1h`` and ``1d`` only run ``prepare_candles``; ``4h`` and ``1w`` normalize the source
+        frame (hourly or daily), log its dropped rows under the source timeframe, resample,
+        withhold an unpublished last slot, log the gaps and then run ``prepare_candles``. It reads
+        no clock and touches no yfinance state.
         """
-        if request.timeframe is not Timeframe.H4:
+        if request.timeframe not in _SOURCES:
             return prepare_candles(frame, request, calendar=self._calendar)
         return prepare_candles(
-            self._build_4h(frame, request, symbol), request, calendar=self._calendar
+            self._build_resampled(frame, request, symbol), request, calendar=self._calendar
         )
 
-    def _build_4h(self, frame: pd.DataFrame, request: CandleRequest, symbol: str) -> pd.DataFrame:
-        """Design 10.2, steps 7.2 to 7.6, with the records of Design 10.5."""
+    def _build_resampled(
+        self, frame: pd.DataFrame, request: CandleRequest, symbol: str
+    ) -> pd.DataFrame:
+        """Design 10.2, steps 7.2 to 7.6, with the records of Design 10.5 (``1w``: spec 028)."""
         calendar = self._calendar
+        target = request.timeframe
+        source, _ = _SOURCES[target]
         try:
-            hourly = normalize_candles(frame, Timeframe.H1, calendar=calendar)
+            normalized = normalize_candles(frame, source, calendar=calendar)
         except CandleNormalizationError as error:
             column = "" if error.column is None else f" (column {error.column})"
             raise ProviderDataError(
                 error.kind.value,
                 f"the provider response cannot be normalized{column}",
                 ticker=symbol,
-                timeframe=Timeframe.H4,
+                timeframe=target,
             ) from None
         log_dropped_rows(
-            hourly.dropped,
+            normalized.dropped,
             ticker=symbol,
-            timeframe=Timeframe.H1,
-            last_label=calendar.closed_candles(Timeframe.H1, request.now, 1)[-1].label,
+            timeframe=source,
+            last_label=calendar.closed_candles(source, request.now, 1)[-1].label,
         )
-        resampled = resample_hourly_to_4h(hourly.candles, request.now, calendar=calendar)
-        last = calendar.closed_candles(Timeframe.H4, request.now, 1)[-1]
-        publishable = publishable_4h(resampled, last=last, calendar=calendar)
-        self._log_4h(symbol, resampled, len(publishable), last)
+        last = calendar.closed_candles(target, request.now, 1)[-1]
+        if target is Timeframe.H4:
+            resampled = resample_hourly_to_4h(normalized.candles, request.now, calendar=calendar)
+            publishable = publishable_4h(resampled, last=last, calendar=calendar)
+        else:
+            resampled = resample_daily_to_1w(normalized.candles, request.now, calendar=calendar)
+            publishable = publishable_1w(resampled, last=last)
+        self._log_resampled(symbol, target, resampled, len(publishable), last)
         return publishable
 
-    def _log_4h(
-        self, symbol: str, resampled: ResampledCandles, returned: int, last: CandleSlot
+    def _log_resampled(
+        self,
+        symbol: str,
+        timeframe: Timeframe,
+        resampled: ResampledCandles,
+        returned: int,
+        last: CandleSlot,
     ) -> None:
-        code = Timeframe.H4.value
+        code = timeframe.value
+        _, word = _SOURCES[timeframe]
         if returned < len(resampled.slots):
             self._logger.debug(
                 _WITHHELD_MESSAGE,
                 symbol,
                 code,
                 last.label.isoformat(),
+                word,
                 resampled.slots[-1].missing[-1].isoformat(),
             )
         entries = resampled.slots[:returned]
@@ -283,7 +327,7 @@ class YFinanceProvider:
         earlier = [
             entry
             for entry in entries
-            if entry is not final and self._relevant_missing(entry.missing)
+            if entry is not final and self._relevant_missing(timeframe, entry.missing)
         ]
         if earlier:
             self._logger.debug(
@@ -291,10 +335,11 @@ class YFinanceProvider:
                 len(earlier),
                 symbol,
                 code,
+                word,
                 earlier[0].slot.label.isoformat(),
                 earlier[-1].slot.label.isoformat(),
             )
-        if final is not None and (missing := self._relevant_missing(final.missing)):
+        if final is not None and (missing := self._relevant_missing(timeframe, final.missing)):
             self._logger.warning(
                 _FINAL_GAP_MESSAGE,
                 symbol,
@@ -302,11 +347,16 @@ class YFinanceProvider:
                 final.slot.label.isoformat(),
                 final.bars,
                 final.bars + len(final.missing),
+                word,
                 ", ".join(label.isoformat() for label in missing),
             )
 
-    def _relevant_missing(self, missing: tuple[datetime, ...]) -> list[datetime]:
-        """The missing hours Yahoo would have published: unpublished hours are not gaps."""
+    def _relevant_missing(
+        self, timeframe: Timeframe, missing: tuple[datetime, ...]
+    ) -> list[datetime]:
+        """The missing bars Yahoo would have published: unpublished hours are not gaps."""
+        if timeframe is Timeframe.W1:
+            return list(missing)  # Yahoo publishes every session's daily bar
         return [
             label
             for label in missing

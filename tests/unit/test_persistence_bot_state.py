@@ -41,13 +41,14 @@ def stored_rows(database: Database) -> list[tuple[str, str, str]]:
 # --- AC19: the closed vocabulary -----------------------------------------------------------
 
 
-def test_the_vocabulary_is_exactly_the_five_keys() -> None:
+def test_the_vocabulary_is_exactly_the_six_keys() -> None:
     assert [member.value for member in StateKey] == [
         "paused_since",
         "last_heartbeat",
         "last_run.1h",
         "last_run.4h",
         "last_run.1d",
+        "last_run.1w",
     ]
 
 
@@ -57,6 +58,7 @@ def test_the_vocabulary_is_exactly_the_five_keys() -> None:
         (Timeframe.H1, "last_run.1h"),
         (Timeframe.H4, "last_run.4h"),
         (Timeframe.D1, "last_run.1d"),
+        (Timeframe.W1, "last_run.1w"),
     ],
 )
 def test_every_timeframe_has_a_last_run_key(timeframe: Timeframe, key: str) -> None:
@@ -83,7 +85,7 @@ def test_a_key_outside_the_vocabulary_is_refused_by_the_database(database: Datab
     ):
         connection.exec_driver_sql(
             'INSERT INTO bot_state ("key", value, updated_at)'
-            " VALUES ('last_run.1w', '2024-07-05 20:00:00.000000', '2024-07-05 20:00:00.000000')"
+            " VALUES ('last_run.1mo', '2024-07-05 20:00:00.000000', '2024-07-05 20:00:00.000000')"
         )
 
 

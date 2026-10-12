@@ -50,8 +50,8 @@ _WATCH_VERBS: Final = {
 
 HELP_TEXT: Final = (
     "<b>Commands</b>\n"
-    "/add TICKER [1h|4h|1d] - watch a symbol (default 1d) with every rule of that timeframe\n"
-    "/remove TICKER [1h|4h|1d] - stop watching it; its history is kept\n"
+    "/add TICKER [1h|4h|1d|1w] - watch a symbol (default 1d) with every rule of that timeframe\n"
+    "/remove TICKER [1h|4h|1d|1w] - stop watching it; its history is kept\n"
     "/list - the watched symbols\n"
     "/rules - the stored rules\n"
     "/status - what the bot is doing\n"
@@ -148,10 +148,10 @@ class CommandHandler:
 
     async def _add(self, args: tuple[str, ...]) -> str:
         if not 1 <= len(args) <= 2:
-            return "Usage: /add TICKER [1h|4h|1d], for example /add AAPL 1d"
+            return "Usage: /add TICKER [1h|4h|1d|1w], for example /add AAPL 1d"
         timeframe = _timeframe(args[1]) if len(args) == 2 else _DEFAULT_TIMEFRAME
         if timeframe is None:
-            return f"Unknown timeframe {_echo(args[1])}. Use 1h, 4h or 1d."
+            return f"Unknown timeframe {_echo(args[1])}. Use 1h, 4h, 1d or 1w."
         try:
             info = await self._provider.validate_ticker(args[0])
         except InvalidTickerError as error:
@@ -167,7 +167,7 @@ class CommandHandler:
 
     async def _remove(self, args: tuple[str, ...]) -> str:
         if not 1 <= len(args) <= 2:
-            return "Usage: /remove TICKER [1h|4h|1d]"
+            return "Usage: /remove TICKER [1h|4h|1d|1w]"
         try:
             symbol = normalize_ticker(args[0])
         except ValueError:
@@ -176,7 +176,7 @@ class CommandHandler:
         if len(args) == 2:
             timeframe = _timeframe(args[1])
             if timeframe is None:
-                return f"Unknown timeframe {_echo(args[1])}. Use 1h, 4h or 1d."
+                return f"Unknown timeframe {_echo(args[1])}. Use 1h, 4h, 1d or 1w."
 
         def work(repositories: CommandRepositories) -> str:
             return _disable_ticker(repositories, symbol, timeframe)

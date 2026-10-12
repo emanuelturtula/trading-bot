@@ -222,10 +222,13 @@ class Dashboard:
     # --- plumbing ---------------------------------------------------------------------------
 
     def _candle(self, signal: Signal) -> str:
-        """The candle a signal fired on: its trading day, or its local open time (spec 027)."""
+        """The candle a signal fired on: its trading day, the week of its first trading day, or its
+        local open time (specs 027 and 028)."""
         label = signal.candle_close_ts - signal.timeframe.duration
         if signal.timeframe is Timeframe.D1:
             return label.astimezone(EXCHANGE_ZONE).date().isoformat()
+        if signal.timeframe is Timeframe.W1:
+            return f"week of {label.astimezone(EXCHANGE_ZONE).date().isoformat()}"
         return self._local(label)
 
     def _local(self, instant: datetime | None) -> str:
@@ -747,7 +750,9 @@ class Dashboard:
         text = _field(form, "symbol").strip()
         timeframe = _timeframe(_field(form, "timeframe"))
         if timeframe is None:
-            return _redirect("/tickers", flash="Unknown timeframe. Use 1h, 4h or 1d.", error=True)
+            return _redirect(
+                "/tickers", flash="Unknown timeframe. Use 1h, 4h, 1d or 1w.", error=True
+            )
         try:
             info = await self._provider(request).validate_ticker(text)
         except InvalidTickerError as error:

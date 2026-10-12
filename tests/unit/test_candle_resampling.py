@@ -109,6 +109,7 @@ def test_the_module_exports_exactly_the_spec_names() -> None:
     assert resampling_module.__all__ == [
         "ResampledCandles",
         "ResampledSlot",
+        "resample_daily_to_1w",
         "resample_hourly_to_4h",
     ]
 

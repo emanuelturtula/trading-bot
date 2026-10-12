@@ -92,7 +92,7 @@
       },
       grid: { vertLines: { color: line }, horzLines: { color: line } },
       rightPriceScale: { borderColor: line },
-      timeScale: { borderColor: line, timeVisible: data.timeframe !== "1d", secondsVisible: false },
+      timeScale: { borderColor: line, timeVisible: !["1d", "1w"].includes(data.timeframe), secondsVisible: false },
     });
     const candles = chart.addSeries(library.CandlestickSeries, {
       upColor: UP,

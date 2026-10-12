@@ -34,6 +34,7 @@ from trading_bot.domain.timeframe import Timeframe
 H1 = Timeframe.H1
 H4 = Timeframe.H4
 D1 = Timeframe.D1
+W1 = Timeframe.W1
 TOY = toy_calendar()
 NANOSECOND_TIMESTAMP = pd.Timestamp("2024-03-07 14:30:00.000000001", tz="UTC")
 
@@ -441,7 +442,12 @@ TOY_D1 = (
     slot(D1, "2024-03-11T04:00", "2024-03-11T20:00", opens="2024-03-11T13:30"),
     slot(D1, "2024-03-13T04:00", "2024-03-13T19:00", opens="2024-03-13T14:00"),
 )
-TOY_GRID = {H1: TOY_H1, H4: TOY_H4, D1: TOY_D1}
+# Spec 028: one slot per ISO week, from the first session's 1d label to the last session's close.
+TOY_W1 = (
+    slot(W1, "2024-03-07T05:00", "2024-03-08T18:00", opens="2024-03-07T14:30"),
+    slot(W1, "2024-03-11T04:00", "2024-03-13T19:00", opens="2024-03-11T13:30"),
+)
+TOY_GRID = {H1: TOY_H1, H4: TOY_H4, D1: TOY_D1, W1: TOY_W1}
 
 
 def all_boundaries() -> list[datetime]:
@@ -893,8 +899,10 @@ def test_candle_slot_outside_the_coverage_raises_calendar_range_error(
 )
 def test_next_candle_close_is_strictly_after_now(now: str, h1: str, h4: str, d1: str) -> None:
     results = {tf: TOY.next_candle_close(tf, utc(now)) for tf in Timeframe}
+    # The first week closes with the 2024-03-08 half day, the second on 2024-03-13.
+    w1 = "2024-03-08T18:00" if utc(now) < utc("2024-03-08T18:00") else "2024-03-13T19:00"
 
-    assert results == {H1: utc(h1), H4: utc(h4), D1: utc(d1)}
+    assert results == {H1: utc(h1), H4: utc(h4), D1: utc(d1), W1: utc(w1)}
     assert all(type(result) is datetime and result.tzinfo is UTC for result in results.values())
 
 

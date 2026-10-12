@@ -13,12 +13,13 @@ from trading_bot.domain.timeframe import Timeframe, UnknownTimeframeError
 # --- AC2: members and durations ----------------------------------------------------------
 
 
-def test_members_are_exactly_the_three_codes_in_order() -> None:
+def test_members_are_exactly_the_four_codes_in_order() -> None:
     assert issubclass(Timeframe, StrEnum)
     assert [(member.name, member.value) for member in Timeframe] == [
         ("H1", "1h"),
         ("H4", "4h"),
         ("D1", "1d"),
+        ("W1", "1w"),
     ]
 
 
@@ -28,6 +29,7 @@ def test_members_are_exactly_the_three_codes_in_order() -> None:
         (Timeframe.H1, "1h", timedelta(hours=1)),
         (Timeframe.H4, "4h", timedelta(hours=4)),
         (Timeframe.D1, "1d", timedelta(days=1)),
+        (Timeframe.W1, "1w", timedelta(days=7)),
     ],
 )
 def test_str_is_the_code_and_duration_matches(
@@ -77,7 +79,7 @@ def test_parse_returns_members_unchanged(member: Timeframe) -> None:
         "daily",
         "D",
         "15m",
-        "1w",
+        "1W",
         "1wk",
         "1mo",
         "",
@@ -92,7 +94,7 @@ def test_parse_rejects_other_spellings(text: str) -> None:
     assert isinstance(caught.value, ValueError)
     message = str(caught.value)
     assert repr(text[:32]) in message
-    assert "1h, 4h, 1d" in message
+    assert "1h, 4h, 1d, 1w" in message
 
 
 def test_unknown_timeframe_error_is_a_value_error() -> None:

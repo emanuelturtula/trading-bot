@@ -28,6 +28,7 @@ class StateKey(StrEnum):
     LAST_RUN_1H = "last_run.1h"
     LAST_RUN_4H = "last_run.4h"
     LAST_RUN_1D = "last_run.1d"
+    LAST_RUN_1W = "last_run.1w"
 
     @classmethod
     def last_run(cls, timeframe: Timeframe) -> StateKey:

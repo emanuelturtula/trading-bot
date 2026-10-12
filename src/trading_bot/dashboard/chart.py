@@ -25,8 +25,13 @@ from trading_bot.persistence.signal_records import StoredSignal
 
 __all__ = ["EXCHANGE_ZONE", "SHOWN_CANDLES", "chart_payload", "fetch_lookback"]
 
-SHOWN_CANDLES: Final = {Timeframe.D1: 250, Timeframe.H4: 300, Timeframe.H1: 300}
-EXCHANGE_ZONE: Final = ZoneInfo("America/New_York")  # daily candles are labeled by trading day
+SHOWN_CANDLES: Final = {
+    Timeframe.W1: 156,  # three years
+    Timeframe.D1: 250,
+    Timeframe.H4: 300,
+    Timeframe.H1: 300,
+}
+EXCHANGE_ZONE: Final = ZoneInfo("America/New_York")  # daily and weekly candles: by trading day
 PRICE_PANE_INDICATORS: Final = frozenset({"sma", "ema", "bbands"})  # drawn over the candles
 
 type Json = bool | int | float | str | list[Json] | dict[str, Json] | None
@@ -198,12 +203,13 @@ def _marker(time: Json, side: str, rule: str, recorded: bool) -> dict[str, Json]
 
 
 def _time(label: datetime, timeframe: Timeframe, zone: tzinfo) -> Json:
-    """A daily candle's trading day, or an intraday candle's open time shifted to ``zone``.
+    """A daily candle's trading day (for ``1w``, the week's first one), or an intraday candle's
+    open time shifted to ``zone``.
 
     Lightweight Charts draws UTC timestamps, so the zone offset is added to show local times.
     """
     stamp = pd.Timestamp(label)
-    if timeframe is Timeframe.D1:
+    if timeframe in (Timeframe.D1, Timeframe.W1):
         return stamp.tz_convert(EXCHANGE_ZONE).date().isoformat()
     offset = stamp.tz_convert(zone).utcoffset()
     seconds = int(offset.total_seconds()) if offset is not None else 0

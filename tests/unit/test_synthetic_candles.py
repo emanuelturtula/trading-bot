@@ -264,7 +264,12 @@ def test_default_start_is_a_monday_on_every_grid() -> None:
     start = pd.Timestamp(DEFAULT_START)
 
     assert start.dayofweek == 0
-    assert all(start == start.floor(duration(timeframe)) for timeframe in Timeframe)
+    assert all(
+        start == start.floor(duration(timeframe))
+        for timeframe in Timeframe
+        if timeframe.value != "1w"
+    )
+    assert start == start.floor("D")  # a Monday at 00:00 is also the start of a 1w slot
 
 
 # --- Shared assertion helpers fail loudly (AC17b) ----------------------------------------------

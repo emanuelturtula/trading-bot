@@ -24,6 +24,7 @@ class Timeframe(StrEnum):
     H1 = "1h"
     H4 = "4h"
     D1 = "1d"
+    W1 = "1w"
 
     @classmethod
     def parse(cls, value: str) -> Timeframe:
@@ -44,16 +45,18 @@ class Timeframe(StrEnum):
 
     @property
     def duration(self) -> timedelta:
-        """The fixed length of one candle."""
+        """The fixed length of one candle (for ``1w``, the length of a calendar week)."""
         match self:
             case Timeframe.H1:
                 return timedelta(hours=1)
             case Timeframe.H4:
                 return timedelta(hours=4)
+            case Timeframe.D1:
+                return timedelta(days=1)
             # mypy proves this match exhaustive ("Missing return statement" otherwise); coverage
             # cannot see that, so the impossible fall-through arc is excluded.
-            case Timeframe.D1:  # pragma: no branch
-                return timedelta(days=1)
+            case Timeframe.W1:  # pragma: no branch
+                return timedelta(weeks=1)
 
     def nominal_close(self, open_time: datetime) -> datetime:
         """``to_utc(open_time) + duration``: a calendar-free candle close used as an identifier.

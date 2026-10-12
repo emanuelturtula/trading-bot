@@ -23,7 +23,7 @@ from trading_bot.persistence.migrator import (
 from trading_bot.persistence.models import Base
 
 PREVIOUS = "0003"
-HEAD = "0005"
+HEAD = "0006"
 THIS = "0004"
 TIMESTAMP = "2026-01-02 03:04:05.000000"
 EXISTING_QUERIES = (
@@ -87,7 +87,7 @@ def test_0004_follows_0003_and_0005_follows_it() -> None:
     assert script.get_heads() == [HEAD]
     assert head_revision() == HEAD
     assert script.get_revision(THIS).down_revision == PREVIOUS
-    assert script.get_revision(HEAD).down_revision == THIS
+    assert script.get_revision("0005").down_revision == THIS
 
 
 def test_upgrading_a_0003_database_adds_an_empty_users_table(tmp_path: Path) -> None:

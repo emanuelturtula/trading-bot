@@ -29,6 +29,7 @@ EMPTY_LINES = [
     "last run 1h: never",
     "last run 4h: never",
     "last run 1d: never",
+    "last run 1w: never",
 ]
 
 
@@ -74,6 +75,7 @@ def test_a_populated_table_shows_every_fact(tmp_path: Path) -> None:
         "last run 1h: 2024-07-05T20:00:30+00:00 (completed 2024-07-05T20:01:02+00:00)",
         "last run 4h: 2024-07-05T20:00:30+00:00 (completed 2024-07-05T20:01:02+00:00)",
         "last run 1d: 2024-07-05T20:00:30+00:00 (completed 2024-07-05T20:01:02+00:00)",
+        "last run 1w: 2024-07-05T20:00:30+00:00 (completed 2024-07-05T20:01:02+00:00)",
     ]
 
 
@@ -93,6 +95,7 @@ def test_a_partly_populated_table_mixes_facts_and_never(tmp_path: Path) -> None:
         "last run 1h: never",
         "last run 4h: never",
         "last run 1d: 2024-07-05T20:00:30+00:00 (completed 2024-07-05T20:01:02+00:00)",
+        "last run 1w: never",
     ]
 
 

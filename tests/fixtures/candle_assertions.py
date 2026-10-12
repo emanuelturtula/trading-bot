@@ -33,7 +33,10 @@ def assert_valid_candles(candles: pd.DataFrame, timeframe: Timeframe | Timeframe
     if result is not candles:
         raise AssertionError("validate_candles must return the frame it was given")
     index = _datetime_index(candles)
-    off_grid = index != index.floor(_duration(timeframe))
+    if Timeframe(timeframe) is Timeframe.W1:  # Monday 00:00; pandas floors weeks to Thursdays
+        off_grid = (index != index.floor("D")) | (index.dayofweek != 0)
+    else:
+        off_grid = index != index.floor(_duration(timeframe))
     if off_grid.any():
         first = index[int(np.argmax(off_grid))]
         raise AssertionError(

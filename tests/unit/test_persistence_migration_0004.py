@@ -23,7 +23,7 @@ from trading_bot.persistence.migrator import (
 from trading_bot.persistence.models import Base
 
 PREVIOUS = "0003"
-HEAD = "0006"
+HEAD = "0007"
 THIS = "0004"
 TIMESTAMP = "2026-01-02 03:04:05.000000"
 EXISTING_QUERIES = (

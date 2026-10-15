@@ -188,7 +188,6 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "notifications/log_notifier.py",
         "notifications/message.py",
         "notifications/notifier.py",
-        "notifications/routing.py",
         "notifications/telegram.py",
     }
 

@@ -27,9 +27,19 @@ from trading_bot.persistence.models import Base
 
 BASELINE = "0001"
 REVISION = "0002"
-HEAD = "0006"  # specs 014, 023, 024 and 028 built on this revision
+HEAD = "0007"  # specs 014, 023, 024 and 028 built on this revision
 TABLES = ("rules", "ticker_rules", "tickers")
-HEAD_TABLES = ("bot_state", "rules", "signals", "ticker_rules", "tickers", "users")
+HEAD_TABLES = (
+    "bot_state",
+    "rules",
+    "signals",
+    "telegram_bots",
+    "telegram_chats",
+    "ticker_rules",
+    "tickers",
+    "user_pauses",
+    "users",
+)
 
 # The pragmas every connection must still report once SQLAlchemy owns the transaction (D88).
 EXPECTED_PRAGMAS = {

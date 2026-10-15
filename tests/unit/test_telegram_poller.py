@@ -181,7 +181,7 @@ async def test_messages_outside_the_allowlist_are_dropped_without_identifying_lo
     assert (
         poller_messages(caplog)
         == [
-            (logging.INFO, "ignored a message from a chat outside the allowlist"),
+            (logging.INFO, "telegram ignored a message from a chat outside the allowlist"),
         ]
         * 2
     )
@@ -332,8 +332,8 @@ async def test_failures_back_off_and_log_once_per_streak(
         (logging.INFO, "telegram polling recovered after 3 failure(s)"),
         (
             logging.WARNING,
-            "another process is polling with this bot token (409 Conflict); "
-            "retrying every 30s. Beta and prod need different tokens.",
+            "telegram: another process is polling with this bot token (409 Conflict); "
+            "retrying every 30s",
         ),
         (logging.DEBUG, "telegram polling still failing (conflict)"),
         (logging.INFO, "telegram polling recovered after 2 failure(s)"),
@@ -372,7 +372,7 @@ async def test_a_rejected_token_waits_a_minute_and_says_what_to_check(
     assert poller_messages(caplog) == [
         (
             logging.ERROR,
-            "telegram rejected the bot token; check TB_TELEGRAM_BOT_TOKEN. Retrying every 60s",
+            "telegram: Telegram rejected the bot token; replace it. Retrying every 60s",
         )
     ]
 
@@ -546,3 +546,64 @@ def test_python_telegram_bot_is_imported_by_two_modules_only() -> None:
     }
 
     assert importers == {"notifications/telegram.py", "telegram_bot/poller.py"}
+
+
+# --- /link and the dynamic allowlist (spec 025, D4) ------------------------------------------
+
+
+class RecordingLinker:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, str, str | None]] = []
+
+    async def __call__(self, chat_id: int, code: str, title: str | None) -> str:
+        self.calls.append((chat_id, code, title))
+        return f"linked {code}"
+
+
+@run_async
+async def test_link_reaches_the_linker_from_any_chat_and_the_allowlist_can_change() -> None:
+    source = FakeUpdateSource()
+    handler = EchoHandler()
+    linker = RecordingLinker()
+    usernames: list[str | None] = []
+
+    async def on_username(username: str | None) -> None:
+        usernames.append(username)
+
+    poller = TelegramPoller(
+        source=source,
+        handler=handler,
+        allowed_chat_ids=[],  # allowed with a linker: chats are linked later
+        linker=linker,
+        on_username=on_username,
+        label="telegram bot of user 3",
+        sleep=RecordingSleep(),
+    )
+    poller.start()
+    await idle(source)
+    source.queue(
+        [
+            IncomingMessage(update_id=1, chat_id=STRANGER, text="/help"),
+            IncomingMessage(update_id=2, chat_id=STRANGER, text="/link ABCD2345", chat_title="G"),
+            IncomingMessage(update_id=3, chat_id=STRANGER, text="/link@other_bot ABCD2345"),
+            IncomingMessage(update_id=4, chat_id=STRANGER, text="/link@Trading_Test_Bot XY"),
+            IncomingMessage(update_id=5, chat_id=STRANGER, text="/link A B"),
+            IncomingMessage(update_id=6, chat_id=None, text="/link ABCD2345"),
+        ]
+    )
+    await idle(source)
+    poller.set_allowed([STRANGER])
+    source.queue([IncomingMessage(update_id=7, chat_id=STRANGER, text="/help")])
+    await idle(source)
+    await poller.aclose()
+
+    assert usernames == ["trading_test_bot"]
+    assert poller.username == "trading_test_bot"
+    assert linker.calls == [(STRANGER, "ABCD2345", "G"), (STRANGER, "XY", None)]
+    assert handler.calls == [("/help", "trading_test_bot")]  # only once allowed
+    assert source.sent == [
+        (STRANGER, "linked ABCD2345"),
+        (STRANGER, "linked XY"),
+        (STRANGER, "echo: /help"),
+    ]
+    assert "STRANGER" not in repr(poller)

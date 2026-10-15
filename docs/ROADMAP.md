@@ -12,6 +12,6 @@ The phases are tracked on GitHub as the milestones `M1 · Analysis core` to `M8 
 | F3 | Persistence | Completed (v0.11.0) | SQLAlchemy + Alembic: tickers, rules, signals, state; management CLI | Reversible migrations; idempotency unique constraint |
 | F4 | Engine and scheduler | Pending | `SignalEngine` + APScheduler per timeframe and market hours | No duplicate signals after restart; cooldown |
 | F5 | Telegram | Pending | Notifier (text + chart in BytesIO) and commands with a chat allowlist | `[BETA]` outside prod; disclaimer; unauthorized chats ignored |
-| F6 | API and dashboard | In progress (configuration dashboard: spec 020; user accounts: spec 023; data per user: spec 024; then a Telegram bot per user) | REST `/api/v1/*`, login, dashboard: tickers, rule editor, history, charts | Mandatory auth; rule validation in UI and backend |
+| F6 | API and dashboard | In progress (configuration dashboard: spec 020; user accounts: spec 023; data per user: spec 024; a Telegram bot per user: spec 025) | REST `/api/v1/*`, login, dashboard: tickers, rule editor, history, charts | Mandatory auth; rule validation in UI and backend |
 | F7 | Operations | Pending | Daily heartbeat, error alerts via Telegram, global `/pause`, metrics in `/status` | Heartbeat silence detectable |
 | F8 | Backtesting | Pending | Rule backtesting (vectorbt) with walk-forward and Deflated Sharpe Ratio in the dashboard | In-sample/out-of-sample separation; costs included |

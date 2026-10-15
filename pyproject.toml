@@ -9,6 +9,7 @@ license = "MIT"
 dependencies = [
     "alembic>=1.13",
     "apscheduler>=3.11,<4",
+    "cryptography>=44",
     "exchange-calendars>=4.13.2",
     "fastapi>=0.115",
     "jinja2>=3.1",

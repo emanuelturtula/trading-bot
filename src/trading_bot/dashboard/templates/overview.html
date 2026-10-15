@@ -8,7 +8,7 @@
   {% if user and user.is_admin %}
   <form class="inline" method="post" action="{{ prefix }}/resume">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button type="submit" class="primary">Resume</button>
+    <button type="submit" class="primary">Resume for everyone</button>
   </form>
   {% endif %}
   {% elif evaluated == 0 %}
@@ -18,7 +18,7 @@
   {% if user and user.is_admin %}
   <form class="inline" method="post" action="{{ prefix }}/pause">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button type="submit">Pause</button>
+    <button type="submit">Pause for everyone</button>
   </form>
   {% endif %}
   {% else %}
@@ -26,9 +26,27 @@
   {% if user and user.is_admin %}
   <form class="inline" method="post" action="{{ prefix }}/pause">
     <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button type="submit">Pause</button>
+    <button type="submit">Pause for everyone</button>
   </form>
   {% endif %}
+  {% endif %}
+</div>
+<h2>Your signals</h2>
+<div class="panel">
+  {% if my_paused_since %}
+  <p><span class="badge off">Paused</span> since {{ my_paused_since | local }}. Your tickers are not evaluated and you get no signal until you resume.</p>
+  <form class="inline" method="post" action="{{ prefix }}/my/resume">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="primary">Resume my signals</button>
+  </form>
+  {% else %}
+  <p>{% if not has_bot %}<span class="badge off">Only logged</span> Connect a Telegram bot to receive them: <a href="{{ prefix }}/telegram">set it up</a>.
+  {% elif chat_count == 0 %}<span class="badge off">Only logged</span> Your bot has no linked chat yet: <a href="{{ prefix }}/telegram">link one</a>.
+  {% else %}<span class="badge on">Sent to Telegram</span> {{ chat_count }} linked chat{{ '' if chat_count == 1 else 's' }} · <a href="{{ prefix }}/telegram">manage</a>{% endif %}</p>
+  <form class="inline" method="post" action="{{ prefix }}/my/pause">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit">Pause my signals</button>
+  </form>
   {% endif %}
 </div>
 <div class="stats">

@@ -127,6 +127,7 @@ button.link-button { border: 0; background: none; color: var(--accent); padding:
       <a href="{{ prefix }}/tickers" {% if active == "tickers" %}aria-current="page"{% endif %}>Tickers</a>
       <a href="{{ prefix }}/rules" {% if active == "rules" %}aria-current="page"{% endif %}>Rules</a>
       <a href="{{ prefix }}/signals" {% if active == "signals" %}aria-current="page"{% endif %}>Signals</a>
+      <a href="{{ prefix }}/telegram" {% if active == "telegram" %}aria-current="page"{% endif %}>Telegram</a>
       {% if user and user.is_admin %}<a href="{{ prefix }}/users" {% if active == "users" %}aria-current="page"{% endif %}>Users</a>{% endif %}
       <a href="{{ prefix }}/account" {% if active == "account" %}aria-current="page"{% endif %}>{{ user.username if user else "Account" }}</a>
     </nav>

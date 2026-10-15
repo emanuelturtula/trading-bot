@@ -22,11 +22,13 @@ from trading_bot.persistence.repositories.protocols import (
     BotStateRepository,
     RuleRepository,
     SignalRepository,
+    TelegramRepository,
     TickerRepository,
     UserRepository,
 )
 from trading_bot.persistence.repositories.rules import SqlRuleRepository
 from trading_bot.persistence.repositories.signals import SqlSignalRepository
+from trading_bot.persistence.repositories.telegram import SqlTelegramRepository
 from trading_bot.persistence.repositories.tickers import SqlTickerRepository
 from trading_bot.persistence.repositories.users import SqlUserRepository
 
@@ -46,6 +48,7 @@ class DashboardRepositories:
     state: BotStateRepository
     signals: SignalRepository
     users: UserRepository
+    telegram: TelegramRepository
 
 
 class DashboardUnitOfWork(Protocol):
@@ -86,6 +89,7 @@ def sql_dashboard_unit_of_work(
                 state=SqlBotStateRepository(session, clock=clock),
                 signals=SqlSignalRepository(session, clock=clock, owner=owner),
                 users=SqlUserRepository(session, clock=clock),
+                telegram=SqlTelegramRepository(session, clock=clock),
             )
 
     return unit_of_work

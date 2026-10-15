@@ -138,12 +138,11 @@ def add_weekly(engine: Engine) -> None:
     )
 
 
-def test_0006_is_the_head_and_follows_0005() -> None:
+def test_0006_follows_0005() -> None:
     script = ScriptDirectory.from_config(alembic_config())
 
-    assert script.get_heads() == [THIS]
-    assert head_revision() == THIS
     assert script.get_revision(THIS).down_revision == PREVIOUS
+    assert head_revision() >= THIS
 
 
 def test_every_row_and_counter_survives_the_upgrade(tmp_path: Path) -> None:

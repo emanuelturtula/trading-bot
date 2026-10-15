@@ -9,7 +9,9 @@ failure is logged by class name and the following steps still run.
 A failure while starting closes whatever was already built and propagates (AC3): the FastAPI
 lifespan never yields, uvicorn exits non-zero and the deploy rolls back.
 
-When Telegram is configured, the command poller (spec 018) starts last and stops first.
+The Telegram bots (spec 025) start last and stop polling first: a ``BotSupervisor`` runs one
+poller and one notifier per user, and ``UserRouter`` sends each signal through its owner's bot.
+Their senders close after the scheduler, so a run in flight can still deliver.
 
 The builders of the calendar, the provider, the notifier's sender and the poller's update source
 are injectable so tests run without the network and without the 100-year calendar.
@@ -23,7 +25,7 @@ import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -38,21 +40,22 @@ from trading_bot.domain.market_calendar.nyse import (
     build_nyse_calendar,
 )
 from trading_bot.domain.market_calendar.sessions import MarketCalendar
+from trading_bot.domain.timeframe import Timeframe
 from trading_bot.engine.signal_engine import SignalEngine
 from trading_bot.engine.sql_unit_of_work import sql_unit_of_work
 from trading_bot.instance_lock import InstanceLock, InstanceLockError
-from trading_bot.notifications.log_notifier import LogNotifier
 from trading_bot.notifications.notifier import SignalNotification
-from trading_bot.notifications.routing import OwnerRouter
-from trading_bot.notifications.telegram import BotMessageSender, MessageSender, TelegramNotifier
+from trading_bot.notifications.telegram import BotMessageSender, MessageSender
 from trading_bot.persistence.database import Database, open_database
 from trading_bot.persistence.owner import default_owner_id
 from trading_bot.scheduler.policy import SchedulerPolicy
 from trading_bot.scheduler.runner import TimeframeRunner
 from trading_bot.scheduler.service import SchedulerService
 from trading_bot.scheduler.slots import skip_unpublished_hours
+from trading_bot.secretbox import InvalidMasterKeyError, SecretBox
 from trading_bot.telegram_bot.commands import CommandHandler
-from trading_bot.telegram_bot.poller import BotUpdateSource, TelegramPoller, UpdateSource
+from trading_bot.telegram_bot.poller import BotUpdateSource, UpdateSource
+from trading_bot.telegram_bot.supervisor import BotSupervisor, UserRouter, import_env_bot
 from trading_bot.telegram_bot.unit_of_work import sql_command_unit_of_work
 
 __all__ = ["ClosableProvider", "Runtime", "RuntimeNotifier"]
@@ -108,7 +111,7 @@ class Runtime:
         self._notifier: RuntimeNotifier | None = None
         self._provider: ClosableProvider | None = None
         self._service: SchedulerService | None = None
-        self._poller: TelegramPoller | None = None
+        self._bots: BotSupervisor | None = None
         self._logger = logging.getLogger(_LOGGER_NAME)
 
     @property
@@ -136,9 +139,11 @@ class Runtime:
         return self._service
 
     @property
-    def poller(self) -> TelegramPoller | None:
-        """The command poller, or ``None`` when Telegram is not configured."""
-        return self._poller
+    def bots(self) -> BotSupervisor:
+        """Every user's Telegram bot (spec 025)."""
+        if self._bots is None:
+            raise RuntimeError("the runtime is not started")
+        return self._bots
 
     async def start(self) -> None:
         if self._stack is not None:
@@ -166,7 +171,7 @@ class Runtime:
         self._notifier = None
         self._provider = None
         self._service = None
-        self._poller = None
+        self._bots = None
 
     async def _start(self, stack: AsyncExitStack) -> None:
         settings = self._settings
@@ -192,17 +197,42 @@ class Runtime:
         self._push(stack, "provider", provider.aclose)
         self._provider = provider
 
-        notifier = self._make_notifier(calendar)
-        self._push(stack, "notifier", notifier.aclose)
+        production = settings.environment == "prod"
+        service: SchedulerService | None = None
+
+        def make_handler(user_id: int) -> CommandHandler:
+            def next_fire_times() -> list[tuple[Timeframe, datetime | None]]:
+                return [] if service is None else list(service.next_fire_times())
+
+            return CommandHandler(
+                owner_id=user_id,
+                unit_of_work=sql_command_unit_of_work(database, owner=user_id),
+                provider=provider,
+                next_fire_times=next_fire_times,
+                production=production,
+                environment=settings.environment,
+                version=settings.version,
+                display_tz=settings.display_zone,
+            )
+
+        bots = BotSupervisor(
+            database=database,
+            box=self._secret_box(),
+            build_source=self._build_update_source,
+            build_sender=self._build_sender,
+            make_handler=make_handler,
+            production=production,
+            display_tz=settings.display_zone,
+            calendar=calendar,
+        )
+        self._push(stack, "telegram bots", bots.aclose)
+        self._bots = bots
+        notifier = UserRouter(bots)
         self._notifier = notifier
 
         should_run = skip_unpublished_hours(calendar)
         unit_of_work = sql_unit_of_work(database)
-        with database.session() as session:
-            owner_id = default_owner_id(session)
-        engine = SignalEngine(
-            provider=provider, unit_of_work=unit_of_work, notifier=OwnerRouter(notifier, owner_id)
-        )
+        engine = SignalEngine(provider=provider, unit_of_work=unit_of_work, notifier=notifier)
         runner = TimeframeRunner(
             engine=engine,
             calendar=calendar,
@@ -213,9 +243,10 @@ class Runtime:
         service = SchedulerService(
             runner=runner, calendar=calendar, policy=policy, should_run=should_run
         )
+        scheduler = service
 
         async def stop_scheduler() -> None:
-            await service.aclose()
+            await scheduler.aclose()
             if runner.in_flight and not await runner.drain(EXTRA_DRAIN):  # D7
                 self._logger.warning(
                     "shutdown: a run was still in flight %ds after the scheduler stopped",
@@ -226,45 +257,54 @@ class Runtime:
         service.start()
         self._service = service
 
-        token = settings.telegram_bot_token
-        if isinstance(notifier, TelegramNotifier) and token is not None:
-            handler = CommandHandler(
-                unit_of_work=sql_command_unit_of_work(database),
-                provider=provider,
-                next_fire_times=service.next_fire_times,
-                production=settings.environment == "prod",
-                environment=settings.environment,
-                version=settings.version,
-                display_tz=settings.display_zone,
-            )
-            poller = TelegramPoller(
-                source=self._build_update_source(token),
-                handler=handler,
-                allowed_chat_ids=settings.telegram_chat_ids,
-            )
-            self._push(stack, "telegram poller", poller.aclose)
-            poller.start()
-            self._poller = poller
-        self._logger.info(
-            "started: environment %s, %s notifier", settings.environment, _kind(notifier)
-        )
+        self._push(stack, "telegram pollers", bots.stop_polling)
+        await self._start_bots(bots, database)
+        self._logger.info("started: environment %s", settings.environment)
 
-    def _make_notifier(self, calendar: MarketCalendar) -> RuntimeNotifier:
+    def _secret_box(self) -> SecretBox | None:
+        key = self._settings.master_key
+        if key is None or not key.get_secret_value().strip():
+            self._logger.warning(
+                "TB_MASTER_KEY is not set: users cannot store Telegram bots in the dashboard"
+            )
+            return None
+        try:
+            return SecretBox(key)
+        except InvalidMasterKeyError as error:
+            self._logger.error("%s; users cannot store Telegram bots", error)
+            return None
+
+    async def _start_bots(self, bots: BotSupervisor, database: Database) -> None:
         settings = self._settings
         token = settings.telegram_bot_token
-        chat_ids = settings.telegram_chat_ids
-        if token is None or not token.get_secret_value() or not chat_ids:
-            self._logger.warning(
-                "telegram is not configured (token or chat ids missing): signals are only logged"
+        chats = settings.telegram_chat_ids
+        has_env_bot = token is not None and bool(token.get_secret_value()) and bool(chats)
+        with database.session() as session:
+            owner_id = default_owner_id(session)
+        box = bots.box
+        if box is None:
+            if has_env_bot and token is not None:
+                await bots.run_static(owner_id, token, chats)
+            else:
+                self._logger.warning(
+                    "telegram is not configured (token or chat ids missing): "
+                    "signals are only logged"
+                )
+            return
+        if has_env_bot and token is not None:
+            imported = await asyncio.to_thread(
+                import_env_bot, database, box, owner_id, token, chats
             )
-            return LogNotifier()
-        return TelegramNotifier(
-            sender=self._build_sender(token),
-            chat_ids=chat_ids,
-            production=settings.environment == "prod",
-            display_tz=settings.display_zone,
-            calendar=calendar,
-        )
+            if imported:
+                self._logger.info(
+                    "imported the bot of TB_TELEGRAM_BOT_TOKEN for the first administrator; "
+                    "TB_TELEGRAM_BOT_TOKEN and TB_TELEGRAM_ALLOWED_CHAT_IDS can now be removed"
+                )
+            else:
+                self._logger.info(
+                    "TB_TELEGRAM_BOT_TOKEN is ignored: the bots are configured in the dashboard"
+                )
+        await bots.reload()
 
     def _push(self, stack: AsyncExitStack, name: str, close: Callable[[], Awaitable[None]]) -> None:
         """Register ``close`` so that a failure is logged by class name and never propagates."""
@@ -283,7 +323,3 @@ def _sync(function: Callable[[], object]) -> Callable[[], Awaitable[None]]:
         function()
 
     return run
-
-
-def _kind(notifier: RuntimeNotifier) -> str:
-    return "telegram" if isinstance(notifier, TelegramNotifier) else "log"

@@ -11,7 +11,7 @@ disabled user, so the engine stops evaluating them at once.
 
 from __future__ import annotations
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, exists, select
 from sqlalchemy.orm import Session
 
 from trading_bot.domain.signals import normalize_ticker
@@ -19,7 +19,7 @@ from trading_bot.domain.timeframe import Timeframe
 from trading_bot.domain.utc import to_utc
 from trading_bot.persistence.clock import Clock, system_clock
 from trading_bot.persistence.errors import DuplicateTickerError, UnknownTickerError
-from trading_bot.persistence.models import TickerRow, UserRow
+from trading_bot.persistence.models import TickerRow, UserPauseRow, UserRow
 from trading_bot.persistence.owner import Owner, OwnerScope
 from trading_bot.persistence.records import StoredTicker
 
@@ -78,7 +78,12 @@ class SqlTickerRepository:
         statement = (
             select(TickerRow)
             .join(UserRow, UserRow.id == TickerRow.user_id)
-            .where(TickerRow.enabled.is_(True), UserRow.active.is_(True))
+            .where(
+                TickerRow.enabled.is_(True),
+                UserRow.active.is_(True),
+                # A user who paused their own signals is skipped (spec 025, D6).
+                ~exists().where(UserPauseRow.user_id == TickerRow.user_id),
+            )
         )
         if timeframe is not None:
             statement = statement.where(TickerRow.timeframe == timeframe)

@@ -23,8 +23,11 @@ from trading_bot.persistence.models import (
     BotStateRow,
     RuleRow,
     SignalRow,
+    TelegramBotRow,
+    TelegramChatRow,
     TickerRow,
     TickerRuleRow,
+    UserPauseRow,
     UserRow,
 )
 from trading_bot.persistence.state import StateKey
@@ -289,18 +292,21 @@ def test_a_state_key_the_database_should_never_hold_raises_at_the_boundary() -> 
 # --- AC1: the tables, their columns and their constraints ----------------------------------
 
 
-def test_the_metadata_holds_exactly_the_six_tables() -> None:
+def test_the_metadata_holds_exactly_the_nine_tables() -> None:
     assert sorted(Base.metadata.tables) == [
         "bot_state",
         "rules",
         "signals",
+        "telegram_bots",
+        "telegram_chats",
         "ticker_rules",
         "tickers",
+        "user_pauses",
         "users",
     ]
 
 
-def test_the_model_classes_map_to_the_six_tables() -> None:
+def test_the_model_classes_map_to_the_nine_tables() -> None:
     names = (
         TickerRow.__tablename__,
         RuleRow.__tablename__,
@@ -308,12 +314,25 @@ def test_the_model_classes_map_to_the_six_tables() -> None:
         SignalRow.__tablename__,
         BotStateRow.__tablename__,
         UserRow.__tablename__,
+        UserPauseRow.__tablename__,
+        TelegramBotRow.__tablename__,
+        TelegramChatRow.__tablename__,
     )
 
-    assert names == ("tickers", "rules", "ticker_rules", "signals", "bot_state", "users")
+    assert names == (
+        "tickers",
+        "rules",
+        "ticker_rules",
+        "signals",
+        "bot_state",
+        "users",
+        "user_pauses",
+        "telegram_bots",
+        "telegram_chats",
+    )
 
 
-def test_the_migrated_database_holds_exactly_the_six_tables(database: Database) -> None:
+def test_the_migrated_database_holds_exactly_the_nine_tables(database: Database) -> None:
     names = inspect(database.engine).get_table_names()
 
     assert sorted(names) == [
@@ -321,8 +340,11 @@ def test_the_migrated_database_holds_exactly_the_six_tables(database: Database) 
         "bot_state",
         "rules",
         "signals",
+        "telegram_bots",
+        "telegram_chats",
         "ticker_rules",
         "tickers",
+        "user_pauses",
         "users",
     ]
 

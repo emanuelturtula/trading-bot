@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Telegram{% endblock %}
+{% block content %}
+<h1>Telegram</h1>
+{% if error %}<div class="flash error">{{ error }}</div>{% endif %}
+{% if not enabled %}
+<div class="warn-box">Bots cannot be stored yet: the administrator has to set <code>TB_MASTER_KEY</code> on the server. Until then your signals are only logged{% if user and user.is_admin %}, except the first administrator's, which still go through the bot of <code>TB_TELEGRAM_BOT_TOKEN</code>{% endif %}.</div>
+{% endif %}
+
+<h2>Your bot</h2>
+<div class="panel">
+  {% if bot %}
+  <p>{% if bot.bot_username %}<strong>@{{ bot.bot_username }}</strong>{% else %}<strong>Your bot</strong>{% endif %}
+    {% if running %}<span class="badge on">Running</span>{% else %}<span class="badge off">Stopped</span>{% endif %}
+    <span class="muted">· connected {{ bot.updated_at | local }}</span></p>
+  {% if not running and enabled %}<p class="muted">It is not polling right now: Telegram may be rejecting its token, or another program uses the same token. Paste the token again to check it.</p>{% endif %}
+  <form class="inline" method="post" action="{{ prefix }}/telegram/delete">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="danger">Remove bot</button>
+  </form>
+  <details class="guide">
+    <summary>Replace the token</summary>
+    <p class="muted">A different bot forgets the chats linked to this one.</p>
+    {% include "telegram_token_form.html" %}
+  </details>
+  {% else %}
+  <p>Your signals reach you through a Telegram bot of your own. Nobody else uses it, and nobody else sees its chats.</p>
+  <ol>
+    <li>In Telegram, open <strong>@BotFather</strong>, send <code>/newbot</code> and follow the steps.</li>
+    <li>Copy the token it gives you and paste it here. It is stored encrypted and never shown again.</li>
+  </ol>
+  {% if enabled %}{% include "telegram_token_form.html" %}{% endif %}
+  {% endif %}
+</div>
+
+{% if bot %}
+<h2>Chats that get your signals</h2>
+<div class="panel">
+  {% if code %}
+  <div class="flash ok">Send this message to {% if bot.bot_username %}@{{ bot.bot_username }}{% else %}your bot{% endif %}, in a private chat or in a group where you added it:
+    <p><code style="font-size:18px">/link {{ code }}</code></p>
+    It works once and expires at {{ expires | local }} ({{ minutes }} minutes). Then reload this page.</div>
+  {% endif %}
+  {% if chats %}
+  <div class="table-wrap">
+  <table>
+    <tr><th>Chat</th><th class="hide-narrow">Linked</th><th></th></tr>
+    {% for chat in chats %}
+    <tr>
+      <td>{% if chat.title %}{{ chat.title }}{% else %}<span class="muted">Untitled chat</span>{% endif %} <span class="muted">{{ chat.masked }}</span></td>
+      <td class="hide-narrow">{{ chat.linked | local }}</td>
+      <td class="end">
+        <form class="inline" method="post" action="{{ prefix }}/telegram/unlink">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="chat_id" value="{{ chat.chat_id }}">
+          <button type="submit" class="danger small">Unlink</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% else %}
+  <p class="muted">No chat is linked yet, so your signals are only logged.</p>
+  {% endif %}
+  <form method="post" action="{{ prefix }}/telegram/code" style="margin-top:10px">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" class="primary">{% if chats %}Link another chat{% else %}Link a chat{% endif %}</button>
+  </form>
+  <p class="muted" style="margin:10px 0 0">A linked chat gets every signal of your tickers and can send commands such as <code>/list</code> or <code>/pause</code>. Messages from any other chat are ignored.</p>
+</div>
+{% endif %}
+{% endblock %}

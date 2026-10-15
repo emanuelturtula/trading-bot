@@ -9,7 +9,7 @@ link token: the token itself is never stored (D3).
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Final
 
 from sqlalchemy import func, select
@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from trading_bot.domain.utc import to_utc
 from trading_bot.persistence.clock import Clock, system_clock
 from trading_bot.persistence.errors import DuplicateUsernameError, UnknownUserError
-from trading_bot.persistence.models import UserRow
+from trading_bot.persistence.models import UserPauseRow, UserRow
 from trading_bot.persistence.records import StoredUser
 
 __all__ = ["SqlUserRepository", "normalize_username"]
@@ -152,6 +152,30 @@ class SqlUserRepository:
             return to_record(row)
         row.active = active
         return self._touched(row)
+
+    def paused_since(self, user_id: int) -> datetime | None:
+        """When ``user_id`` paused their own signals, or ``None`` (spec 025, D6)."""
+        row = self._session.get(UserPauseRow, user_id)
+        return None if row is None else to_utc(row.paused_since)
+
+    def pause(self, user_id: int) -> datetime:
+        """Pause ``user_id``'s signals; idempotent, returns when the pause started."""
+        self._row(user_id)
+        row = self._session.get(UserPauseRow, user_id)
+        if row is None:
+            row = UserPauseRow(user_id=user_id, paused_since=to_utc(self._clock()))
+            self._session.add(row)
+            self._session.flush()
+        return to_utc(row.paused_since)
+
+    def resume(self, user_id: int) -> bool:
+        """End ``user_id``'s pause. ``False`` when they were not paused."""
+        row = self._session.get(UserPauseRow, user_id)
+        if row is None:
+            return False
+        self._session.delete(row)
+        self._session.flush()
+        return True
 
     def _invited_row(self, digest: str) -> UserRow | None:
         if not digest:

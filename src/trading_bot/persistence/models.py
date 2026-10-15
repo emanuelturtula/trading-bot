@@ -1,7 +1,7 @@
 """The ORM models of the application (spec 012, Design 5; spec 013, Design 3; spec 014, 3).
 
-The three configuration tables, the signal history, the bot state and the dashboard users
-(spec 023). **Every model must be
+The three configuration tables, the signal history, the bot state, the dashboard users
+(spec 023) and each user's pause and Telegram bot (spec 025). **Every model must be
 defined here or imported by this module**, because ``migrations/env.py`` reads
 ``Base.metadata`` through it and ``--autogenerate`` only compares what is imported. Timestamp
 columns always use ``UtcDateTime`` (``types.py``).
@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    BigInteger,
     CheckConstraint,
     Float,
     ForeignKey,
@@ -38,8 +39,11 @@ __all__ = [
     "BotStateRow",
     "RuleRow",
     "SignalRow",
+    "TelegramBotRow",
+    "TelegramChatRow",
     "TickerRow",
     "TickerRuleRow",
+    "UserPauseRow",
     "UserRow",
 ]
 
@@ -205,3 +209,50 @@ class UserRow(Base):
     invite_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime)
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class UserPauseRow(Base):
+    """A user's own pause (spec 025, D6): their tickers are not evaluated while the row exists."""
+
+    __tablename__ = "user_pauses"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    paused_since: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class TelegramBotRow(Base):
+    """A user's Telegram bot (spec 025, D1-D3).
+
+    The token is stored only encrypted under ``TB_MASTER_KEY``; ``token_fingerprint``, a keyed
+    hash of the token, makes one token usable by one account only (rule 7: one token, one
+    poller). The link code that ties a chat to the bot is stored as a SHA-256 digest.
+    """
+
+    __tablename__ = "telegram_bots"
+    __table_args__ = (UniqueConstraint("token_fingerprint"), UniqueConstraint("link_digest"))
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    token_ciphertext: Mapped[str] = mapped_column(Text)
+    token_fingerprint: Mapped[str] = mapped_column(String(64))
+    bot_username: Mapped[str | None] = mapped_column(String(64))
+    link_digest: Mapped[str | None] = mapped_column(String(64))
+    link_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime)
+
+
+class TelegramChatRow(Base):
+    """A chat linked to a user's bot with ``/link``: it gets the signals and may send commands."""
+
+    __tablename__ = "telegram_chats"
+
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    chat_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    title: Mapped[str | None] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime)

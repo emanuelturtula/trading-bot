@@ -140,7 +140,7 @@ TB_PORT=8081 TB_ENVIRONMENT=prod TB_SECRETS_ENV_FILE="$PWD/secrets.env" \
   up --detach --force-recreate --wait app
 ```
 
-Check it in `docker compose --project-name trading-bot-prod logs app`: with a token and chat ids the startup line reads `started: environment prod, telegram notifier`. Then, from the phone, `/status` answers with the version. If it does not, the same logs show one line explaining why (`409 Conflict`, rejected token, Telegram unreachable); the bot keeps retrying on its own.
+Check it in `docker compose --project-name trading-bot-prod logs app`: with a token and chat ids the startup shows `started the telegram bot of user 1` and `started: environment prod`. Then, from the phone, `/status` answers with the version. If it does not, the same logs show one line explaining why (`409 Conflict`, rejected token, Telegram unreachable); the bot keeps retrying on its own.
 
 #### Dashboard
 
@@ -155,9 +155,29 @@ python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
 
 Put both values in `~/trading-bot/secrets.env` as `TB_DASHBOARD_PASSWORD_HASH=...` and `TB_SESSION_SECRET=...` and recreate the container as shown above. The hash contains no `$`, so it can be pasted as is. If the startup log says `dashboard disabled: ...`, it names the variable to fix and never shows its value. Changing the session secret logs every open session out; sessions otherwise last 7 days.
 
-The first login creates the administrator: username `admin` (or the value of `TB_ADMIN_USERNAME`) with that password. From then on `TB_DASHBOARD_PASSWORD_HASH` is ignored and the password is changed on the Account page. The administrator invites other people from the Users page, which shows a one-time access link (valid 72 hours) to send them; with it they choose their own password. "New access link" is also how a forgotten password is reset. Until spec 024 ships, every account sees and edits the same tickers and rules.
+The first login creates the administrator: username `admin` (or the value of `TB_ADMIN_USERNAME`) with that password. From then on `TB_DASHBOARD_PASSWORD_HASH` is ignored and the password is changed on the Account page. The administrator invites other people from the Users page, which shows a one-time access link (valid 72 hours) to send them; with it they choose their own password. "New access link" is also how a forgotten password is reset. Each account has its own tickers, rules and signals (spec [024](specs/024-data-per-user.md)).
 
 After 5 failed attempts from one address, or 10 on one username from anywhere, within 15 minutes, the login answers `429` until the 15 minutes pass. Behind a proxy every browser arrives from the proxy's address: set `TB_CLIENT_IP_HEADER` to the header carrying the real one (`CF-Connecting-IP` behind Cloudflare). The header is only read on connections from `TB_TRUSTED_PROXIES` (default: loopback and the private ranges, which covers `cloudflared` on the Pi or on its Docker network), so a browser reaching an open port directly cannot forge it.
+
+#### Telegram bots per user
+
+Since spec [025](specs/025-telegram-per-user.md) every user connects their own Telegram bot on the dashboard's Telegram page, and links the chats that get their signals there. The tokens are stored encrypted with one master key, which must be in `secrets.env`; without it nobody can store a bot, and only the bot of `TB_TELEGRAM_BOT_TOKEN` runs, for the first administrator, as before. To set it, on the Pi:
+
+```sh
+# 1. Generate the key (it prints one line). This works before the release that reads it is
+#    deployed; once it is, `docker compose --project-name trading-bot-prod exec app
+#    python -m trading_bot.secretbox` prints a key of the same format.
+python3 -c 'import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode())'
+# 2. Add it to secrets.env
+umask 077
+echo 'TB_MASTER_KEY=<the printed key>' >> ~/trading-bot/secrets.env
+```
+
+3. Recreate the container as shown above (`up --detach --force-recreate --wait app`).
+
+On that start the bot of `TB_TELEGRAM_BOT_TOKEN` and the chats of `TB_TELEGRAM_ALLOWED_CHAT_IDS` are imported as the first administrator's, and the log says `imported the bot of TB_TELEGRAM_BOT_TOKEN ...`. From then on the dashboard is the only source: both variables can be removed from `secrets.env` (and are ignored while present). Keep a copy of the key with your backups: **a different or lost `TB_MASTER_KEY` makes every stored token unreadable** (the log names the user whose bot cannot be decrypted) and each user has to paste their token again. If the log says `TB_MASTER_KEY is not a valid key`, regenerate it with step 1; releases before spec 025 ignore the variable, so it can be added ahead of the deploy; the value is never logged.
+
+Each user creates their bot with @BotFather, pastes the token on the Telegram page (it is checked with Telegram and never shown again), presses "Link a chat" and sends the `/link CODE` it shows to the bot, from a private chat or from a group where they added it. A token can belong to one account only, and must not be polled by any other process (see step 4).
 
 On port 8081 the dashboard travels over plain HTTP: use that address from the LAN or the tailnet only, and never forward port 8081 from the router.
 

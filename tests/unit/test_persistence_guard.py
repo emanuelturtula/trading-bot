@@ -166,12 +166,14 @@ def test_at_least_the_expected_modules_were_scanned() -> None:
         "migrations/versions/0004_users.py",
         "migrations/versions/0005_configuration_owners.py",
         "migrations/versions/0006_weekly_timeframe.py",
+        "migrations/versions/0007_telegram_per_user.py",
         "repositories/__init__.py",
         "repositories/assignments.py",
         "repositories/bot_state.py",
         "repositories/protocols.py",
         "repositories/rules.py",
         "repositories/signals.py",
+        "repositories/telegram.py",
         "repositories/tickers.py",
         "repositories/users.py",
         "owner.py",
@@ -249,6 +251,7 @@ def test_a_revision_is_self_contained_and_imports_no_application_type() -> None:
         "0004_users.py",
         "0005_configuration_owners.py",
         "0006_weekly_timeframe.py",
+        "0007_telegram_per_user.py",
     ]
     for path in revisions:
         imported = {

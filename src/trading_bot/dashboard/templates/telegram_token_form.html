@@ -1,0 +1,6 @@
+<form method="post" action="{{ prefix }}/telegram/token">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p><label class="field" for="token">Bot token</label>
+  <input type="password" id="token" name="token" autocomplete="off" spellcheck="false" maxlength="100" required style="width:100%;max-width:460px"></p>
+  <button type="submit" class="primary">Check and save</button>
+</form>

@@ -22,6 +22,7 @@ from trading_bot.domain.timeframe import Timeframe
 
 __all__ = [
     "AssignedTimeframeError",
+    "DuplicateBotTokenError",
     "DuplicateRuleNameError",
     "DuplicateTickerError",
     "DuplicateUsernameError",
@@ -89,6 +90,13 @@ class DuplicateUsernameError(PersistenceError):
     def __init__(self, username: str) -> None:
         super().__init__(f"a user named {echo_name(username)} already exists")
         self.username = username
+
+
+class DuplicateBotTokenError(PersistenceError):
+    """A Telegram bot token belongs to one account only (spec 025, D3; rule 7)."""
+
+    def __init__(self) -> None:
+        super().__init__("that bot token is already used by another account")
 
 
 class UnknownUserError(PersistenceError):

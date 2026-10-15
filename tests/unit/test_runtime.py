@@ -27,16 +27,24 @@ from trading_bot.config import Settings
 from trading_bot.domain.market_calendar.sessions import MarketCalendar
 from trading_bot.instance_lock import LOCK_FILENAME, InstanceLock, InstanceLockError
 from trading_bot.main import create_app
-from trading_bot.notifications.log_notifier import LogNotifier
 from trading_bot.notifications.telegram import TelegramNotifier
+from trading_bot.persistence.owner import default_owner_id
+from trading_bot.persistence.repositories.telegram import SqlTelegramRepository
 from trading_bot.runtime import Runtime
 from trading_bot.scheduler.service import SchedulerService
+from trading_bot.secretbox import new_master_key
+from trading_bot.telegram_bot.supervisor import UserRouter
 
 FAKE_TOKEN = "123456789" + ":" + "x" * 35
 
 
 def settings_for(data_dir: Path, **overrides: object) -> Settings:
     return Settings(_env_file=None, data_dir=data_dir, **overrides)  # type: ignore[arg-type]
+
+
+def owner_of(runtime: Runtime) -> int:
+    with runtime.database.session() as session:
+        return default_owner_id(session)
 
 
 class Recorded:
@@ -119,9 +127,10 @@ def test_start_builds_everything_and_close_undoes_it_in_reverse(
         runtime = recorded.runtime(settings)
         await runtime.start()
         assert runtime.scheduler.running
-        assert isinstance(runtime.notifier, TelegramNotifier)
-        assert runtime.poller is not None
-        assert runtime.poller.running
+        assert isinstance(runtime.notifier, UserRouter)
+        owner = owner_of(runtime)
+        assert runtime.bots.running(owner)  # no TB_MASTER_KEY: the bot of the environment
+        assert isinstance(runtime.bots.notifier_for(owner), TelegramNotifier)
         assert (tmp_path / LOCK_FILENAME).exists()
         cache_dir = recorded.providers[0].cache_dir
         assert cache_dir.is_dir()
@@ -153,8 +162,10 @@ def test_without_telegram_configured_signals_are_only_logged(
         runtime = offline_runtime(settings_for(tmp_path, **overrides))
         await runtime.start()
         try:
-            assert isinstance(runtime.notifier, LogNotifier)
-            assert runtime.poller is None  # no token or no chat: nobody to answer (AC11)
+            assert isinstance(runtime.notifier, UserRouter)
+            owner = owner_of(runtime)
+            assert not runtime.bots.running(owner)  # no token or no chat: nobody to answer
+            assert runtime.bots.notifier_for(owner) is None
         finally:
             await runtime.aclose()
 
@@ -207,7 +218,7 @@ def test_a_failed_startup_closes_what_was_built_and_propagates(
 
     asyncio.run(scenario())
 
-    assert events[:1] == ["lock"]
+    assert events[:2] == ["scheduler", "lock"]
 
 
 def test_a_second_runtime_on_the_same_directory_refuses_to_start(
@@ -288,3 +299,79 @@ def test_open_database_failure_aborts_startup_and_releases_the_lock(
     lock = InstanceLock(tmp_path)
     lock.acquire()
     lock.release()
+
+
+# --- spec 025: the bots stored in the database ------------------------------------------------
+
+
+def test_without_a_master_key_users_cannot_store_bots(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def scenario() -> None:
+        runtime = offline_runtime(settings_for(tmp_path))
+        await runtime.start()
+        try:
+            assert not runtime.bots.enabled
+        finally:
+            await runtime.aclose()
+
+    with caplog.at_level(logging.WARNING, logger="trading_bot.runtime"):
+        asyncio.run(scenario())
+
+    assert "TB_MASTER_KEY is not set" in caplog.text
+
+
+def test_an_invalid_master_key_is_reported_without_its_value(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    invalid = "not-a-fernet-key-" + "q" * 10
+
+    async def scenario() -> None:
+        runtime = offline_runtime(settings_for(tmp_path, master_key=invalid))
+        await runtime.start()
+        try:
+            assert not runtime.bots.enabled
+        finally:
+            await runtime.aclose()
+
+    with caplog.at_level(logging.ERROR, logger="trading_bot.runtime"):
+        asyncio.run(scenario())
+
+    assert "TB_MASTER_KEY is not a valid key" in caplog.text
+    assert invalid not in caplog.text
+
+
+def test_with_a_master_key_the_environment_bot_is_imported_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    settings = settings_for(
+        tmp_path,
+        master_key=new_master_key(),
+        telegram_bot_token=FAKE_TOKEN,
+        telegram_allowed_chat_ids="5,7",
+    )
+
+    async def run_once() -> None:
+        runtime = offline_runtime(settings)
+        await runtime.start()
+        try:
+            owner = owner_of(runtime)
+            assert runtime.bots.enabled
+            assert runtime.bots.running(owner)
+            with runtime.database.session() as session:
+                repository = SqlTelegramRepository(session)
+                stored = repository.bot(owner)
+                chats = [chat.chat_id for chat in repository.chats(owner)]
+            assert stored is not None
+            assert FAKE_TOKEN not in stored.token_ciphertext
+            assert chats == [5, 7]
+        finally:
+            await runtime.aclose()
+
+    with caplog.at_level(logging.INFO, logger="trading_bot.runtime"):
+        asyncio.run(run_once())
+        asyncio.run(run_once())
+
+    assert caplog.text.count("imported the bot of TB_TELEGRAM_BOT_TOKEN") == 1
+    assert "TB_TELEGRAM_BOT_TOKEN is ignored" in caplog.text
+    assert FAKE_TOKEN not in caplog.text

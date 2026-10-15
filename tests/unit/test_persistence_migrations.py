@@ -27,8 +27,18 @@ from trading_bot.persistence.migrator import (
 MIGRATOR_LOGGER = "trading_bot.persistence.migrator"
 REVISION_ID = re.compile(r"^[0-9]{4}$")
 BASELINE = "0001"
-HEAD = "0006"
-HEAD_TABLES = ["bot_state", "rules", "signals", "ticker_rules", "tickers", "users"]
+HEAD = "0007"
+HEAD_TABLES = [
+    "bot_state",
+    "rules",
+    "signals",
+    "telegram_bots",
+    "telegram_chats",
+    "ticker_rules",
+    "tickers",
+    "user_pauses",
+    "users",
+]
 
 
 def table_names(engine: Engine) -> list[str]:
@@ -74,6 +84,7 @@ def test_every_revision_identifier_is_four_digits_and_the_chain_is_linear() -> N
 
     assert [revision.revision for revision in revisions] == [
         HEAD,
+        "0006",
         "0005",
         "0004",
         "0003",
@@ -147,7 +158,7 @@ def test_the_first_upgrade_reaches_the_head_revision(
         assert current_revision(engine) == HEAD
         assert stored_revisions(engine) == [HEAD]
         assert table_names(engine) == ["alembic_version", *HEAD_TABLES]
-        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0006"]
+        assert migrator_messages(caplog) == ["database schema upgraded from empty to 0007"]
     finally:
         engine.dispose()
 
@@ -164,7 +175,7 @@ def test_a_second_upgrade_is_a_no_op(tmp_path: Path, caplog: pytest.LogCaptureFi
         assert revision == HEAD
         assert stored_revisions(engine) == [HEAD]
         assert table_names(engine) == ["alembic_version", *HEAD_TABLES]
-        assert migrator_messages(caplog) == ["database schema already at revision 0006"]
+        assert migrator_messages(caplog) == ["database schema already at revision 0007"]
     finally:
         engine.dispose()
 

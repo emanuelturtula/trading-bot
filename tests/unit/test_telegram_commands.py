@@ -26,6 +26,7 @@ from trading_bot.data.errors import (
 from trading_bot.data.tickers import AssetType, Exchange, TickerInfo
 from trading_bot.domain.timeframe import Timeframe
 from trading_bot.persistence.database import Database
+from trading_bot.persistence.repositories.users import SqlUserRepository
 from trading_bot.telegram_bot.commands import BETA_PREFIX, HELP_TEXT, CommandHandler, parse
 from trading_bot.telegram_bot.unit_of_work import sql_command_unit_of_work
 
@@ -44,6 +45,9 @@ def info(symbol: str, name: str, asset_type: AssetType = AssetType.EQUITY) -> Ti
     )
 
 
+OWNER = 1  # the administrator migration 0005 creates in an empty database
+
+
 class Harness:
     def __init__(self, database: Database, *, production: bool = True) -> None:
         self.database = database
@@ -57,7 +61,8 @@ class Harness:
             (Timeframe.D1, datetime(2026, 3, 2, 21, 0, tzinfo=UTC)),
         ]
         self.handler = CommandHandler(
-            unit_of_work=sql_command_unit_of_work(database, clock=fixed_clock(START)),
+            owner_id=OWNER,
+            unit_of_work=sql_command_unit_of_work(database, owner=OWNER, clock=fixed_clock(START)),
             provider=self.provider,
             next_fire_times=lambda: self.fires,
             production=production,
@@ -394,18 +399,34 @@ def test_status_shows_version_runs_and_next_fires_in_the_display_zone(
     )
 
 
-def test_pause_and_resume(bot: Harness, database: Database) -> None:
-    assert bot.reply("/resume") == "The bot was not paused."
+def test_pause_and_resume_act_on_the_owner_only(bot: Harness, database: Database) -> None:
+    assert bot.reply("/resume") == "Your signals were not paused."
     assert bot.reply("/pause") == (
-        "Paused. No candle is evaluated and no signal is sent until /resume."
+        "Paused. Your tickers are not evaluated and no signal is sent until /resume."
     )
     assert bot.reply("/pause") == "Already paused since 2026-03-02 16:00 CET."
     assert bot.reply("/status").splitlines()[1] == (
-        "Paused since 2026-03-02 16:00 CET · 0 enabled tickers"
+        "Your signals are paused since 2026-03-02 16:00 CET · 0 enabled tickers"
     )
     with database.session() as session:
-        assert repositories(session).state.load().paused
+        assert SqlUserRepository(session).paused_since(OWNER) is not None
+        assert not repositories(session).state.load().paused  # nobody else is paused
 
     assert bot.reply("/resume") == "Resumed. The next candle close will be evaluated."
     with database.session() as session:
-        assert not repositories(session).state.load().paused
+        assert SqlUserRepository(session).paused_since(OWNER) is None
+
+
+def test_status_shows_a_pause_for_everyone(bot: Harness, database: Database) -> None:
+    with database.session() as session:
+        repositories(session, clock=fixed_clock(START)).state.pause()
+
+    assert bot.reply("/status").splitlines()[1] == (
+        "Paused for everyone since 2026-03-02 16:00 CET · 0 enabled tickers"
+    )
+
+
+def test_link_without_a_code_explains_where_it_comes_from(bot: Harness) -> None:
+    assert bot.reply("/link") == (
+        "Send /link with the code the dashboard shows on its Telegram page."
+    )

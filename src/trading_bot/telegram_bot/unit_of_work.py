@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 from trading_bot.persistence.clock import Clock, system_clock
 from trading_bot.persistence.database import Database
+from trading_bot.persistence.owner import Owner
 from trading_bot.persistence.repositories.assignments import SqlAssignmentRepository
 from trading_bot.persistence.repositories.bot_state import SqlBotStateRepository
 from trading_bot.persistence.repositories.protocols import (
@@ -21,9 +22,11 @@ from trading_bot.persistence.repositories.protocols import (
     BotStateRepository,
     RuleRepository,
     TickerRepository,
+    UserRepository,
 )
 from trading_bot.persistence.repositories.rules import SqlRuleRepository
 from trading_bot.persistence.repositories.tickers import SqlTickerRepository
+from trading_bot.persistence.repositories.users import SqlUserRepository
 
 __all__ = [
     "CommandRepositories",
@@ -39,6 +42,7 @@ class CommandRepositories:
     rules: RuleRepository
     assignments: AssignmentRepository
     state: BotStateRepository
+    users: UserRepository
 
 
 type CommandUnitOfWork = Callable[[], AbstractContextManager[CommandRepositories]]
@@ -57,9 +61,13 @@ async def in_command_unit_of_work[T](
 
 
 def sql_command_unit_of_work(
-    database: Database, *, clock: Clock = system_clock
+    database: Database, *, owner: Owner = None, clock: Clock = system_clock
 ) -> CommandUnitOfWork:
-    """One ``Database.session()`` per block; commits on a clean exit, rolls back otherwise."""
+    """One ``Database.session()`` per block; commits on a clean exit, rolls back otherwise.
+
+    ``owner`` is the user whose bot received the command: the repositories see only their
+    tickers and rules (spec 025, D5).
+    """
     if not isinstance(database, Database):
         raise TypeError(f"database must be a Database, got {type(database).__name__}")
 
@@ -67,10 +75,11 @@ def sql_command_unit_of_work(
     def unit_of_work() -> Iterator[CommandRepositories]:
         with database.session() as session:
             yield CommandRepositories(
-                tickers=SqlTickerRepository(session, clock=clock),
-                rules=SqlRuleRepository(session, clock=clock),
-                assignments=SqlAssignmentRepository(session, clock=clock),
+                tickers=SqlTickerRepository(session, clock=clock, owner=owner),
+                rules=SqlRuleRepository(session, clock=clock, owner=owner),
+                assignments=SqlAssignmentRepository(session, clock=clock, owner=owner),
                 state=SqlBotStateRepository(session, clock=clock),
+                users=SqlUserRepository(session, clock=clock),
             )
 
     return unit_of_work

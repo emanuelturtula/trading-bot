@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, tzinfo
@@ -29,6 +30,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import SecretStr
 
 from trading_bot.config import Settings, is_trusted_proxy
 from trading_bot.dashboard.auth import (
@@ -69,6 +71,7 @@ from trading_bot.domain.signals import Signal, normalize_ticker
 from trading_bot.domain.timeframe import Timeframe
 from trading_bot.persistence.errors import (
     AssignedTimeframeError,
+    DuplicateBotTokenError,
     DuplicateRuleNameError,
     DuplicateUsernameError,
     TimeframeMismatchError,
@@ -76,9 +79,12 @@ from trading_bot.persistence.errors import (
 from trading_bot.persistence.records import StoredRule, StoredTicker, StoredUser
 from trading_bot.persistence.repositories.users import normalize_username
 from trading_bot.persistence.signal_records import SignalCursor, StoredSignal
+from trading_bot.telegram_bot.poller import PollError, PollErrorKind
+from trading_bot.telegram_bot.supervisor import LINK_LIFETIME as CHAT_LINK_LIFETIME
+from trading_bot.telegram_bot.supervisor import BotSupervisor, link_code_digest, new_link_code
 from trading_bot.watchlist import WatchOutcome, unwatch_ticker, watch_ticker
 
-__all__ = ["PREFIX", "TEMPLATES_DIR", "Dashboard", "install_dashboard"]
+__all__ = ["BOT_TOKEN_SHAPE", "PREFIX", "TEMPLATES_DIR", "Dashboard", "install_dashboard"]
 
 PREFIX: Final = "/dashboard"
 SESSION_COOKIE: Final = "tb_session"
@@ -87,6 +93,8 @@ MAX_FORM_BYTES: Final = 256 * 1024  # a rule document is capped at 64 KiB before
 MAX_PASSWORD_LENGTH: Final = 1024  # characters; bounds the work one form can ask scrypt for
 # How long an access link stays valid (spec 023, D3).
 LINK_LIFETIME: Final = timedelta(hours=72)
+# What @BotFather hands out: the bot id, a colon and the secret part (spec 025, D2).
+BOT_TOKEN_SHAPE: Final = re.compile(r"[0-9]{5,16}:[A-Za-z0-9_-]{30,64}")
 _FORM_TYPE: Final = "application/x-www-form-urlencoded"
 _LOGGER_NAME: Final = "trading_bot.dashboard"
 TEMPLATES_DIR: Final = Path(__file__).with_name("templates")
@@ -94,6 +102,10 @@ STATIC_DIR: Final = Path(__file__).with_name("static")
 RECENT_SIGNALS: Final = 20  # on a ticker's page
 CHART_SIGNALS: Final = 500  # more than any chart window holds
 SIGNALS_PAGE: Final = 50
+
+_NO_MASTER_KEY: Final = (
+    "Bots cannot be stored yet: the administrator has to set TB_MASTER_KEY on the server."
+)
 
 SECURITY_HEADERS: Final = {
     "Cache-Control": "no-store",
@@ -207,6 +219,8 @@ class Dashboard:
         # Per account as well (spec 023, D6): behind a proxy without ``TB_CLIENT_IP_HEADER``
         # every browser shares one address, and a botnet has many.
         self._account_throttle = LoginThrottle(limit=10)
+        # Bot tokens Telegram rejected, per user: each try is a call to Telegram (spec 025).
+        self._token_throttle = LoginThrottle(limit=5)
         # Verified against when the username is unknown, so a miss costs what a hit costs.
         self._decoy: PasswordHash | None = None
         self._templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
@@ -640,7 +654,10 @@ class Dashboard:
                 return f"{user.username} is enabled."
             return f"{user.username} is disabled and can no longer log in."
 
-        return _redirect("/users", flash=await self._work(request, work))
+        message = await self._work(request, work)
+        # A disabled user's bot stops; an enabled one's starts again (spec 025, D6).
+        await self._bots(request).reload()
+        return _redirect("/users", flash=message)
 
     async def _link_page(
         self, request: Request, nonce: str, user: StoredUser, token: str
@@ -662,9 +679,12 @@ class Dashboard:
 
     async def overview(self, request: Request, nonce: str) -> Response:
         next_runs = dict(_next_fire_times(request))
+        user = _user(request)
 
         def read(repositories: DashboardRepositories) -> dict[str, object]:
             state = repositories.state.load()
+            bot = repositories.telegram.bot(user.id)
+            chats = repositories.telegram.chats(user.id) if bot is not None else ()
             tickers = repositories.tickers.list_all()
             rules = repositories.rules.list_all()
             # What the engine evaluates: enabled tickers with at least one enabled rule.
@@ -677,6 +697,9 @@ class Dashboard:
             enabled_rules = [rule for rule in rules if rule.enabled]
             return {
                 "paused_since": state.paused_since,
+                "my_paused_since": repositories.users.paused_since(user.id),
+                "has_bot": bot is not None,
+                "chat_count": len(chats),
                 "tickers_total": len(tickers),
                 "tickers_enabled": sum(1 for ticker in tickers if ticker.enabled),
                 "rules_total": len(rules),
@@ -717,6 +740,174 @@ class Dashboard:
             return "The bot was not paused."
 
         return _redirect("/", flash=await self._work(request, work))
+
+    async def pause_mine(self, request: Request, nonce: str, form: Form) -> Response:
+        user_id = _user(request).id
+
+        def work(repositories: DashboardRepositories) -> str:
+            if repositories.users.paused_since(user_id) is not None:
+                return "Your signals were already paused."
+            repositories.users.pause(user_id)
+            return "Your signals are paused: your tickers are not evaluated until you resume."
+
+        return _redirect("/", flash=await self._work(request, work))
+
+    async def resume_mine(self, request: Request, nonce: str, form: Form) -> Response:
+        user_id = _user(request).id
+
+        def work(repositories: DashboardRepositories) -> str:
+            if repositories.users.resume(user_id):
+                return "Your signals are resumed. The next candle close will be evaluated."
+            return "Your signals were not paused."
+
+        return _redirect("/", flash=await self._work(request, work))
+
+    # --- Telegram (spec 025) ----------------------------------------------------------------
+
+    def _bots(self, request: Request) -> BotSupervisor:
+        bots: BotSupervisor = request.app.state.runtime.bots
+        return bots
+
+    async def telegram_page(self, request: Request, nonce: str) -> Response:
+        return await self._telegram(request, nonce)
+
+    async def _telegram(
+        self,
+        request: Request,
+        nonce: str,
+        *,
+        code: str | None = None,
+        expires: datetime | None = None,
+        error: str | None = None,
+        status_code: int = 200,
+    ) -> Response:
+        user_id = _user(request).id
+        bots = self._bots(request)
+
+        def read(repositories: DashboardRepositories) -> dict[str, object]:
+            bot = repositories.telegram.bot(user_id)
+            chats = repositories.telegram.chats(user_id)
+            return {
+                "bot": bot,
+                "chats": [
+                    {
+                        "chat_id": chat.chat_id,
+                        "title": chat.title,
+                        "masked": _masked_chat(chat.chat_id),
+                        "linked": chat.created_at,
+                    }
+                    for chat in chats
+                ],
+            }
+
+        context = await self._work(request, read)
+        context.update(
+            {
+                "enabled": bots.enabled,
+                "running": bots.running(user_id),
+                "code": code,
+                "expires": expires,
+                "minutes": int(CHAT_LINK_LIFETIME.total_seconds() // 60),
+                "error": error,
+            }
+        )
+        return self._render(request, "telegram.html", context, status_code=status_code, nonce=nonce)
+
+    async def save_bot(self, request: Request, nonce: str, form: Form) -> Response:
+        user_id = _user(request).id
+        bots = self._bots(request)
+        box = bots.box
+        if box is None:
+            return await self._telegram(request, nonce, error=_NO_MASTER_KEY, status_code=503)
+        throttle_key = f"user:{user_id}"
+        if self._token_throttle.blocked(throttle_key):
+            message = "Too many rejected tokens. Wait 15 minutes and try again."
+            return await self._telegram(request, nonce, error=message, status_code=429)
+        text = _field(form, "token").strip()
+        if not BOT_TOKEN_SHAPE.fullmatch(text):
+            message = (
+                "That does not look like a bot token. Copy the whole token @BotFather gave you:"
+                " digits, a colon, then letters and digits."
+            )
+            return await self._telegram(request, nonce, error=message, status_code=422)
+        token = SecretStr(text)
+        try:
+            username = await bots.validate(token)
+        except PollError as poll_error:
+            if poll_error.kind is PollErrorKind.REJECTED_TOKEN:
+                self._token_throttle.record_failure(throttle_key)
+                message = "Telegram rejected this token. Check it in @BotFather and try again."
+                return await self._telegram(request, nonce, error=message, status_code=422)
+            self._logger.warning("dashboard could not reach Telegram: %s", poll_error.kind.value)
+            message = "Telegram is not answering. Try again later."
+            return await self._telegram(request, nonce, error=message, status_code=503)
+        self._token_throttle.reset(throttle_key)
+        fingerprint = box.fingerprint(token)
+        ciphertext = box.encrypt(token)
+
+        def work(repositories: DashboardRepositories) -> bool:
+            before = repositories.telegram.bot(user_id)
+            repositories.telegram.save_bot(
+                user_id, ciphertext=ciphertext, fingerprint=fingerprint, username=username
+            )
+            return before is not None and before.token_fingerprint == fingerprint
+
+        try:
+            same = await self._work(request, work)
+        except DuplicateBotTokenError:
+            message = "That bot is already connected to another account. Create a bot of your own."
+            return await self._telegram(request, nonce, error=message, status_code=409)
+        await bots.reload()
+        self._logger.info("dashboard: user %d saved a telegram bot", user_id)
+        name = f"@{username}" if username else "Your bot"
+        if same:
+            return _redirect("/telegram", flash=f"{name} was already connected.")
+        return _redirect(
+            "/telegram", flash=f"{name} is connected. Now link a chat: get a code below."
+        )
+
+    async def delete_bot(self, request: Request, nonce: str, form: Form) -> Response:
+        user_id = _user(request).id
+        removed = await self._work(
+            request, lambda repositories: repositories.telegram.delete_bot(user_id)
+        )
+        if not removed:
+            raise _NotFoundError
+        await self._bots(request).reload()
+        self._logger.info("dashboard: user %d removed their telegram bot", user_id)
+        return _redirect(
+            "/telegram", flash="Bot removed. Your signals are only logged until you connect one."
+        )
+
+    async def new_chat_code(self, request: Request, nonce: str, form: Form) -> Response:
+        user_id = _user(request).id
+        code = new_link_code()
+        digest = link_code_digest(code)
+        expires = await self._work(
+            request,
+            lambda repositories: repositories.telegram.issue_link(
+                user_id, digest, CHAT_LINK_LIFETIME
+            ),
+        )
+        if expires is None:
+            return _redirect("/telegram", flash="Connect a bot first.", error=True)
+        return await self._telegram(request, nonce, code=code, expires=expires)
+
+    async def unlink_chat(self, request: Request, nonce: str, form: Form) -> Response:
+        user_id = _user(request).id
+        try:
+            chat_id = int(_field(form, "chat_id"))
+        except ValueError:
+            raise _NotFoundError from None
+        removed = await self._work(
+            request, lambda repositories: repositories.telegram.unlink(user_id, chat_id)
+        )
+        if not removed:
+            raise _NotFoundError
+        await self._bots(request).refresh_chats(user_id)
+        return _redirect(
+            "/telegram", flash="Chat unlinked: it no longer gets your signals or sends commands."
+        )
 
     # --- tickers ----------------------------------------------------------------------------
 
@@ -1141,6 +1332,7 @@ def install_dashboard(app: FastAPI, settings: Settings) -> None:
     pages: list[tuple[str, Callable[[Request, str], Awaitable[Response]]]] = [
         ("/", dashboard.overview),
         ("/account", dashboard.account_page),
+        ("/telegram", dashboard.telegram_page),
         ("/tickers", dashboard.tickers_page),
         ("/tickers/{ticker_id:int}", dashboard.ticker_page),
         ("/tickers/{ticker_id:int}/chart.json", dashboard.chart_data),
@@ -1154,6 +1346,12 @@ def install_dashboard(app: FastAPI, settings: Settings) -> None:
     actions: list[tuple[str, Callable[[Request, str, Form], Awaitable[Response]]]] = [
         ("/logout", dashboard.logout),
         ("/account/password", dashboard.change_password),
+        ("/my/pause", dashboard.pause_mine),
+        ("/my/resume", dashboard.resume_mine),
+        ("/telegram/token", dashboard.save_bot),
+        ("/telegram/delete", dashboard.delete_bot),
+        ("/telegram/code", dashboard.new_chat_code),
+        ("/telegram/unlink", dashboard.unlink_chat),
         ("/tickers", dashboard.add_ticker),
         ("/tickers/{ticker_id:int}/rules", dashboard.set_ticker_rules),
         ("/tickers/{ticker_id:int}/enable", dashboard.enable_ticker),
@@ -1312,10 +1510,15 @@ def _cursor(text: str) -> SignalCursor | None:
 
 def _section(path: str) -> str:
     """The navigation entry a page belongs to, for ``aria-current`` (#12)."""
-    for section in ("tickers", "rules", "signals", "users", "account"):
+    for section in ("tickers", "rules", "signals", "telegram", "users", "account"):
         if path.startswith(f"{PREFIX}/{section}"):
             return section
     return "overview" if path == PREFIX + "/" else ""
+
+
+def _masked_chat(chat_id: int) -> str:
+    """The last digits of a chat id: enough to tell two chats apart, not to reuse it."""
+    return "…" + str(abs(chat_id))[-4:]
 
 
 def _next_fire_times(request: Request) -> Sequence[tuple[Timeframe, datetime | None]]:

@@ -66,6 +66,10 @@ class Settings(BaseSettings):
     # The first administrator's password hash, used only while there is no user (spec 023, D2).
     dashboard_password_hash: SecretStr | None = None
     session_secret: SecretStr | None = None
+    # Encrypts the Telegram bot tokens users store from the dashboard (spec 025, D2). Generate
+    # it with ``python -m trading_bot.secretbox``. Without it no user bot runs, and the bot of
+    # ``TB_TELEGRAM_BOT_TOKEN`` keeps serving the first administrator as before.
+    master_key: SecretStr | None = None
     # The username that first administrator gets (spec 023, D2).
     admin_username: str = "admin"
     # A request header holding the browser's address, set by a proxy in front of the app, such
@@ -141,7 +145,12 @@ class Settings(BaseSettings):
 
     def secret_values(self) -> list[str]:
         """Return the configured secret values, used to redact them from logs."""
-        secrets = (self.telegram_bot_token, self.dashboard_password_hash, self.session_secret)
+        secrets = (
+            self.telegram_bot_token,
+            self.dashboard_password_hash,
+            self.session_secret,
+            self.master_key,
+        )
         return [value.get_secret_value() for value in secrets if value is not None]
 
 

@@ -225,20 +225,26 @@ def test_models_re_exports_the_single_declarative_base() -> None:
         "BotStateRow",
         "RuleRow",
         "SignalRow",
+        "TelegramBotRow",
+        "TelegramChatRow",
         "TickerRow",
         "TickerRuleRow",
+        "UserPauseRow",
         "UserRow",
     ]
 
 
 def test_the_metadata_holds_the_configuration_signal_and_state_tables() -> None:
     """Signals and ``bot_state`` joined the configuration tables with #13 (spec 014, Design 3),
-    and ``users`` with spec 023."""
+    ``users`` with spec 023 and the Telegram tables with spec 025."""
     assert sorted(Base.metadata.tables) == [
         "bot_state",
         "rules",
         "signals",
+        "telegram_bots",
+        "telegram_chats",
         "ticker_rules",
         "tickers",
+        "user_pauses",
         "users",
     ]

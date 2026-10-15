@@ -14,7 +14,14 @@ from datetime import datetime
 from trading_bot.domain.rules.schema import Rule
 from trading_bot.domain.timeframe import Timeframe
 
-__all__ = ["Assignment", "StoredRule", "StoredTicker", "StoredUser"]
+__all__ = [
+    "Assignment",
+    "LinkedChat",
+    "StoredBot",
+    "StoredRule",
+    "StoredTicker",
+    "StoredUser",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -72,3 +79,26 @@ class StoredUser:
     @property
     def can_log_in(self) -> bool:
         return self.active and self.password_hash is not None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StoredBot:
+    """A user's Telegram bot (spec 025). ``repr`` leaves the encrypted token out."""
+
+    user_id: int
+    token_ciphertext: str = field(repr=False)
+    token_fingerprint: str = field(repr=False)
+    bot_username: str | None
+    link_expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LinkedChat:
+    """A chat linked to a user's bot. ``repr`` leaves the chat id out (it is never logged)."""
+
+    user_id: int
+    chat_id: int = field(repr=False)
+    title: str | None
+    created_at: datetime

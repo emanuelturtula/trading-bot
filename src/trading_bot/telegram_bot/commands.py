@@ -55,8 +55,9 @@ HELP_TEXT: Final = (
     "/list - the watched symbols\n"
     "/rules - the stored rules\n"
     "/status - what the bot is doing\n"
-    "/pause - stop evaluating and notifying\n"
-    "/resume - start again\n"
+    "/pause - stop your signals\n"
+    "/resume - start them again\n"
+    "/link CODE - link this chat (the code comes from the dashboard)\n"
     "/help - this list\n"
     "\n"
     "Signals only: the bot never places orders."
@@ -87,11 +88,12 @@ def parse(text: str, *, bot_username: str | None = None) -> ParsedCommand | None
 
 
 class CommandHandler:
-    """Handles the commands of authorized chats. One instance serves the whole process."""
+    """Handles the commands of one user's authorized chats (spec 025, D5)."""
 
     def __init__(
         self,
         *,
+        owner_id: int,
         unit_of_work: CommandUnitOfWork,
         provider: MarketDataProvider,
         next_fire_times: NextFireTimes,
@@ -100,6 +102,7 @@ class CommandHandler:
         version: str,
         display_tz: tzinfo,
     ) -> None:
+        self._owner_id = owner_id
         self._unit_of_work = unit_of_work
         self._provider = provider
         self._next_fire_times = next_fire_times
@@ -141,7 +144,9 @@ class CommandHandler:
         if name == "pause":
             return await in_command_unit_of_work(self._unit_of_work, self._pause)
         if name == "resume":
-            return await in_command_unit_of_work(self._unit_of_work, _resume)
+            return await in_command_unit_of_work(self._unit_of_work, self._resume)
+        if name == "link":
+            return "Send /link with the code the dashboard shows on its Telegram page."
         return f"Unknown command /{_escape(name)}. Send /help to see the commands."
 
     # --- /add and /remove ---------------------------------------------------------------------
@@ -188,9 +193,12 @@ class CommandHandler:
     async def _status(self) -> str:
         def read(repositories: CommandRepositories) -> tuple[str, list[str]]:
             state = repositories.state.load()
+            mine = repositories.users.paused_since(self._owner_id)
             enabled = len(repositories.tickers.list_enabled())
             if state.paused_since is not None:
-                head = f"Paused since {self._local(state.paused_since)}"
+                head = f"Paused for everyone since {self._local(state.paused_since)}"
+            elif mine is not None:
+                head = f"Your signals are paused since {self._local(mine)}"
             else:
                 head = "Running"
             lines = [f"{head} · {enabled} enabled ticker{'s' if enabled != 1 else ''}"]
@@ -209,23 +217,22 @@ class CommandHandler:
         return "\n".join([header, *lines])
 
     def _pause(self, repositories: CommandRepositories) -> str:
-        before = repositories.state.load().paused_since
-        since = repositories.state.pause()
+        before = repositories.users.paused_since(self._owner_id)
+        since = repositories.users.pause(self._owner_id)
         if before is not None:
             return f"Already paused since {self._local(since)}."
-        return "Paused. No candle is evaluated and no signal is sent until /resume."
+        return "Paused. Your tickers are not evaluated and no signal is sent until /resume."
+
+    def _resume(self, repositories: CommandRepositories) -> str:
+        if repositories.users.resume(self._owner_id):
+            return "Resumed. The next candle close will be evaluated."
+        return "Your signals were not paused."
 
     def _local(self, instant: datetime) -> str:
         return instant.astimezone(self._display_tz).strftime("%Y-%m-%d %H:%M %Z")
 
     def _reply(self, body: str) -> str:
         return body if self._production else f"{BETA_PREFIX} {body}"
-
-
-def _resume(repositories: CommandRepositories) -> str:
-    if repositories.state.resume():
-        return "Resumed. The next candle close will be evaluated."
-    return "The bot was not paused."
 
 
 def _add_ticker(

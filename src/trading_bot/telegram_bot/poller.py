@@ -2,8 +2,10 @@
 
 ``TelegramPoller`` long-polls an ``UpdateSource``, drops every message from a chat outside the
 allowlist before anything else (D5), hands the text of authorized ones to the
-``CommandHandler`` and sends its reply. ``BotUpdateSource`` is the only code of the package that
-imports python-telegram-bot; it maps the library's errors onto ``PollError``.
+``CommandHandler`` and sends its reply. The one exception is ``/link CODE`` (spec 025, D4): it
+goes to the ``Linker`` from any chat, since that is how a chat joins the allowlist.
+``BotUpdateSource`` is the only code of the package that imports python-telegram-bot; it maps
+the library's errors onto ``PollError``.
 
 **It never blocks or fails startup** (AC12): ``start`` only creates a task. Telegram being
 unreachable, a rejected token or a ``409 Conflict`` (another process polling with the same
@@ -40,6 +42,7 @@ __all__ = [
     "LONG_POLL_SECONDS",
     "BotUpdateSource",
     "IncomingMessage",
+    "Linker",
     "MessageHandler",
     "PollError",
     "PollErrorKind",
@@ -65,6 +68,7 @@ class IncomingMessage:
     update_id: int
     chat_id: int | None
     text: str | None
+    chat_title: str | None = None  # a group's title or a person's name, shown in the dashboard
 
 
 class PollErrorKind(StrEnum):
@@ -94,6 +98,15 @@ class UpdateSource(Protocol):
 
 class MessageHandler(Protocol):
     async def handle(self, text: str, *, bot_username: str | None = None) -> str | None: ...
+
+
+class Linker(Protocol):
+    """Links ``chat_id`` with a one-time ``code`` and returns the reply (spec 025, D4)."""
+
+    async def __call__(self, chat_id: int, code: str, title: str | None) -> str: ...
+
+
+UsernameSink = Callable[[str | None], Awaitable[None]]
 
 
 class BotUpdateSource:
@@ -139,6 +152,7 @@ class BotUpdateSource:
                     update_id=update.update_id,
                     chat_id=message.chat.id if message is not None else None,
                     text=message.text if message is not None else None,
+                    chat_title=message.chat.effective_name if message is not None else None,
                 )
             )
         return messages
@@ -178,7 +192,11 @@ async def _mapped[T](call: Awaitable[T]) -> T:
 
 
 class TelegramPoller:
-    """Polls one source for one process and answers the chats of the allowlist."""
+    """Polls one bot and answers the chats of its allowlist.
+
+    The allowlist may start empty and change while polling (``set_allowed``): a chat linked with
+    ``/link`` is answered from its next message on.
+    """
 
     def __init__(
         self,
@@ -186,14 +204,20 @@ class TelegramPoller:
         source: UpdateSource,
         handler: MessageHandler,
         allowed_chat_ids: Collection[int],
+        linker: Linker | None = None,
+        on_username: UsernameSink | None = None,
+        label: str = "telegram",
         sleep: Sleep = asyncio.sleep,
     ) -> None:
         allowed = frozenset(allowed_chat_ids)
-        if not allowed:
+        if not allowed and linker is None:
             raise ValueError("at least one allowed chat id is required")
         self._source = source
         self._handler = handler
         self._allowed = allowed
+        self._linker = linker
+        self._on_username = on_username
+        self._label = label  # names the bot in the logs: never a token, a chat or a username
         self._sleep = sleep
         self._offset: int | None = None
         self._confirmed: int | None = None
@@ -212,11 +236,22 @@ class TelegramPoller:
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
+    @property
+    def username(self) -> str | None:
+        """The bot's username, once Telegram has given it."""
+        return self._username
+
+    def set_allowed(self, chat_ids: Collection[int]) -> None:
+        """Replace the allowlist; the next message is checked against the new one."""
+        self._allowed = frozenset(chat_ids)
+
     def start(self) -> None:
         """Start polling in a task of the running loop. Never performs I/O itself."""
         if self._task is not None:
             raise RuntimeError("the poller is already started")
-        self._task = asyncio.get_running_loop().create_task(self._run(), name="telegram-poller")
+        self._task = asyncio.get_running_loop().create_task(
+            self._run(), name=f"telegram-poller-{self._label}"
+        )
 
     async def aclose(self) -> None:
         """Stop polling, let a command being handled finish, then confirm the handled updates."""
@@ -265,6 +300,8 @@ class TelegramPoller:
     async def _poll_once(self) -> None:
         if self._username is None:
             self._username = await self._source.get_username()
+            if self._on_username is not None:
+                await self._on_username(self._username)
         self._waiting = True
         try:
             messages = await self._source.get_updates(self._offset, LONG_POLL_SECONDS)
@@ -280,18 +317,34 @@ class TelegramPoller:
             await self._dispatch(message)
 
     async def _dispatch(self, message: IncomingMessage) -> None:
-        if message.chat_id is None or message.chat_id not in self._allowed:
-            self._logger.info("ignored a message from a chat outside the allowlist")  # AC9
+        code = self._link_code(message.text)
+        if message.chat_id is not None and code is not None and self._linker is not None:
+            reply: str | None = await self._linker(message.chat_id, code, message.chat_title)
+        elif message.chat_id is None or message.chat_id not in self._allowed:
+            self._logger.info("%s ignored a message from a chat outside the allowlist", self._label)
             return
-        if message.text is None:
+        elif message.text is None:
             return
-        reply = await self._handler.handle(message.text, bot_username=self._username)
-        if reply is None:
+        else:
+            reply = await self._handler.handle(message.text, bot_username=self._username)
+        if reply is None or message.chat_id is None:
             return
         try:
             await self._source.send_message(message.chat_id, reply)
         except PollError as error:
             self._logger.warning("telegram reply failed: %s", error.kind.value)
+
+    def _link_code(self, text: str | None) -> str | None:
+        """The code of ``/link CODE`` (or ``/link@this_bot CODE``), else ``None``."""
+        words = (text or "").split()
+        if len(words) != 2:
+            return None
+        command, _, target = words[0].partition("@")
+        if command.lower() != "/link":
+            return None
+        if target and self._username is not None and target.lower() != self._username.lower():
+            return None
+        return words[1]
 
     async def _confirm(self) -> None:
         """One short call that confirms the updates handled since the last poll (AC13)."""
@@ -320,15 +373,16 @@ class TelegramPoller:
             return
         if error.kind is PollErrorKind.CONFLICT:
             self._logger.warning(
-                "another process is polling with this bot token (409 Conflict); "
-                "retrying every %.0fs. Beta and prod need different tokens.",
+                "%s: another process is polling with this bot token (409 Conflict); "
+                "retrying every %.0fs",
+                self._label,
                 wait,
             )
         elif error.kind is PollErrorKind.REJECTED_TOKEN:
             self._logger.error(
-                "telegram rejected the bot token; check TB_TELEGRAM_BOT_TOKEN. "
-                "Retrying every %.0fs",
+                "%s: Telegram rejected the bot token; replace it. Retrying every %.0fs",
+                self._label,
                 wait,
             )
         else:
-            self._logger.warning("telegram polling failed (%s); retrying", error.kind.value)
+            self._logger.warning("%s polling failed (%s); retrying", self._label, error.kind.value)

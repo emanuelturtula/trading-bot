@@ -22,7 +22,14 @@ from typing import Protocol
 from trading_bot.domain.rules.schema import Rule
 from trading_bot.domain.signals import Signal
 from trading_bot.domain.timeframe import Timeframe
-from trading_bot.persistence.records import Assignment, StoredRule, StoredTicker, StoredUser
+from trading_bot.persistence.records import (
+    Assignment,
+    LinkedChat,
+    StoredBot,
+    StoredRule,
+    StoredTicker,
+    StoredUser,
+)
 from trading_bot.persistence.signal_records import (
     DEFAULT_PAGE_SIZE,
     RecordOutcome,
@@ -37,6 +44,7 @@ __all__ = [
     "BotStateRepository",
     "RuleRepository",
     "SignalRepository",
+    "TelegramRepository",
     "TickerRepository",
     "UserRepository",
 ]
@@ -213,3 +221,35 @@ class UserRepository(Protocol):
     def rename(self, user_id: int, username: str) -> StoredUser: ...
 
     def set_active(self, user_id: int, active: bool) -> StoredUser: ...
+
+    def paused_since(self, user_id: int) -> datetime | None: ...
+
+    def pause(self, user_id: int) -> datetime: ...
+
+    def resume(self, user_id: int) -> bool: ...
+
+
+class TelegramRepository(Protocol):
+    """Each user's Telegram bot and linked chats (spec 025). It only moves ciphertext."""
+
+    def bot(self, user_id: int) -> StoredBot | None: ...
+
+    def runnable(self) -> tuple[StoredBot, ...]: ...
+
+    def save_bot(
+        self, user_id: int, *, ciphertext: str, fingerprint: str, username: str | None
+    ) -> StoredBot: ...
+
+    def set_username(self, user_id: int, username: str | None) -> None: ...
+
+    def delete_bot(self, user_id: int) -> bool: ...
+
+    def issue_link(self, user_id: int, digest: str, lifetime: timedelta) -> datetime | None: ...
+
+    def redeem_link(self, user_id: int, digest: str, chat_id: int, title: str | None) -> bool: ...
+
+    def chats(self, user_id: int) -> tuple[LinkedChat, ...]: ...
+
+    def link_chat(self, user_id: int, chat_id: int, title: str | None = None) -> None: ...
+
+    def unlink(self, user_id: int, chat_id: int) -> bool: ...
